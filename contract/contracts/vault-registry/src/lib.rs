@@ -617,6 +617,8 @@ pub enum DataKey {
     AttestationHash(String),
     /// Ledger sequence at which the pending admin nomination expires.
     PendingAdminExpiry,
+    TagCount(String),
+    TopTags,
     /// Number of `creator`'s resources currently in the `Listed` state. Kept
     /// in step with `ListedCount` on every listed-state transition and moved
     /// between owners on transfer, so it is the per-creator view of
