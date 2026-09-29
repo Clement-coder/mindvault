@@ -37,6 +37,11 @@ const server = createMindVaultServer({
 });
 ```
 
+`createProgressEmitter` may return the pending send. The factory scopes it to
+the call and waits for every send it started before returning the result, and
+drops anything emitted later, so no progress notification follows the result
+(see [mcp-progress-notifications.md](mcp-progress-notifications.md#delivery-order)).
+
 Construction has **no side effects**. The returned server is inert until
 something calls `connect`, which is what makes it usable from a test or an
 embedding host without a guard to work around.

@@ -37,6 +37,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 import { attachCorrelationId, correlationSuffix, withNewCorrelationId } from "./correlation.js";
+import { scopeProgressToRequest } from "./progress.js";
 
 /** Anything the MCP SDK will accept in `server.connect`. */
 export interface McpTransport {
@@ -68,8 +69,15 @@ export interface ResolvedPrompt {
   messages: unknown[];
 }
 
-/** Progress callback handed to a tool that reports incremental progress. */
-export type ProgressEmitter = (progress: number, total?: number, message?: string) => void;
+/**
+ * Progress callback handed to a tool that reports incremental progress. It may
+ * return the pending send; the factory waits for it before sending the result.
+ */
+export type ProgressEmitter = (
+  progress: number,
+  total?: number,
+  message?: string,
+) => void | Promise<void>;
 
 export interface ServerBehaviour {
   /** Tools to advertise. Called per ListTools so a dynamic surface is possible. */
@@ -139,14 +147,16 @@ export function createMindVaultServer(
     const { name, arguments: args = {} } = request.params;
 
     const token = request.params?._meta?.progressToken;
-    const onProgress =
+    // Settled before the result is returned, so a progress notification is
+    // never sent after it (#841).
+    const progress =
       token != null && behaviour.createProgressEmitter
-        ? behaviour.createProgressEmitter(token, extra?.sendNotification)
+        ? scopeProgressToRequest(behaviour.createProgressEmitter(token, extra?.sendNotification))
         : undefined;
 
     return withNewCorrelationId(async (correlationId) => {
       try {
-        const text = await behaviour.dispatchTool(name, args, onProgress);
+        const text = await behaviour.dispatchTool(name, args, progress?.emit);
         const structured = behaviour.structuredResult?.(name, text);
         return attachCorrelationId(
           {
@@ -170,6 +180,8 @@ export function createMindVaultServer(
           },
           correlationId,
         );
+      } finally {
+        await progress?.settle();
       }
     });
   });

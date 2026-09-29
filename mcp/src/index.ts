@@ -24,7 +24,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { listCatalogResources, readCatalogResource } from "./catalogResources.js";
 import { PROMPT_DEFINITIONS, getPrompt } from "./prompts.js";
-import { createProgressEmitter } from "./progress.js";
+import { createProgressEmitter, scopeProgressToRequest } from "./progress.js";
 import { truncateResponse } from "./truncation.js";
 import { applyPreviewLimits, serializePreview } from "./previewLimits.js";
 import { createEd25519Signer } from "@x402/stellar";
@@ -4067,13 +4067,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
   const { name, arguments: args = {} } = request.params;
   const progressToken = request.params._meta?.progressToken;
-  const onProgress =
+  // Settled in `finally`, before the result is returned, so every progress
+  // notification for this call goes out ahead of it and none after (#841).
+  const progress =
     progressToken != null
-      ? createProgressEmitter({ token: progressToken, send: extra.sendNotification })
+      ? scopeProgressToRequest(
+          createProgressEmitter({ token: progressToken, send: extra.sendNotification }),
+        )
       : undefined;
   try {
     const result = await measureTool(metrics, name, () =>
-      dispatchToolOutcome(name, args, onProgress),
+      dispatchToolOutcome(name, args, progress?.emit),
     );
     // Opt-in structured telemetry stream (#891): one OTLP line to stderr per
     // tool call when MINDVAULT_METRICS_EXPORT_CONSOLE is set, so a log
@@ -4089,6 +4093,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       isError: true,
       ...(mapped ? { structuredContent: { troubleshooting: troubleshootingHint(mapped) } } : {}),
     };
+  } finally {
+    await progress?.settle();
   }
 });
 

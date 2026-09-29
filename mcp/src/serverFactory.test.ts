@@ -25,6 +25,7 @@ import {
   type McpTransport,
   type ServerBehaviour,
 } from "./serverFactory.js";
+import { createProgressEmitter, type SendNotification } from "./progress.js";
 
 const TOOL = {
   name: "mindvault_echo",
@@ -213,6 +214,98 @@ describe("errors", () => {
     const result: any = await client.callTool({ name: "mindvault_echo", arguments: {} });
 
     expect(result.content[0].text).toContain("a string");
+  });
+});
+
+describe("progress notifications (#841)", () => {
+  const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  /** Every message the server writes, in order: `progress:<message>` or `result`. */
+  function recordServerOutput(serverTransport: InMemoryTransport): string[] {
+    const written: string[] = [];
+    const send = serverTransport.send.bind(serverTransport);
+    serverTransport.send = async (message: any, options?: any) => {
+      if (message.method === "notifications/progress") {
+        written.push(`progress:${message.params.message}`);
+      } else if ("result" in message) {
+        written.push("result");
+      }
+      return send(message, options);
+    };
+    return written;
+  }
+
+  /**
+   * The production emitter over a transport whose writes complete a moment
+   * later, as a Streamable HTTP event store or a busy socket does.
+   */
+  const slowProgressEmitter = (token: string | number, send: (n: unknown) => unknown) =>
+    createProgressEmitter({
+      token,
+      send: (async (notification) => {
+        await pause(20);
+        await send(notification);
+      }) as SendNotification,
+    });
+
+  async function callWithProgress(dispatchTool: ServerBehaviour["dispatchTool"]) {
+    const { client, serverTransport } = await connectClient(
+      createMindVaultServer(
+        behaviour({ dispatchTool, createProgressEmitter: slowProgressEmitter }),
+      ),
+    );
+    const written = recordServerOutput(serverTransport);
+    const clientErrors: Error[] = [];
+    client.onerror = (err) => clientErrors.push(err);
+    const received: string[] = [];
+
+    const result: any = await client.callTool(
+      { name: "mindvault_echo", arguments: {} },
+      undefined,
+      { onprogress: (p) => received.push(String(p.message)) },
+    );
+    // Give anything scheduled after the result time to reach the wire.
+    await pause(60);
+
+    return { result, written, received, clientErrors };
+  }
+
+  it("emits no progress notification after the tool result is returned", async () => {
+    const { result, written, received, clientErrors } = await callWithProgress(
+      async (_name, _args, onProgress) => {
+        // Neither update is awaited: one is still in flight when the tool
+        // returns, the other is scheduled to fire after it has.
+        void onProgress?.(1, 2, "working");
+        setTimeout(() => void onProgress?.(2, 2, "late"), 0);
+        return "done";
+      },
+    );
+
+    expect(result.content).toEqual([{ type: "text", text: "done" }]);
+    expect(written).toEqual(["progress:working", "result"]);
+    expect(received).toEqual(["working"]);
+    expect(clientErrors).toEqual([]);
+  });
+
+  it("delivers awaited progress ahead of the result", async () => {
+    const { written, received } = await callWithProgress(async (_name, _args, onProgress) => {
+      await onProgress?.(1, 2, "first");
+      await onProgress?.(2, 2, "second");
+      return "done";
+    });
+
+    expect(written).toEqual(["progress:first", "progress:second", "result"]);
+    expect(received).toEqual(["first", "second"]);
+  });
+
+  it("settles pending progress before returning a tool error", async () => {
+    const { result, written } = await callWithProgress(async (_name, _args, onProgress) => {
+      void onProgress?.(1, 1, "about to fail");
+      throw new Error("tool exploded");
+    });
+
+    expect(result.isError).toBe(true);
+    expect(written).toEqual(["progress:about to fail", "result"]);
   });
 });
 
