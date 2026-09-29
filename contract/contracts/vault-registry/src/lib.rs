@@ -82,6 +82,17 @@ pub const MAX_TX_HASH_LEN: u32 = 128;
 /// Maximum byte length of a caller-assigned payment `receipt_id`.
 pub const MAX_RECEIPT_ID_LEN: u32 = 64;
 
+/// Prefix of the canonical settlement memo. A payment transaction settling a
+/// purchase of resource `id` should carry the `MEMO_TEXT` `mv:<id>`, which
+/// `record_payment_with_memo` checks so each receipt proves which resource
+/// the on-chain payment was for. `MAX_RESOURCE_ID_LEN` (24) plus this prefix
+/// fits within Stellar's 28-byte `MEMO_TEXT` limit.
+pub const PAYMENT_MEMO_PREFIX: &str = "mv:";
+
+/// Upper bound, in ledgers, on the admin-configurable flag resolution window
+/// (`set_flag_resolution_window`). Roughly 30 days at ~5s per ledger.
+pub const MAX_FLAG_RESOLUTION_WINDOW: u32 = 535_680;
+
 /// Canonical list of every exported method this contract exposes, paired with
 /// the required authorisation rule (who must sign the call). This is the
 /// single source of truth for the API surface: `contract/README.md`'s Methods
@@ -147,6 +158,7 @@ pub const METHOD_SCHEMA: &[(&str, &str)] = &[
     // ── Registry introspection ────────────────────────────────────────────
     ("registry_info", "—"),
     ("contract_version", "—"),
+    ("resource_schema_version", "—"),
     ("initialize_network", "—"),
     ("network_id", "—"),
     // ── Admin role ────────────────────────────────────────────────────────
@@ -164,6 +176,8 @@ pub const METHOD_SCHEMA: &[(&str, &str)] = &[
     ("pause_until", "—"),
     // ── Settler role ──────────────────────────────────────────────────────
     ("add_settler", "admin"),
+    ("record_payment_with_memo", "settler + payer"),
+    ("get_payment_memo", "—"),
     ("remove_settler", "admin"),
     ("is_settler", "—"),
     // ── Moderator role / dispute flags ───────────────────────────────────
@@ -174,6 +188,11 @@ pub const METHOD_SCHEMA: &[(&str, &str)] = &[
     ("unflag_resource", "moderator"),
     ("set_flag_reason_hash", "moderator"),
     ("get_flag_reason_hash", "—"),
+    ("set_flag_resolution_window", "admin"),
+    ("flag_resolution_window", "—"),
+    ("get_flag_deadline", "—"),
+    ("is_flag_overdue", "—"),
+    ("force_resolve_flag", "admin"),
     // ── Terms hashes ──────────────────────────────────────────────────────
     ("set_terms_hash", "creator"),
     ("get_terms_hash", "—"),
@@ -257,6 +276,9 @@ pub const ERROR_SCHEMA: &[(u32, &str, &str)] = &[
     (48, "DuplicateTxHash", "A payment receipt is already stored for the supplied settlement transaction hash (`tx_hash`)."),
     (49, "FeeConfigNotSet", "`set_fee_recipient` or `set_fee_destination` was called before any fee config was set via `set_fee_config`."),
     (50, "AdminNominationExpired", "The pending admin nomination is missing or has expired."),
+    (51, "InvalidPaymentMemo", "`memo` in `record_payment_with_memo` is not the canonical `mv:<resource_id>` memo for the paid resource."),
+    (52, "FlagNotOverdue", "`force_resolve_flag` was called on a flag whose resolution deadline has not passed (or that has no deadline)."),
+    (53, "InvalidFlagResolutionWindow", "`set_flag_resolution_window` was called with a window above `MAX_FLAG_RESOLUTION_WINDOW`."),
 ];
 
 /// Canonical list of every event topic this contract emits, paired with a
@@ -327,6 +349,9 @@ pub const EVENT_SCHEMA: &[(&str, &str)] = &[
     ("flag", "FlagEvent { id, moderator, reason }"),
     ("unflag", "resource id"),
     ("flagrsn", "(moderator: Address, reason_hash: String)"),
+    ("flagwin", "window_ledgers: u32"),
+    ("flagfrc", "(admin: Address, deadline: u32)"),
+    ("nomemo", "(receipt_id: String, tx_hash: String)"),
     ("retagidx", "new_count: u32"),
     ("reactive", "resource id"),
     (
@@ -628,6 +653,14 @@ pub enum DataKey {
     /// mutated; `None` for resources registered through the other entry points.
     MemoHash(String),
     FeeDestination,
+    /// Canonical settlement memo (`mv:<resource_id>`) attached to a payment
+    /// receipt by `record_payment_with_memo`, keyed by `receipt_id`.
+    PaymentMemo(String),
+    /// Admin-configured number of ledgers a moderator has to resolve a flag
+    /// before it becomes overdue. `0`/absent disables deadlines.
+    FlagResolutionWindow,
+    /// Ledger sequence after which the active flag on a resource is overdue.
+    FlagDeadline(String),
 }
 
 /// Event data emitted when a resource's metadata pointer is updated.
@@ -884,6 +917,13 @@ pub enum Error {
     FeeConfigNotSet = 49,
     /// The pending admin nomination is missing or has expired.
     AdminNominationExpired = 50,
+    /// `memo` supplied to `record_payment_with_memo` is not the canonical
+    /// `mv:<resource_id>` memo for the paid resource.
+    InvalidPaymentMemo = 51,
+    /// `force_resolve_flag` called before the flag's resolution deadline.
+    FlagNotOverdue = 52,
+    /// Flag resolution window exceeds `MAX_FLAG_RESOLUTION_WINDOW`.
+    InvalidFlagResolutionWindow = 53,
 }
 
 #[contract]
@@ -2125,6 +2165,14 @@ impl VaultRegistry {
         }
     }
 
+    /// Return `RESOURCE_SCHEMA_VERSION` as a bare `u32`, so clients can do
+    /// feature detection (e.g. "does `Resource` carry `metadata_frozen_at`?")
+    /// with a single integer comparison instead of decoding
+    /// `contract_version` or `registry_info`. Always succeeds.
+    pub fn resource_schema_version(_env: Env) -> u32 {
+        RESOURCE_SCHEMA_VERSION
+    }
+
     /// Current contract admin.
     pub fn admin(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::Admin)
@@ -2640,6 +2688,11 @@ impl VaultRegistry {
     /// Emits a `payment` event whose data is the full [`PaymentReceipt`] so
     /// off-chain indexers can index the receipt without reading contract
     /// storage.
+    ///
+    /// Provenance: this entry point cannot prove which resource the settlement
+    /// transaction paid for, so it also emits a `nomemo` warning event. Prefer
+    /// `record_payment_with_memo`, which checks the canonical `mv:<resource_id>`
+    /// memo (see `PAYMENT_MEMO_PREFIX`).
     pub fn record_payment(
         env: Env,
         settler: Address,
@@ -2649,6 +2702,84 @@ impl VaultRegistry {
         amount: i128,
         tx_hash: String,
     ) -> Result<(), Error> {
+        Self::record_payment_inner(
+            &env,
+            settler,
+            receipt_id.clone(),
+            resource_id,
+            payer,
+            amount,
+            tx_hash.clone(),
+        )?;
+        env.events()
+            .publish((symbol_short!("nomemo"), receipt_id.clone()), (receipt_id, tx_hash));
+        Ok(())
+    }
+
+    /// Same as `record_payment`, but additionally requires the settlement
+    /// transaction's `MEMO_TEXT` (`memo`) to be the canonical provenance memo
+    /// `mv:<resource_id>` for the paid resource; anything else errors
+    /// `InvalidPaymentMemo`. The memo is stored with the receipt and readable
+    /// via `get_payment_memo`. The settler is responsible for passing the memo
+    /// exactly as it appears on the Stellar transaction identified by `tx_hash`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_payment_with_memo(
+        env: Env,
+        settler: Address,
+        receipt_id: String,
+        resource_id: String,
+        payer: Address,
+        amount: i128,
+        tx_hash: String,
+        memo: String,
+    ) -> Result<(), Error> {
+        Self::validate_resource_id(&resource_id)?;
+        if !Self::is_canonical_payment_memo(&memo, &resource_id) {
+            return Err(Error::InvalidPaymentMemo);
+        }
+        Self::record_payment_inner(
+            &env,
+            settler,
+            receipt_id.clone(),
+            resource_id,
+            payer,
+            amount,
+            tx_hash,
+        )?;
+        let key = DataKey::PaymentMemo(receipt_id);
+        env.storage().persistent().set(&key, &memo);
+        Self::bump_persistent(&env, &key);
+        Ok(())
+    }
+
+    /// Canonical settlement memo stored for `receipt_id` by
+    /// `record_payment_with_memo`, or `None` if the receipt was recorded
+    /// without one (via `record_payment`) or does not exist.
+    pub fn get_payment_memo(env: Env, receipt_id: String) -> Option<String> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PaymentMemo(receipt_id))
+    }
+
+    fn is_canonical_payment_memo(memo: &String, resource_id: &String) -> bool {
+        let memo = Self::string_bytes(memo);
+        let id = Self::string_bytes(resource_id);
+        let prefix = PAYMENT_MEMO_PREFIX.as_bytes();
+        memo.len() == prefix.len() + id.len()
+            && memo.starts_with(prefix)
+            && memo[prefix.len()..] == id[..]
+    }
+
+    fn record_payment_inner(
+        env: &Env,
+        settler: Address,
+        receipt_id: String,
+        resource_id: String,
+        payer: Address,
+        amount: i128,
+        tx_hash: String,
+    ) -> Result<(), Error> {
+        let env = env.clone();
         settler.require_auth();
         if !Self::is_settler(env.clone(), settler.clone()) {
             return Err(Error::NotSettler);
@@ -2974,8 +3105,22 @@ impl VaultRegistry {
         }
         Self::validate_resource_id(&id)?;
         let mut resource = Self::load(&env, &id)?;
+        let was_flagged = resource.dispute_flag.is_flagged();
         resource.dispute_flag = DisputeFlag::Flagged(reason);
         Self::save(&env, &mut resource);
+        // Start the resolution clock on a fresh flag; re-flagging keeps the
+        // original deadline so a moderator cannot extend it indefinitely.
+        if !was_flagged {
+            let window = Self::flag_resolution_window(env.clone());
+            let key = DataKey::FlagDeadline(id.clone());
+            if window > 0 {
+                let deadline = env.ledger().sequence().saturating_add(window);
+                env.storage().persistent().set(&key, &deadline);
+                Self::bump_persistent(&env, &key);
+            } else {
+                env.storage().persistent().remove(&key);
+            }
+        }
         env.events().publish(
             (symbol_short!("flag"), id.clone()),
             FlagEvent {
@@ -3009,6 +3154,86 @@ impl VaultRegistry {
         let mut resource = Self::load(&env, &id)?;
         resource.dispute_flag = DisputeFlag::NoFlag;
         Self::save(&env, &mut resource);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::FlagDeadline(id.clone()));
+        env.events()
+            .publish((symbol_short!("unflag"), id.clone()), id);
+        Ok(())
+    }
+
+    /// Set how many ledgers a moderator has to resolve a flag before it
+    /// becomes overdue. Applies to flags raised after the change; `0` disables
+    /// deadlines. Admin only. Errors `InvalidFlagResolutionWindow` above
+    /// `MAX_FLAG_RESOLUTION_WINDOW`. Emits `flagwin`.
+    pub fn set_flag_resolution_window(env: Env, window_ledgers: u32) -> Result<(), Error> {
+        let admin = Self::require_admin(&env)?;
+        admin.require_auth();
+        Self::require_not_paused(&env)?;
+        if window_ledgers > MAX_FLAG_RESOLUTION_WINDOW {
+            return Err(Error::InvalidFlagResolutionWindow);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::FlagResolutionWindow, &window_ledgers);
+        Self::bump_instance(&env);
+        env.events()
+            .publish((symbol_short!("flagwin"),), window_ledgers);
+        Ok(())
+    }
+
+    /// Configured flag resolution window in ledgers (`0` = no deadline).
+    pub fn flag_resolution_window(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::FlagResolutionWindow)
+            .unwrap_or(0)
+    }
+
+    /// Ledger sequence after which the active flag on `id` is overdue, or
+    /// `None` if the resource is not flagged or was flagged with no window.
+    pub fn get_flag_deadline(env: Env, id: String) -> Option<u32> {
+        env.storage().persistent().get(&DataKey::FlagDeadline(id))
+    }
+
+    /// Whether the active flag on `id` has passed its resolution deadline.
+    /// Off-chain indexers and moderation dashboards should escalate overdue
+    /// flags to the admin, who may then call `force_resolve_flag`.
+    pub fn is_flag_overdue(env: Env, id: String) -> bool {
+        match Self::get_flag_deadline(env.clone(), id) {
+            Some(deadline) => env.ledger().sequence() > deadline,
+            None => false,
+        }
+    }
+
+    /// Admin escape hatch for a flag a moderator never resolved: clears the
+    /// dispute flag once its resolution deadline has passed. Errors
+    /// `NotFlagged` if the resource is not flagged and `FlagNotOverdue` if the
+    /// deadline has not passed (or none was set). Emits `flagfrc` and `unflag`.
+    pub fn force_resolve_flag(env: Env, id: String, admin: Address) -> Result<(), Error> {
+        let current = Self::require_admin(&env)?;
+        if admin != current {
+            return Err(Error::Unauthorized);
+        }
+        admin.require_auth();
+        Self::require_not_paused(&env)?;
+        Self::validate_resource_id(&id)?;
+        let mut resource = Self::load(&env, &id)?;
+        if !resource.dispute_flag.is_flagged() {
+            return Err(Error::NotFlagged);
+        }
+        let deadline = Self::get_flag_deadline(env.clone(), id.clone())
+            .ok_or(Error::FlagNotOverdue)?;
+        if env.ledger().sequence() <= deadline {
+            return Err(Error::FlagNotOverdue);
+        }
+        resource.dispute_flag = DisputeFlag::NoFlag;
+        Self::save(&env, &mut resource);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::FlagDeadline(id.clone()));
+        env.events()
+            .publish((symbol_short!("flagfrc"), id.clone()), (admin, deadline));
         env.events()
             .publish((symbol_short!("unflag"), id.clone()), id);
         Ok(())
