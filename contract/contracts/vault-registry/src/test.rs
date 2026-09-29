@@ -2460,6 +2460,26 @@ fn expired_admin_nomination_cannot_be_accepted() {
 }
 
 #[test]
+fn expired_admin_nomination_can_be_replaced() {
+    let (env, _creator, client) = setup();
+    let admin = Address::generate(&env);
+    let expired_pending = Address::generate(&env);
+    let replacement = Address::generate(&env);
+
+    client.nominate_new_admin(&admin);
+    client.nominate_new_admin(&expired_pending);
+    let expiry = client.pending_admin_expiry().unwrap();
+    env.ledger().set_sequence_number(expiry);
+
+    client.nominate_new_admin(&replacement);
+
+    assert_eq!(client.pending_admin(), Some(replacement.clone()));
+    assert!(client.pending_admin_expiry().unwrap() > expiry);
+    client.accept_admin(&replacement);
+    assert_eq!(client.admin(), Some(replacement));
+}
+
+#[test]
 fn accept_admin_rejects_wrong_caller() {
     let (env, _creator, client) = setup();
     let admin = Address::generate(&env);

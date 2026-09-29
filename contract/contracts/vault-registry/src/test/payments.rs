@@ -338,6 +338,200 @@ fn settle_payment_transitions_receipt_to_settled() {
 }
 
 #[test]
+fn creator_can_record_partial_refund_to_original_payer() {
+    let (env, creator, _admin, settler, client) = setup_with_settler();
+    let id = register_default(&env, &creator, &client, "refund01");
+    let payer = Address::generate(&env);
+    let payment_id = String::from_str(&env, "refundpay1");
+    let refund_id = String::from_str(&env, "refundrec1");
+
+    client.record_payment(
+        &settler,
+        &payment_id,
+        &id,
+        &payer,
+        &1_000_000i128,
+        &String::from_str(&env, "paymenttx1"),
+    );
+    client.settle_payment(&settler, &payment_id);
+    client.record_creator_refund(
+        &creator,
+        &refund_id,
+        &payment_id,
+        &payer,
+        &400_000i128,
+        &String::from_str(&env, "refundtx1"),
+    );
+
+    let refund = client.get_refund(&refund_id);
+    assert_eq!(refund.payment_receipt_id, payment_id);
+    assert_eq!(refund.resource_id, id);
+    assert_eq!(refund.recipient, payer);
+    assert_eq!(refund.amount, 400_000i128);
+    assert_eq!(refund.initiated_by, creator);
+    assert!(!refund.admin_override);
+    assert_eq!(client.get_refunded_amount(&payment_id), 400_000i128);
+}
+
+#[test]
+fn refund_authority_stays_with_creator_who_received_payment() {
+    let (env, creator, _admin, settler, client) = setup_with_settler();
+    let id = register_default(&env, &creator, &client, "refundown");
+    let payer = Address::generate(&env);
+    let new_creator = Address::generate(&env);
+    let payment_id = String::from_str(&env, "refundpayown");
+
+    client.record_payment(
+        &settler,
+        &payment_id,
+        &id,
+        &payer,
+        &1_000_000i128,
+        &String::from_str(&env, "paymenttxown"),
+    );
+    client.settle_payment(&settler, &payment_id);
+    client.transfer_ownership(&id, &new_creator);
+
+    assert_eq!(
+        client.try_record_creator_refund(
+            &new_creator,
+            &String::from_str(&env, "refundnewown"),
+            &payment_id,
+            &payer,
+            &100i128,
+            &String::from_str(&env, "refundtxown1"),
+        ),
+        Err(Ok(Error::Unauthorized))
+    );
+    client.record_creator_refund(
+        &creator,
+        &String::from_str(&env, "refundoldown"),
+        &payment_id,
+        &payer,
+        &100i128,
+        &String::from_str(&env, "refundtxown2"),
+    );
+}
+
+#[test]
+fn refunds_require_settled_payment_payer_and_remaining_amount() {
+    let (env, creator, _admin, settler, client) = setup_with_settler();
+    let id = register_default(&env, &creator, &client, "refund02");
+    let payer = Address::generate(&env);
+    let wrong_recipient = Address::generate(&env);
+    let payment_id = String::from_str(&env, "refundpay2");
+
+    client.record_payment(
+        &settler,
+        &payment_id,
+        &id,
+        &payer,
+        &1_000_000i128,
+        &String::from_str(&env, "paymenttx2"),
+    );
+    assert_eq!(
+        client.try_record_creator_refund(
+            &creator,
+            &String::from_str(&env, "refundrec2a"),
+            &payment_id,
+            &payer,
+            &100i128,
+            &String::from_str(&env, "refundtx2a"),
+        ),
+        Err(Ok(Error::PaymentNotSettled))
+    );
+
+    client.settle_payment(&settler, &payment_id);
+    assert_eq!(
+        client.try_record_creator_refund(
+            &creator,
+            &String::from_str(&env, "refundrec2b"),
+            &payment_id,
+            &wrong_recipient,
+            &100i128,
+            &String::from_str(&env, "refundtx2b"),
+        ),
+        Err(Ok(Error::RefundRecipientMismatch))
+    );
+    assert_eq!(
+        client.try_record_creator_refund(
+            &creator,
+            &String::from_str(&env, "refundrec2c"),
+            &payment_id,
+            &payer,
+            &1_000_001i128,
+            &String::from_str(&env, "refundtx2c"),
+        ),
+        Err(Ok(Error::RefundAmountExceeded))
+    );
+
+    client.record_creator_refund(
+        &creator,
+        &String::from_str(&env, "refundrec2d"),
+        &payment_id,
+        &payer,
+        &600_000i128,
+        &String::from_str(&env, "refundtx2d"),
+    );
+    assert_eq!(
+        client.try_record_creator_refund(
+            &creator,
+            &String::from_str(&env, "refundrec2e"),
+            &payment_id,
+            &payer,
+            &400_001i128,
+            &String::from_str(&env, "refundtx2e"),
+        ),
+        Err(Ok(Error::RefundAmountExceeded))
+    );
+    assert_eq!(client.get_refunded_amount(&payment_id), 600_000i128);
+}
+
+#[test]
+fn refund_deadline_is_snapshotted_and_admin_can_override_expiry() {
+    let (env, creator, admin, settler, client) = setup_with_settler();
+    let id = register_default(&env, &creator, &client, "refund03");
+    let payer = Address::generate(&env);
+    let payment_id = String::from_str(&env, "refundpay3");
+    client.set_refund_window(&admin, &2u32);
+    client.record_payment(
+        &settler,
+        &payment_id,
+        &id,
+        &payer,
+        &1_000_000i128,
+        &String::from_str(&env, "paymenttx3"),
+    );
+    client.settle_payment(&settler, &payment_id);
+    let deadline = client.get_refund_deadline(&payment_id);
+
+    client.set_refund_window(&admin, &100u32);
+    assert_eq!(client.get_refund_deadline(&payment_id), deadline);
+    env.ledger().set_sequence_number(deadline);
+    assert_eq!(
+        client.try_record_creator_refund(
+            &creator,
+            &String::from_str(&env, "refundrec3a"),
+            &payment_id,
+            &payer,
+            &1_000_000i128,
+            &String::from_str(&env, "refundtx3a"),
+        ),
+        Err(Ok(Error::RefundWindowExpired))
+    );
+
+    client.record_admin_refund(
+        &admin,
+        &String::from_str(&env, "refundrec3b"),
+        &payment_id,
+        &payer,
+        &1_000_000i128,
+        &String::from_str(&env, "refundtx3b"),
+    );
+    assert!(client.get_refund(&String::from_str(&env, "refundrec3b")).admin_override);
+}
+
+#[test]
 fn settle_payment_missing_receipt_fails() {
     let (env, _creator, _admin, settler, client) = setup_with_settler();
     let receipt_id = String::from_str(&env, "nosuchrcpt");
