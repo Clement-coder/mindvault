@@ -120,6 +120,7 @@ All other variables are either public addresses or non-sensitive configuration. 
 | `MINDVAULT_RETRY_ATTEMPTS`      | no       | `3`       | Total attempts (including the first) for idempotent MCP calls. `1` disables retrying.                   |
 | `MINDVAULT_RETRY_BASE_DELAY_MS` | no       | `250`     | Backoff delay before the first retry; doubles each attempt.                                             |
 | `MINDVAULT_RETRY_MAX_DELAY_MS`  | no       | `4000`    | Ceiling on the backoff delay before jitter is applied.                                                  |
+| `MINDVAULT_CORRELATION_ID`      | no       | unset     | When set, pins a single correlation id (`x-request-id`) for all outbound requests from the MCP process. Unset (default): each tool call gets its own id. |
 
 Timeouts are enforced with `AbortController`. Retries apply to idempotent calls only — catalog `GET`s, Horizon reads, and Soroban `getTransaction` — and never to x402 payments, which could settle twice. See [`mcp-timeouts-retries.md`](./mcp-timeouts-retries.md) for budgets, policy, and tuning guidance.
 

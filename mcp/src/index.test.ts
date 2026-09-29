@@ -68,6 +68,7 @@ import {
   _setAgentWallet,
   _setAgentApiKey,
   _resetProfiles,
+  _setMockMode,
 } from "./index.js";
 
 function mockResponse(data: unknown, ok = true, status = 200): Response {
@@ -402,6 +403,194 @@ describe("preview", () => {
       expect.stringContaining("/resources/res-001/meta"),
       expect.anything(),
     );
+  });
+
+  it("includes owner fields when active wallet matches publisherWallet", async () => {
+    const wallet = { publicKey: "GOWNER...", secretKey: "SOWNER..." };
+    _setAgentWallet(wallet);
+    _setAgentApiKey("test-api-key");
+
+    const metaWithOwner = {
+      ...singleResourceMeta,
+      publisherWallet: "GOWNER...",
+    };
+    const verWithListed = {
+      resourceId: "res-001",
+      title: "Introduction to Stellar",
+      status: "verified",
+      listed: true,
+      onchainStatus: "registered",
+      verification: { isOriginal: true, confidence: 0.95, flags: [], checkedAt: new Date().toISOString() },
+    };
+
+    let callCount = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      callCount++;
+      if (url.includes("/meta")) {
+        return mockResponse(metaWithOwner);
+      }
+      if (url.includes("/verification")) {
+        return mockResponse(verWithListed);
+      }
+      return mockResponse({ error: "not found" }, false, 404);
+    });
+
+    try {
+      const result = await preview("res-001");
+      const parsed = JSON.parse(result);
+
+      expect(parsed.isOwner).toBe(true);
+      expect(parsed.listed).toBe(true);
+      expect(parsed.onchainStatus).toBe("registered");
+      expect(parsed.delistNote).toBeUndefined();
+
+      // Two calls: /meta and /verification
+      expect(callCount).toBe(2);
+    } finally {
+      _setAgentWallet(null);
+      _setAgentApiKey(null);
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("includes delistNote when resource is delisted", async () => {
+    const wallet = { publicKey: "GOWNER...", secretKey: "SOWNER..." };
+    _setAgentWallet(wallet);
+    _setAgentApiKey("test-api-key");
+
+    const metaWithOwner = {
+      ...singleResourceMeta,
+      publisherWallet: "GOWNER...",
+    };
+    const verDelisted = {
+      resourceId: "res-001",
+      title: "Introduction to Stellar",
+      status: "verified",
+      listed: false,
+      onchainStatus: "registered",
+      verification: { isOriginal: true, confidence: 0.95, flags: [], checkedAt: new Date().toISOString() },
+    };
+
+    let callCount = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      callCount++;
+      if (url.includes("/meta")) {
+        return mockResponse(metaWithOwner);
+      }
+      if (url.includes("/verification")) {
+        return mockResponse(verDelisted);
+      }
+      return mockResponse({ error: "not found" }, false, 404);
+    });
+
+    try {
+      const result = await preview("res-001");
+      const parsed = JSON.parse(result);
+
+      expect(parsed.isOwner).toBe(true);
+      expect(parsed.listed).toBe(false);
+      expect(parsed.delistNote).toBe("This resource is delisted and not discoverable in the public catalog.");
+    } finally {
+      _setAgentWallet(null);
+      _setAgentApiKey(null);
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("does not include owner fields when not the owner", async () => {
+    const wallet = { publicKey: "GNOTOWNER...", secretKey: "SNOTOWNER..." };
+    _setAgentWallet(wallet);
+    _setAgentApiKey("test-api-key");
+
+    const metaNotOwner = {
+      ...singleResourceMeta,
+      publisherWallet: "GOWNER...",
+    };
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(mockResponse(metaNotOwner));
+
+    try {
+      const result = await preview("res-001");
+      const parsed = JSON.parse(result);
+
+      expect(parsed.isOwner).toBeUndefined();
+      expect(parsed.listed).toBeUndefined();
+      expect(parsed.onchainStatus).toBeUndefined();
+      expect(parsed.delistNote).toBeUndefined();
+
+      // Only one call: /meta (no /verification for non-owners)
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    } finally {
+      _setAgentWallet(null);
+      _setAgentApiKey(null);
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("does not include owner fields when no wallet configured", async () => {
+    _setAgentWallet(null);
+    _setAgentApiKey("test-api-key");
+
+    const metaNotOwner = {
+      ...singleResourceMeta,
+      publisherWallet: "GOWNER...",
+    };
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(mockResponse(metaNotOwner));
+
+    try {
+      const result = await preview("res-001");
+      const parsed = JSON.parse(result);
+
+      expect(parsed.isOwner).toBeUndefined();
+      expect(parsed.listed).toBeUndefined();
+    } finally {
+      _setAgentWallet(null);
+      _setAgentApiKey(null);
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("sends x-api-key header when api key is configured", async () => {
+    const wallet = { publicKey: "GOWNER...", secretKey: "SOWNER..." };
+    _setAgentWallet(wallet);
+    _setAgentApiKey("test-api-key");
+
+    const metaWithOwner = {
+      ...singleResourceMeta,
+      publisherWallet: "GOWNER...",
+    };
+    const verWithListed = {
+      resourceId: "res-001",
+      title: "Introduction to Stellar",
+      status: "verified",
+      listed: true,
+      onchainStatus: "registered",
+      verification: { isOriginal: true, confidence: 0.95, flags: [], checkedAt: new Date().toISOString() },
+    };
+
+    let lastInit: RequestInit | undefined;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      lastInit = init;
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("/meta")) return mockResponse(metaWithOwner);
+      if (url.includes("/verification")) return mockResponse(verWithListed);
+      return mockResponse({ error: "not found" }, false, 404);
+    });
+
+    try {
+      await preview("res-001");
+      // Check that the /verification call also got the x-api-key
+      expect(lastInit?.headers).toEqual(
+        expect.objectContaining({ "x-api-key": "test-api-key" }),
+      );
+    } finally {
+      _setAgentWallet(null);
+      _setAgentApiKey(null);
+      vi.restoreAllMocks();
+    }
   });
 });
 
@@ -968,11 +1157,13 @@ describe("dry-run – publish validation", () => {
   beforeEach(() => {
     _setAgentWallet(testWallet);
     _setAgentApiKey("test-api-key");
+    _setMockMode(true);
   });
 
   afterEach(() => {
     _setAgentWallet(null);
     _setAgentApiKey(null);
+    _setMockMode(false);
     vi.restoreAllMocks();
   });
 
@@ -1060,10 +1251,12 @@ describe("dry-run – publish validation", () => {
 describe("dry-run – buy validation", () => {
   beforeEach(() => {
     _setAgentWallet(testWallet);
+    _setMockMode(true);
   });
 
   afterEach(() => {
     _setAgentWallet(null);
+    _setMockMode(false);
     vi.restoreAllMocks();
   });
 

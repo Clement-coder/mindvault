@@ -142,3 +142,15 @@ permissions, and backup path are covered in
 | `HORIZON_URL`           | `https://horizon-testnet.stellar.org`                  | Stellar Horizon for balance queries |
 
 The MCP server has no `.env` file of its own — pass variables via your MCP client config or shell environment. The full list, plus copy-ready client configs and security notes, is in [docs/mcp-client-configs.md](mcp-client-configs.md).
+
+---
+
+## Outbound Request Correlation
+
+Every outbound HTTP request the MCP server makes — to the MindVault API, Horizon, Soroban RPC, the sponsored-account service, and x402 paid fetches — carries an `x-request-id` header. The API echoes this header back and scopes its request context to it (see `server/src/middleware/requestContext.ts`), so an operator reading the server logs can find every request one MCP tool call produced, even when several tools are in flight at once.
+
+- **Per-tool-call id (default):** Each tool call runs in its own async scope and gets a fresh UUID. A single `mindvault_buy` issues a catalog/meta read and then an x402 payment; both legs carry the same id, so the trace stitches.
+- **Process-wide id (opt-in):** Set `MINDVAULT_CORRELATION_ID=my-session-id` to pin one id for the entire process lifetime. Useful when one MCP process serves a single agent session and you want every request in that session to share one id in the server logs.
+- **No header overwriting:** If a caller explicitly supplies `x-request-id`, that value is preserved — it is more specific than the ambient scope id.
+
+The implementation lives in `mcp/src/correlation.ts` and uses `AsyncLocalStorage` from `node:async_hooks`.

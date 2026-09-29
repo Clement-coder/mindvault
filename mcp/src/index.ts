@@ -62,7 +62,16 @@ import {
 import { purchaseHistoryTool, recordPurchase } from "./purchaseHistory.js";
 import { exportReceiptsTool } from "./receipts.js";
 import { TOOL_DEFINITIONS, type ToolDefinition } from "./tools.js";
-import { dryRunPublish, dryRunBuy } from "./dryRun.js";
+import { dryRunPublish, dryRunBuy, DEFAULT_VERIFICATION_FEE, type DryRunPublishLive } from "./dryRun.js";
+import { createStateMutex, serializesStateTool, type StateMutex } from "./stateMutex.js";
+import {
+  CORRELATION_HEADER,
+  currentCorrelationId,
+  stampCorrelation,
+  withCorrelation,
+  withNewCorrelationId,
+  correlationHeaders,
+} from "./correlation.js";
 import { initAuditLogging } from "./auditLog.js";
 import { REGISTRY_LIST_DEFAULT_LIMIT, REGISTRY_LIST_DEFAULT_START } from "./registryPagination.js";
 import {
@@ -187,7 +196,6 @@ initAuditLogging(process.env);
 // fixtures — no live backend, funded wallet, or network access required. All
 // outbound requests go through `httpFetch`, which is the mock shim in this mode
 // and the global fetch otherwise.
-const MOCK = mockEnabledFromEnv(process.env);
 /** Live mock-mode check — reads process.env at call time so tests can toggle it. */
 function _isMock(): boolean {
   return mockEnabledFromEnv(process.env);
@@ -197,11 +205,16 @@ export function _setMockMode(on: boolean): void {
   if (on) process.env.MINDVAULT_MOCK = "1";
   else delete process.env.MINDVAULT_MOCK;
 }
-// In real mode, defer to the global `fetch` at call time (not a captured
-// reference) so a test-stubbed global is still honoured.
-const httpFetch: typeof fetch = MOCK
-  ? createMockFetch(() => currentWallet()?.publicKey)
-  : (input, init) => fetch(input as RequestInfo | URL, init);
+// Defer to the global `fetch` at call time so a test-stubbed global is still
+// honoured. The mock shim is created lazily on first use in mock mode so that
+// `_setMockMode(true)` in tests takes effect without a module reload.
+let mockFetch: typeof fetch | null = null;
+function getMockFetch(): typeof fetch {
+  if (!mockFetch) mockFetch = createMockFetch(() => currentWallet()?.publicKey);
+  return mockFetch;
+}
+const httpFetch: typeof fetch = (input, init) =>
+  _isMock() ? getMockFetch()(input, init) : fetch(input as RequestInfo | URL, init);
 
 // Per-service request deadlines. Every outbound call runs under an
 // AbortController using one of these budgets; see docs/mcp-timeouts-retries.md.
@@ -243,7 +256,7 @@ function httpRetryOptions(label: string) {
 function sorobanRpcFetch(init: RequestInit, label: string): Promise<Response> {
   const initWithUA: RequestInit = {
     ...init,
-    headers: { "User-Agent": USER_AGENT, ...(init.headers as Record<string, string> | undefined) },
+    headers: { "User-Agent": USER_AGENT, ...correlationHeaders(init.headers as Record<string, string> | undefined) },
   };
   return withRetry(
     () => fetchWithTimeout(httpFetch, SOROBAN_RPC_URL, initWithUA, "soroban", TIMEOUTS.soroban),
@@ -274,6 +287,9 @@ function currentWallet(): AgentWallet | null {
 function currentApiKey(): string | null {
   return profiles[activeProfileName]?.apiKey ?? null;
 }
+
+/** FIFO mutex for state-touching tool calls (#855). */
+const stateMutex = createStateMutex();
 
 /**
  * Test-only helpers — not part of the public tool surface.
@@ -428,7 +444,7 @@ async function checkDependency(
 ): Promise<DependencyStatus> {
   const initWithUA: RequestInit = {
     ...init,
-    headers: { "User-Agent": USER_AGENT, ...(init?.headers as Record<string, string> | undefined) },
+    headers: { "User-Agent": USER_AGENT, ...correlationHeaders(init?.headers as Record<string, string> | undefined) },
   };
   try {
     const res = await withRetry(
@@ -665,7 +681,7 @@ async function jsonFetch(
   const baseHeaders: Record<string, string> = {
     "Content-Type": "application/json",
     "User-Agent": USER_AGENT,
-    ...(init?.headers as Record<string, string> | undefined),
+    ...correlationHeaders(init?.headers as Record<string, string> | undefined),
   };
   const headers = signMutatingHeaders(url, method, baseHeaders, body);
 
@@ -742,7 +758,9 @@ function makePaidFetch(wallet: AgentWallet) {
   const client = new x402Client().register(NETWORK, scheme);
   // Paid fetches get the longer `payment` budget because the 402 retry includes
   // on-chain settlement. They are deliberately never retried — see retry.ts.
-  return wrapFetchWithPayment(withTimeout(httpFetch, "payment", TIMEOUTS.payment), client);
+  // The inner fetch is wrapped so the 402 probe and the paid retry both carry
+  // the tool-call correlation id.
+  return wrapFetchWithPayment(withCorrelation(withTimeout(httpFetch, "payment", TIMEOUTS.payment)), client);
 }
 
 /**
@@ -1199,28 +1217,62 @@ export async function search(filtersOrQuery: string | CatalogFilters): Promise<s
 }
 
 export async function preview(resourceId: string): Promise<string> {
-  const res = await jsonFetch(`${BASE_URL}/resources/${resourceId}/meta`);
-  if (!res.ok)
+  const apiKey = currentApiKey();
+  const wallet = activeProfile().wallet;
+
+  // Fetch /meta, including the publisher API key when the active profile has one.
+  const metaRes = await jsonFetch(`${BASE_URL}/resources/${resourceId}/meta`, {
+    headers: apiKey ? { "x-api-key": apiKey } : undefined,
+  });
+  if (!metaRes.ok)
     throwHttpError({
       operation: "Preview failed",
       source: "api",
-      status: res.status,
-      data: res.data,
+      status: metaRes.status,
+      data: metaRes.data,
     });
-  const r = res.data;
-  return JSON.stringify(
-    {
-      id: r.id,
-      title: r.title,
-      description: r.description,
-      price: `$${r.price} USDC`,
-      type: r.resourceType,
-      verificationStatus: r.verificationStatus,
-      accessUrl: r.accessUrl,
-    },
-    null,
-    2,
-  );
+  const r = metaRes.data;
+
+  // Determine ownership: the /meta endpoint returns publisherWallet (the
+  // on-chain owner). If the active profile's wallet matches, the caller owns it.
+  const isOwner = wallet ? wallet.publicKey === r.publisherWallet : false;
+
+  // For an owner, also fetch /verification to surface the listed/on-chain state.
+  // This is zero extra cost for non-owners, and the server's /verification
+  // returns `listed` (see server/src/routes/resources.ts:getVerificationDetails).
+  let listed: boolean | null = null;
+  let onchainStatus: string | null = null;
+  let delistNote: string | null = null;
+
+  if (isOwner) {
+    const verRes = await jsonFetch(`${BASE_URL}/resources/${resourceId}/verification`, {
+      headers: apiKey ? { "x-api-key": apiKey } : undefined,
+    });
+    if (verRes.ok && verRes.data) {
+      listed = verRes.data.listed ?? null;
+      onchainStatus = verRes.data.onchainStatus ?? null;
+      if (listed === false) {
+        delistNote = "This resource is delisted and not discoverable in the public catalog.";
+      }
+    }
+  }
+
+  const out: Record<string, any> = {
+    id: r.id,
+    title: r.title,
+    description: r.description,
+    price: `$${r.price} USDC`,
+    type: r.resourceType,
+    verificationStatus: r.verificationStatus,
+    accessUrl: r.accessUrl,
+  };
+  if (isOwner) {
+    out.isOwner = true;
+    out.listed = listed;
+    out.onchainStatus = onchainStatus;
+    if (delistNote) out.delistNote = delistNote;
+  }
+  return JSON.stringify(out, null, 2);
 }
 
 /**
@@ -1354,8 +1406,35 @@ async function publish(args: {
   dryRun?: boolean;
 }): Promise<string> {
   if (args.dryRun) {
+    // Read live /agent/status and wallet balance for the dry run (best-effort).
+    // We do NOT call the paid /verify-content endpoint in a dry run.
+    const live: DryRunPublishLive = {};
+    try {
+      const statusRes = await jsonFetch(`${BASE_URL}/agent/status`);
+      if (statusRes.ok && statusRes.data?.agent?.pricePerVerification != null) {
+        live.verificationFee = statusRes.data.agent.pricePerVerification;
+      }
+    } catch (err) {
+      live.readError = safeErrorMessage(err);
+    }
+    const wallet = activeProfile().wallet;
+    if (wallet) {
+      try {
+        const bal = await getBalanceDetails(wallet.publicKey);
+        live.usdcBalance = bal.usdcBalance;
+      } catch (err) {
+        live.readError = live.readError ? `${live.readError}; ${safeErrorMessage(err)}` : safeErrorMessage(err);
+      }
+    }
     return JSON.stringify(
-      dryRunPublish(args, NETWORK, BASE_URL, !!activeProfile().wallet, !!currentApiKey()),
+      dryRunPublish(
+        args,
+        NETWORK,
+        BASE_URL,
+        !!wallet,
+        !!currentApiKey(),
+        live,
+      ),
       null,
       2,
     );
@@ -2492,35 +2571,18 @@ function isDispatchableTool(name: string): boolean {
 }
 
 /**
- * Route a validated tool call to its implementation. Used by the MCP CallTool
- * handler and by unit tests.
+ * Inner dispatch that runs the tool's logic. This is the function the state
+ * mutex wraps when `serializesStateTool(name)` is true. It receives the
+ * already-validated `args`, the `dryRunArgs` (for dry-run calls), the original
+ * `rawRecord`, and `onProgress`.
  */
-export async function dispatchTool(
+async function runTool(
   name: string,
-  rawArgs: unknown,
+  args: ValidatedArgs,
+  dryRunArgs: ValidatedArgs,
+  rawRecord: Record<string, unknown>,
   onProgress?: (progress: number, total?: number, message?: string) => Promise<void>,
 ): Promise<string> {
-  if (!isDispatchableTool(name)) {
-    throw new UnknownToolError(name);
-  }
-
-  const rawRecord =
-    typeof rawArgs === "object" && rawArgs !== null && !Array.isArray(rawArgs)
-      ? (rawArgs as Record<string, unknown>)
-      : {};
-
-  // For dry-run calls on publish and buy the user intentionally passes invalid
-  // inputs to inspect structured validation feedback.  Skip the gateway check
-  // and let dryRunPublish / dryRunBuy produce the per-field result instead.
-  const isDryRunCall =
-    (name === "mindvault_publish" || name === "mindvault_buy") && rawRecord.dryRun === true;
-
-  const args: ValidatedArgs =
-    name in TOOL_ARGUMENT_SPECS && !isDryRunCall ? validateToolArgs(name, rawArgs) : {};
-  const dryRunArgs = isDryRunCall ? (rawRecord as ValidatedArgs) : args;
-
-  assertMainnetMutationAllowed(NETWORK, name, rawRecord);
-
   switch (name) {
     case "mindvault_setup_wallet":
       return setupWallet(optionalString(args, "profile"));
@@ -2622,6 +2684,50 @@ export async function dispatchTool(
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
+}
+
+/**
+ * Route a validated tool call to its implementation. Used by the MCP CallTool
+ * handler and by unit tests.
+ */
+export async function dispatchTool(
+  name: string,
+  rawArgs: unknown,
+  onProgress?: (progress: number, total?: number, message?: string) => Promise<void>,
+): Promise<string> {
+  if (!isDispatchableTool(name)) {
+    throw new UnknownToolError(name);
+  }
+
+  const rawRecord =
+    typeof rawArgs === "object" && rawArgs !== null && !Array.isArray(rawArgs)
+      ? (rawArgs as Record<string, unknown>)
+      : {};
+
+  // For dry-run calls on publish and buy the user intentionally passes invalid
+  // inputs to inspect structured validation feedback.  Skip the gateway check
+  // and let dryRunPublish / dryRunBuy produce the per-field result instead.
+  const isDryRunCall =
+    (name === "mindvault_publish" || name === "mindvault_buy") && rawRecord.dryRun === true;
+
+  const args: ValidatedArgs =
+    name in TOOL_ARGUMENT_SPECS && !isDryRunCall ? validateToolArgs(name, rawArgs) : {};
+  const dryRunArgs = isDryRunCall ? (rawRecord as ValidatedArgs) : args;
+
+  // Validate mainnet mutations before acquiring any lock — a blocked mainnet
+  // mutation should fail fast and never queue.
+  assertMainnetMutationAllowed(NETWORK, name, rawRecord);
+
+  // Serialize state-touching tools so their read-then-write sequences cannot
+  // interleave with a concurrent reset, profile switch, or import. Read-only
+  // tools run in parallel.
+  const needsLock = serializesStateTool(name);
+  if (needsLock) {
+    return stateMutex.runExclusive(() =>
+      runTool(name, args, dryRunArgs, rawRecord, onProgress),
+    );
+  }
+  return runTool(name, args, dryRunArgs, rawRecord, onProgress);
 }
 
 /**
@@ -3166,7 +3272,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     // Errors thrown by tools (and by measureTool's re-throw) become a deterministic
     // MCP error result: `isError: true` and text prefixed with `Error:`, with secrets
     // stripped via safeErrorMessage. Clients should treat that shape as failure.
-    const result = await measureTool(metrics, name, () => dispatchTool(name, args, onProgress));
+    // Each tool call runs in its own correlation scope so all outbound requests
+    // it issues (catalog read, x402 payment, etc.) share the same x-request-id.
+    const result = await withNewCorrelationId(() =>
+      measureTool(metrics, name, () => dispatchTool(name, args, onProgress)),
+    );
     return { content: [{ type: "text", text: result }] };
   } catch (err: any) {
     return { content: [{ type: "text", text: `Error: ${safeErrorMessage(err)}` }], isError: true };
@@ -3200,7 +3310,7 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
 // installed bindings drift from the deployed contract. Skipped under tests and
 // mock mode so it never makes a real network call. Errors (e.g. offline) are
 // swallowed — the mindvault_check_bindings tool gives operators a detailed report.
-if (!process.env.VITEST && !MOCK) {
+if (!process.env.VITEST && !_isMock()) {
   void checkContractBindings({
     contractId: REGISTRY_CONTRACT_ID,
     rpcUrl: SOROBAN_RPC_URL,

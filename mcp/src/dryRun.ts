@@ -15,6 +15,23 @@ export interface DryRunPublishInput {
   externalUrl: string;
 }
 
+/**
+ * Live facts a publish dry run can read before it reports.
+ *
+ * Every field is optional: a dry run must still succeed when the read behind a
+ * field failed, and a caller that has nothing to say simply omits it. What a
+ * field cannot be is a guess — the fee below is only ever a published price, and
+ * the balance is only ever a balance Horizon actually returned.
+ */
+export interface DryRunPublishLive {
+  /** `agent.pricePerVerification` from the read-only `GET /agent/status`. */
+  verificationFee?: number | string | null;
+  /** Wallet USDC balance, or null when it could not be read. */
+  usdcBalance?: string | null;
+  /** Set when a live read failed, so the agent knows the value is missing. */
+  readError?: string | null;
+}
+
 export interface DryRunPublishResult {
   mode: "dry-run";
   operation: "publish";
@@ -26,14 +43,22 @@ export interface DryRunPublishResult {
   intentions: {
     network: string;
     endpoint: string;
+    /** The paid endpoint a real publish would hit for content verification. */
+    verificationEndpoint: string;
     requiresPublisherRegistration: boolean;
     estimatedVerificationFee: string;
+    /** Where `estimatedVerificationFee` came from, so it is never mistaken for a quote. */
+    verificationFeeSource: "live" | "default";
     requiredWalletState: {
       wallet: boolean;
       publisherApiKey: boolean;
       usdcBalance: string | null;
+      /** True only when the live balance is known to cover the fee. */
+      coversVerificationFee: boolean | null;
     };
   };
+  /** Non-fatal facts the agent should know before a real publish. */
+  warnings: string[];
   steps: string[];
 }
 
@@ -140,6 +165,32 @@ function validateResourceId(id: unknown): { valid: boolean; error?: string } {
   return { valid: true };
 }
 
+/**
+ * Fee reported when the live price could not be read.
+ *
+ * Deliberately a string, not a number: the point is to signal "this is the
+ * commonly configured value, not what the server charges right now". The
+ * `verificationFeeSource` field on the result says so explicitly.
+ */
+export const DEFAULT_VERIFICATION_FEE = "~0.10";
+
+/** Format a live fee for display, preserving the server's own precision. */
+function formatVerificationFee(fee: number | string): string {
+  return typeof fee === "number" ? String(fee) : fee;
+}
+
+/**
+ * Render the fee for the step list.
+ *
+ * The value is passed through unqualified: whether it is live or the default is
+ * reported structurally in `intentions.verificationFeeSource` and in
+ * `warnings`, so the agent does not have to parse prose to tell a quote from a
+ * placeholder.
+ */
+function renderFeeText(fee: string): string {
+  return fee;
+}
+
 /** Perform dry-run validation for publish. */
 export function dryRunPublish(
   input: DryRunPublishInput,
@@ -147,13 +198,52 @@ export function dryRunPublish(
   baseUrl: string,
   hasWallet: boolean,
   hasApiKey: boolean,
-  estimatedVerificationFee: string = "~0.10",
+  live: DryRunPublishLive = {},
 ): DryRunPublishResult {
   const titleVal = validateTitle(input.title);
   const priceVal = validatePrice(input.price);
   const urlVal = validateUrl(input.externalUrl);
 
   const allValid = titleVal.valid && priceVal.valid && urlVal.valid;
+
+  // A fee is only reported as live when the server actually returned one.
+  const liveFee = live.verificationFee;
+  const hasLiveFee = liveFee !== undefined && liveFee !== null && liveFee !== "";
+  const feeSource: "live" | "default" = hasLiveFee ? "live" : "default";
+  const estimatedVerificationFee = hasLiveFee
+    ? formatVerificationFee(liveFee as number | string)
+    : DEFAULT_VERIFICATION_FEE;
+  const feeText = renderFeeText(estimatedVerificationFee);
+
+  // The balance is only ever what Horizon returned. `undefined` means the read
+  // did not happen or failed, which is not the same claim as a zero balance.
+  const usdcBalance = live.usdcBalance ?? null;
+  const coversVerificationFee =
+    usdcBalance === null || !hasLiveFee ? null : Number(usdcBalance) >= Number(liveFee);
+
+  const warnings: string[] = [];
+  if (live.readError) {
+    warnings.push(
+      `Live fee and balance could not be read: ${live.readError}. Fee shown is the default, not a quote.`,
+    );
+  } else if (!hasLiveFee) {
+    warnings.push(
+      "Verification fee was not returned by /agent/status; the default is shown, not a quote.",
+    );
+  }
+  if (hasWallet && coversVerificationFee === false) {
+    warnings.push(
+      `Wallet holds ${usdcBalance} USDC, which does not cover the ${estimatedVerificationFee} USDC verification fee. Publish will create the resource but stop before verification.`,
+    );
+  }
+  if (hasWallet && usdcBalance !== null && !hasLiveFee) {
+    warnings.push(
+      "Balance was read but the fee was not, so affordability could not be determined. Check with mindvault_agent_status.",
+    );
+  }
+  if (!hasApiKey) {
+    warnings.push("No publisher API key in the active profile; run mindvault_register first.");
+  }
 
   return {
     mode: "dry-run",
@@ -166,18 +256,22 @@ export function dryRunPublish(
     intentions: {
       network,
       endpoint: `POST ${baseUrl}/resources (then verify, then register on-chain)`,
+      verificationEndpoint: `POST ${baseUrl}/verify-content (x402 payment, paid)`,
       requiresPublisherRegistration: !hasApiKey,
       estimatedVerificationFee,
+      verificationFeeSource: feeSource,
       requiredWalletState: {
         wallet: hasWallet,
         publisherApiKey: hasApiKey,
-        usdcBalance: "Check with mindvault_wallet_info",
+        usdcBalance,
+        coversVerificationFee,
       },
     },
+    warnings,
     steps: allValid
       ? [
           "1. Create resource record via POST /resources",
-          `2. Sign x402 payment for verification (${estimatedVerificationFee} USDC)`,
+          `2. Sign x402 payment for verification (${feeText} USDC)`,
           "3. Submit payment-signed request to POST /verify-content",
           "4. Await AI verification result (isOriginal flag)",
           "5. If approved, trigger on-chain registration (best-effort)",
