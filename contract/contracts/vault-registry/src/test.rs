@@ -4435,6 +4435,24 @@ fn full_workflow_emits_exactly_the_documented_events() {
     client.transfer_ownership(&r1, &bob);
     record(&env, &client, &mut observed);
 
+    // #808: transfer_ownership_with_terms — emits both `transfer` and `txfrterms`
+    let r1b = String::from_str(&env, "schemar1b");
+    client.register(
+        &alice,
+        &r1b,
+        &100i128,
+        &String::from_str(&env, "ipfs://mterms"),
+        &empty_tags(&env),
+    );
+    record(&env, &client, &mut observed);
+    client.transfer_ownership_with_terms(
+        &r1b,
+        &bob,
+        &Some(String::from_str(&env, "newtermshash")),
+        &false,
+    ); // -> "transfer", "txfrterms", "setterms"
+    record(&env, &client, &mut observed);
+
     let r2 = String::from_str(&env, "schemar2");
     client.register(
         &alice,
@@ -9119,7 +9137,7 @@ fn storage_key_variant(env: &Env, key: &DataKey) -> Symbol {
 /// Every `DataKey` variant, with the name and arity it must keep across
 /// upgrades. Adding a variant means adding a row here — the exhaustive match in
 /// `storage_key_migration_covers_every_variant` will not compile until you do.
-fn storage_key_wire_contract(env: &Env) -> [(DataKey, &'static str, u32); 31] {
+fn storage_key_wire_contract(env: &Env) -> [(DataKey, &'static str, u32); 34] {
     let id = String::from_str(env, "migkey");
     let who = Address::generate(env);
     [
@@ -9169,7 +9187,10 @@ fn storage_key_wire_contract(env: &Env) -> [(DataKey, &'static str, u32); 31] {
             2,
         ),
         (DataKey::MemoHash(id.clone()), "MemoHash", 2),
+        (DataKey::FeeDestination, "FeeDestination", 1),
         (DataKey::FlagModerator(id), "FlagModerator", 2),
+        (DataKey::CreatorEarnings(who.clone()), "CreatorEarnings", 2),
+        (DataKey::VerifierHistory(who.clone()), "VerifierHistory", 2),
     ]
 }
 
@@ -9211,7 +9232,7 @@ fn storage_key_migration_covers_every_variant() {
     let contract = storage_key_wire_contract(&env);
     assert_eq!(
         contract.len(),
-        31,
+        34,
         "storage_key_wire_contract must list every DataKey variant"
     );
 
@@ -9249,6 +9270,8 @@ fn storage_key_migration_covers_every_variant() {
             DataKey::MemoHash(_) => "MemoHash",
             DataKey::FeeDestination => "FeeDestination",
             DataKey::FlagModerator(_) => "FlagModerator",
+            DataKey::CreatorEarnings(_) => "CreatorEarnings",
+            DataKey::VerifierHistory(_) => "VerifierHistory",
         };
         assert_eq!(
             matched, *name,
@@ -10735,3 +10758,4 @@ include!("test/creator_listed_count.rs");
 include!("test/memo_hash.rs");
 include!("test/flag_details.rs");
 include!("test/payment_idempotency.rs");
+include!("test/stellar_wave_804_805_806_808.rs");
