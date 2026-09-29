@@ -3882,7 +3882,9 @@ impl VaultRegistry {
         let _next_listed = current_listed.checked_add(1).ok_or(Error::CountOverflow)?;
 
         let current_creator_listed = Self::creator_listed(&env, &creator);
-        let _next_creator_listed = current_creator_listed.checked_add(1).ok_or(Error::CountOverflow)?;
+        let _next_creator_listed = current_creator_listed
+            .checked_add(1)
+            .ok_or(Error::CountOverflow)?;
 
         let now = env.ledger().sequence();
         let resource = Resource {
