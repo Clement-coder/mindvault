@@ -279,6 +279,8 @@ See [`docs/adr-fee-config.md`](../docs/adr-fee-config.md) for the full design ra
 | `unflag_resource(id, moderator)`                                             | `moderator`                                              | `id: String`; `moderator: Address`                                                                                                                                                                                                                   | `Result<(), Error>`                    | Clear `Resource.dispute_flag` to `NoFlag`. No-op if the resource is not currently flagged (event still emitted). Errors `Unauthorized` if caller lacks the moderator role. Emits `unflag`.                                                                                                               |
 | `set_flag_reason_hash(id, moderator, reason_hash)`                           | `moderator`                                              | `id: String`; `moderator: Address`; `reason_hash: String` — max 64 bytes                                                                                                                                                                             | `Result<(), Error>`                    | Store a hash of a moderator's off-chain dispute reason writeup for the resource, independent of `flag_resource`'s fixed `FlagReason` code. Replaces any existing hash. Errors `Unauthorized` if caller lacks the moderator role. Emits `flagrsn`.                                                        |
 | `get_flag_reason_hash(id)`                                                   | —                                                        | `id: String`                                                                                                                                                                                                                                         | `Result<String, Error>`                | Fetch the moderator dispute reason hash stored for a resource. Errors `NotFound` if absent.                                                                                                                                                                                                              |
+| `is_flagged(id)`                                                             | —                                                        | `id: String`                                                                                                                                                                                                                                         | `Result<bool, Error>`                  | Whether the resource currently carries a dispute flag (`dispute_flag` is `Flagged(_)`). Errors `NotFound` for an unknown id. Available while paused.                                                                                                                                                     |
+| `flag_details(id)`                                                           | —                                                        | `id: String`                                                                                                                                                                                                                                         | `Result<FlagDetails, Error>`           | One read of a resource's moderation state: `dispute_flag`, `reason_hash` (`None` until `set_flag_reason_hash` is called), and `last_moderator` (whoever last called `flag_resource`, `unflag_resource`, or `set_flag_reason_hash` on it; `None` if no moderator has). Errors `NotFound` for an unknown id. Available while paused. |
 | `set_fee_config(config)`                                                     | `admin`                                                  | `config: FeeConfig`                                                                                                                                                                                                                                  | `Result<(), Error>`                    | Store registry fee and royalty basis points. Emits `setfee`.                                                                                                                                                                                                                                             |
 | `get_fee_config()`                                                           | —                                                        | —                                                                                                                                                                                                                                                    | `Option<FeeConfig>`                    | Fetch the current registry fee config, if set.                                                                                                                                                                                                                                                           |
 | `set_fee_recipient(recipient)`                                                | `admin`                                                  | `recipient: Option<Address>`                                                                                                                                                                                                                        | `Result<(), Error>`                    | Update only the configured fee recipient while preserving existing fee rates. Errors `FeeConfigNotSet` if no config exists. Emits `setfee`.                                                                                                                                                              |
@@ -752,6 +754,27 @@ pub struct AnchorFailure {
 }
 ```
 
+### Moderation state in one read
+
+`flag_details(id)` returns everything a moderation consumer needs in one call,
+instead of `get` for the flag, `get_flag_reason_hash` (which errors when no hash
+is set), and the `flag` / `unflag` / `flagrsn` event history for who acted.
+`is_flagged(id)` answers only whether a flag is active.
+
+```rust
+pub struct FlagDetails {
+    pub dispute_flag: DisputeFlag,        // NoFlag, or Flagged(reason)
+    pub reason_hash: Option<String>,      // set by set_flag_reason_hash; unflagging does not clear it
+    pub last_moderator: Option<Address>,  // moderator of the last flag_resource / unflag_resource / set_flag_reason_hash
+}
+```
+
+`last_moderator` is stored under `DataKey::FlagModerator(id)` and written by
+each of those three moderator calls. Rejected calls and creator writes leave it
+unchanged. Resources flagged before this key existed report `None` until a
+moderator next acts on them. Both reads error `InvalidResourceId` or `NotFound`
+like `get`, and stay available while the registry is paused.
+
 ### Registry info (discovery)
 
 ```rust
@@ -871,8 +894,9 @@ When paused, every write method (`register`, `set_price`, `update_metadata`,
 (code `40`) without modifying any state.
 
 Read-only methods (`get`, `exists`, `list*`, `count`, `get_owner`, `registry_info`,
-`contract_version`, `get_terms_hash`, `get_payment_receipt`, `is_paused`,
-`is_verifier`, `admin`, `pending_admin`) remain available while paused.
+`contract_version`, `get_terms_hash`, `get_payment_receipt`, `is_flagged`,
+`flag_details`, `is_paused`, `is_verifier`, `admin`, `pending_admin`) remain
+available while paused.
 
 `is_paused()` returns the current effective pause state, and `pause_until()` returns
 the active scheduled deadline when one exists. `set_paused` emits a `pause` event

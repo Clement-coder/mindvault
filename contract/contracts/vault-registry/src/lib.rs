@@ -174,6 +174,8 @@ pub const METHOD_SCHEMA: &[(&str, &str)] = &[
     ("unflag_resource", "moderator"),
     ("set_flag_reason_hash", "moderator"),
     ("get_flag_reason_hash", "—"),
+    ("is_flagged", "—"),
+    ("flag_details", "—"),
     // ── Terms hashes ──────────────────────────────────────────────────────
     ("set_terms_hash", "creator"),
     ("get_terms_hash", "—"),
@@ -443,6 +445,18 @@ pub struct FlagEvent {
     pub reason: FlagReason,
 }
 
+/// A resource's moderation state in one read, returned by `flag_details`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct FlagDetails {
+    /// Active dispute flag, or `DisputeFlag::NoFlag`.
+    pub dispute_flag: DisputeFlag,
+    /// Hash set via `set_flag_reason_hash`, if any.
+    pub reason_hash: Option<String>,
+    /// Moderator whose flag, unflag, or reason hash write came last, if any.
+    pub last_moderator: Option<Address>,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct VerifierRotation {
@@ -630,6 +644,9 @@ pub enum DataKey {
     /// mutated; `None` for resources registered through the other entry points.
     MemoHash(String),
     FeeDestination,
+    /// Moderator who last called `flag_resource`, `unflag_resource`, or
+    /// `set_flag_reason_hash` for a resource. Read back by `flag_details`.
+    FlagModerator(String),
 }
 
 /// Event data emitted when a resource's metadata pointer is updated.
@@ -2978,6 +2995,7 @@ impl VaultRegistry {
         let mut resource = Self::load(&env, &id)?;
         resource.dispute_flag = DisputeFlag::Flagged(reason);
         Self::save(&env, &mut resource);
+        Self::record_flag_moderator(&env, &id, &moderator);
         env.events().publish(
             (symbol_short!("flag"), id.clone()),
             FlagEvent {
@@ -3011,6 +3029,7 @@ impl VaultRegistry {
         let mut resource = Self::load(&env, &id)?;
         resource.dispute_flag = DisputeFlag::NoFlag;
         Self::save(&env, &mut resource);
+        Self::record_flag_moderator(&env, &id, &moderator);
         env.events()
             .publish((symbol_short!("unflag"), id.clone()), id);
         Ok(())
@@ -3064,6 +3083,7 @@ impl VaultRegistry {
         let key = DataKey::FlagReasonHash(id.clone());
         env.storage().persistent().set(&key, &reason_hash);
         Self::bump_persistent(&env, &key);
+        Self::record_flag_moderator(&env, &id, &moderator);
 
         env.events()
             .publish((symbol_short!("flagrsn"), id), (moderator, reason_hash));
@@ -3076,6 +3096,27 @@ impl VaultRegistry {
         Self::validate_resource_id(&id)?;
         let key = DataKey::FlagReasonHash(id);
         env.storage().persistent().get(&key).ok_or(Error::NotFound)
+    }
+
+    /// Whether a resource currently carries a moderator dispute flag.
+    /// Errors with `NotFound` if the resource does not exist.
+    pub fn is_flagged(env: Env, id: String) -> Result<bool, Error> {
+        Self::validate_resource_id(&id)?;
+        Ok(Self::load(&env, &id)?.dispute_flag.is_flagged())
+    }
+
+    /// Dispute flag, reason hash, and last acting moderator for a resource in
+    /// one read. Errors with `NotFound` if the resource does not exist; a
+    /// resource no moderator has touched returns `NoFlag` and two `None`s.
+    pub fn flag_details(env: Env, id: String) -> Result<FlagDetails, Error> {
+        Self::validate_resource_id(&id)?;
+        let resource = Self::load(&env, &id)?;
+        let storage = env.storage().persistent();
+        Ok(FlagDetails {
+            dispute_flag: resource.dispute_flag,
+            reason_hash: storage.get(&DataKey::FlagReasonHash(id.clone())),
+            last_moderator: storage.get(&DataKey::FlagModerator(id)),
+        })
     }
 
     /// Extend the TTL of a resource's persistent storage entry.
@@ -3431,6 +3472,13 @@ impl VaultRegistry {
             .persistent()
             .get(&DataKey::Resource(id.clone()))
             .ok_or(Error::NotFound)
+    }
+
+    /// Remember `moderator` as the last to act on `id`'s moderation state.
+    fn record_flag_moderator(env: &Env, id: &String, moderator: &Address) {
+        let key = DataKey::FlagModerator(id.clone());
+        env.storage().persistent().set(&key, moderator);
+        Self::bump_persistent(env, &key);
     }
 
     fn save(env: &Env, resource: &mut Resource) {
