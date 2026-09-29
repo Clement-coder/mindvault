@@ -9119,7 +9119,7 @@ fn storage_key_variant(env: &Env, key: &DataKey) -> Symbol {
 /// Every `DataKey` variant, with the name and arity it must keep across
 /// upgrades. Adding a variant means adding a row here — the exhaustive match in
 /// `storage_key_migration_covers_every_variant` will not compile until you do.
-fn storage_key_wire_contract(env: &Env) -> [(DataKey, &'static str, u32); 28] {
+fn storage_key_wire_contract(env: &Env) -> [(DataKey, &'static str, u32); 31] {
     let id = String::from_str(env, "migkey");
     let who = Address::generate(env);
     [
@@ -9166,7 +9166,10 @@ fn storage_key_wire_contract(env: &Env) -> [(DataKey, &'static str, u32); 28] {
             "CreatorListedCount",
             2,
         ),
-        (DataKey::MemoHash(id), "MemoHash", 2),
+        (DataKey::MemoHash(id.clone()), "MemoHash", 2),
+        (DataKey::FeeDestination, "FeeDestination", 1),
+        (DataKey::TopTags, "TopTags", 1),
+        (DataKey::TagCount(id), "TagCount", 2),
     ]
 }
 
@@ -9208,7 +9211,7 @@ fn storage_key_migration_covers_every_variant() {
     let contract = storage_key_wire_contract(&env);
     assert_eq!(
         contract.len(),
-        28,
+        31,
         "storage_key_wire_contract must list every DataKey variant"
     );
 
@@ -9243,6 +9246,8 @@ fn storage_key_migration_covers_every_variant() {
             DataKey::CreatorListedCount(_) => "CreatorListedCount",
             DataKey::MemoHash(_) => "MemoHash",
             DataKey::FeeDestination => "FeeDestination",
+            DataKey::TopTags => "TopTags",
+            DataKey::TagCount(_) => "TagCount",
         };
         assert_eq!(
             matched, *name,
@@ -10718,6 +10723,65 @@ fn tag_popularity_counter_saturates_at_u32_max() {
     let top = client.top_tags(&1u32);
     assert_eq!(top.get(0).unwrap().tag, String::from_str(&env, "maxed"));
     assert_eq!(top.get(0).unwrap().count, u32::MAX);
+}
+
+#[test]
+fn register_surfaces_count_overflow_when_count_is_max() {
+    let (env, creator, client) = setup();
+    env.as_contract(&client.address, || {
+        env.storage().instance().set(&DataKey::Count, &u32::MAX);
+    });
+
+    let res = client.try_register(
+        &creator,
+        &String::from_str(&env, "ovf1"),
+        &100i128,
+        &String::from_str(&env, "ipfs://m"),
+        &empty_tags(&env),
+    );
+    assert_eq!(res, Err(Ok(Error::CountOverflow)));
+}
+
+#[test]
+fn initialize_network_rejects_replay_even_with_mismatched_id() {
+    let (env, _creator, client) = setup();
+    let network_id = env.ledger().network_id();
+    client.initialize_network(&network_id);
+
+    let mut wrong = network_id.to_array();
+    wrong[0] ^= 1;
+    let wrong = BytesN::from_array(&env, &wrong);
+
+    // After network is initialized, duplicate call with wrong id fails with NetworkAlreadyInitialized
+    assert_eq!(
+        client.try_initialize_network(&wrong),
+        Err(Ok(Error::NetworkAlreadyInitialized))
+    );
+}
+
+#[test]
+fn differently_cased_tags_indexed_under_same_normalized_tag() {
+    let (env, creator, client) = setup();
+    let r1 = String::from_str(&env, "case1");
+    let r2 = String::from_str(&env, "case2");
+
+    client.register(
+        &creator,
+        &r1,
+        &100i128,
+        &String::from_str(&env, "ipfs://1"),
+        &tags(&env, &["RustLang"]),
+    );
+    client.register(
+        &creator,
+        &r2,
+        &200i128,
+        &String::from_str(&env, "ipfs://2"),
+        &tags(&env, &["rustlang"]),
+    );
+
+    let results = client.list_by_tag(&String::from_str(&env, "RUSTLANG"), &0, &10);
+    assert_eq!(results.len(), 2);
 }
 
 include!("test/lifecycle_events.rs");

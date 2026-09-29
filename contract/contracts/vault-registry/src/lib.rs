@@ -193,7 +193,7 @@ pub const METHOD_SCHEMA: &[(&str, &str)] = &[
     ("get_payment_receipt", "—"),
     ("anchor_purchase_receipt", "verifier"),
     ("attempt_anchor_purchase_receipt", "verifier"),
-    ("override_purchase_receipt_anchor", "verifier"),
+    ("override_purchase_receipt_anchor", "admin"),
     ("get_purchase_receipt", "—"),
     // ── TTL ───────────────────────────────────────────────────────────────
     ("extend_resource_ttl", "creator"),
@@ -628,6 +628,8 @@ pub enum DataKey {
     /// mutated; `None` for resources registered through the other entry points.
     MemoHash(String),
     FeeDestination,
+    TopTags,
+    TagCount(String),
 }
 
 /// Event data emitted when a resource's metadata pointer is updated.
@@ -1911,7 +1913,8 @@ impl VaultRegistry {
                 .get(&DataKey::Resource(id.clone()))
                 .unwrap(); // already validated above
             for j in 0..resource.tags.len() {
-                let tag = resource.tags.get(j).unwrap();
+                let raw_tag = resource.tags.get(j).unwrap();
+                let tag = Self::normalize_tag(&env, &raw_tag);
                 match find_tag_pos(&tag_keys, &tag) {
                     Some(pos) => {
                         let id_vec = &mut tag_id_vecs[pos as usize];
@@ -2852,16 +2855,16 @@ impl VaultRegistry {
 
     /// Override a purchase receipt anchor for `(resource_id, buyer)`.
     ///
-    /// This method allows a verifier to forcibly update an existing purchase receipt
+    /// This method allows the admin to forcibly update an existing purchase receipt
     /// anchor for a given buyer. If no anchor exists, it returns `NotFound`.
     pub fn override_purchase_receipt_anchor(
         env: Env,
-        service: Address,
+        admin: Address,
         resource_id: String,
         buyer: Address,
         new_receipt_hash: String,
     ) -> Result<(), Error> {
-        Self::require_anchor_authority(&env, &service)?;
+        Self::require_current_admin(&env, &admin)?;
         Self::require_not_paused(&env)?;
         Self::validate_resource_id(&resource_id)?;
 
@@ -3763,12 +3766,13 @@ impl VaultRegistry {
         }
 
         for i in 0..tags.len() {
-            let tag = tags.get(i).unwrap();
-            let count_key = DataKey::TagCount(tag.clone());
+            let raw_tag = tags.get(i).unwrap();
+            let norm = Self::normalize_tag(env, &raw_tag);
+            let count_key = DataKey::TagCount(norm.clone());
             let current: u32 = env.storage().instance().get(&count_key).unwrap_or(0);
             let next = current.saturating_add(1);
             env.storage().instance().set(&count_key, &next);
-            Self::update_top_tags(env, &tag, next);
+            Self::update_top_tags(env, &norm, next);
         }
         Self::bump_instance(env);
     }
@@ -3864,6 +3868,22 @@ impl VaultRegistry {
             return Err(Error::AlreadyRegistered);
         }
 
+        let count: u32 = env.storage().instance().get(&DataKey::Count).unwrap_or(0);
+        let next_count = count.checked_add(1).ok_or(Error::CountOverflow)?;
+
+        let cur = Self::creator_count(&env, &creator);
+        let next_creator_count = cur.checked_add(1).ok_or(Error::CountOverflow)?;
+
+        let current_listed: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ListedCount)
+            .unwrap_or(0);
+        let _next_listed = current_listed.checked_add(1).ok_or(Error::CountOverflow)?;
+
+        let current_creator_listed = Self::creator_listed(&env, &creator);
+        let _next_creator_listed = current_creator_listed.checked_add(1).ok_or(Error::CountOverflow)?;
+
         let now = env.ledger().sequence();
         let resource = Resource {
             id: id.clone(),
@@ -3891,14 +3911,10 @@ impl VaultRegistry {
         Self::bump_listed_count(&env, 1);
         Self::bump_creator_listed_count(&env, &creator, 1);
 
-        let count: u32 = env.storage().instance().get(&DataKey::Count).unwrap_or(0);
         let idx_key = DataKey::Index(count);
         env.storage().persistent().set(&idx_key, &id);
         Self::bump_persistent(&env, &idx_key);
-        env.storage().instance().set(
-            &DataKey::Count,
-            &count.checked_add(1).ok_or(Error::CountOverflow)?,
-        );
+        env.storage().instance().set(&DataKey::Count, &next_count);
         Self::bump_instance(&env);
 
         let mut list = Self::creator_list(&env, &creator);
@@ -3908,8 +3924,7 @@ impl VaultRegistry {
             .set(&Self::creator_key(&env, &creator), &list);
         Self::bump_persistent(&env, &Self::creator_key(&env, &creator));
 
-        let cur = Self::creator_count(&env, &creator);
-        Self::set_creator_count(&env, &creator, cur + 1);
+        Self::set_creator_count(&env, &creator, next_creator_count);
 
         // Maintain tag index: add id to each tag's index entry.
         Self::tag_index_add(&env, &norm_tags, &id);
