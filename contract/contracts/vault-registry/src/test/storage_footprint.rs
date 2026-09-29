@@ -238,6 +238,12 @@ fn storage_footprint_report() {
             200,
         ),
         (
+            "FlagModerator",
+            DataKey::FlagModerator(max_id.clone()),
+            StorageKind::Persistent,
+            160,
+        ),
+        (
             "AttestationHash",
             DataKey::AttestationHash(typical_id.clone()),
             StorageKind::Persistent,

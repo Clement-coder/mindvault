@@ -190,6 +190,19 @@ cannot fix them.
 When a server sends `Retry-After`, it is honoured in place of computed backoff,
 clamped to the max delay so a mistaken or hostile header cannot stall a call.
 
+### Polling that outlives a failed request
+
+`mindvault_publish_status` with `wait: true` reads `/resources/:id/meta` and
+`/resources/:id/verification` on every poll, each with the retry policy above.
+When one of them still fails after its last attempt, the poll fails and the tool
+returns an error — unless the other endpoint already reported a terminal
+`verificationStatus` (`verified`, `rejected`, or `skipped`). Both endpoints
+read the same status, and a settled status never returns to `pending`, so that
+poll has settled: polling stops there and the snapshot reports the terminal
+status. Fields only the failed endpoint carries come back `null` — the
+`verification` details when `/verification` failed, `onchainStatus` and
+`onchainTxHash` when `/meta` did.
+
 ### Observability
 
 Each retry writes one greppable line to stderr:
@@ -210,3 +223,6 @@ MindVault MCP: retrying GET /resources — attempt 2/3 failed (HTTP 503); next a
   `Retry-After`, and the retry-log format, with sleep and randomness injected
 - [`mcp/src/toolRetries.test.ts`](../mcp/src/toolRetries.test.ts) — real tools
   recovering from transient failures, and payments issued exactly once
+- [`mcp/src/publishStatusRetry.test.ts`](../mcp/src/publishStatusRetry.test.ts) —
+  `mindvault_publish_status` stopping at a terminal status while a companion
+  request exhausts its retries
