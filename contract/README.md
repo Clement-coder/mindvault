@@ -523,7 +523,7 @@ if (page.next_cursor !== null) {
 | `3`  | `InvalidPrice`                  | Price is `<= 0`, exceeds `MAX_PRICE`, or is not strictly greater than the active `royalty_bps`. |
 | `4`  | `MetadataTooLong`               | Metadata pointer exceeds `MAX_METADATA_POINTER_LEN` (512 bytes).                        |
 | `5`  | `InvalidTag`                    | Tag validation failed (too many tags, empty/overlong tag, or duplicate normalized tag). |
-| `6`  | `Unauthorized`                  | Caller authentication check failed or unauthorized.                                     |
+| `6`  | `Unauthorized`                  | Caller is unauthorized, including a refund recipient mismatch.                           |
 | `7`  | `PendingAdminNotSet`            | No pending admin is set, or caller does not match the pending admin.                    |
 | `8`  | `PendingAdminAlreadySet`        | A pending admin nomination is already active.                                           |
 | `9`  | `SameAdmin`                     | Nominated new admin is already the current contract admin.                              |
@@ -542,7 +542,7 @@ if (page.next_cursor !== null) {
 | `22` | `MetadataFrozen`                | `update_metadata` rejected because the metadata pointer is frozen.                      |
 | `23` | `DuplicateInRepair`             | `repair_index` received a duplicate id in the supplied list.                            |
 | `24` | `InvalidTxHash`                 | A payment or refund `tx_hash` is empty or exceeds `MAX_TX_HASH_LEN` (128 bytes).         |
-| `25` | `InvalidPaymentAmount`          | A payment or refund `amount` is `<= 0`.                                                  |
+| `25` | `InvalidPaymentAmount`          | A payment or refund `amount` is `<= 0`, or a refund window is outside its allowed bounds. |
 | `26` | `NotModerator`                  | Caller does not hold the moderator role.                                                |
 | `27` | `AlreadyFlagged`                | Resource is already flagged as disputed.                                                |
 | `28` | `NotFlagged`                    | Resource is not currently flagged as disputed.                                          |
@@ -559,22 +559,15 @@ if (page.next_cursor !== null) {
 | `39` | `FlagReasonHashTooLong`         | `reason_hash` in `set_flag_reason_hash` exceeds `MAX_FLAG_REASON_HASH_LEN` (64 bytes).  |
 | `40` | `ContractPaused`                | A state-changing method was called while the registry is paused.                        |
 | `41` | `NotSettler`                    | Caller does not hold the settler role.                                                  |
-| `42` | `ReceiptAlreadyExists`          | A payment receipt is already stored for the supplied `receipt_id`.                      |
-| `43` | `InvalidPaymentTransition`      | The requested payment receipt state transition is not allowed.                          |
+| `42` | `ReceiptAlreadyExists`          | A payment or refund receipt is already stored for the supplied id.                       |
+| `43` | `InvalidPaymentTransition`      | Payment is not settled, its creator refund deadline expired, or a payment state transition is not allowed. |
 | `44` | `InvalidReceiptId`              | `receipt_id` is empty or exceeds `MAX_RECEIPT_ID_LEN` (64 bytes).                       |
 | `45` | `ContentHashTooLong`            | `content_hash` exceeds `MAX_CONTENT_HASH_LEN` (128 bytes).                              |
 | `46` | `AttestationHashTooLong`        | `attestation_hash` exceeds `MAX_ATTESTATION_HASH_LEN` (64 bytes).                       |
-| `47` | `PaymentAmountMismatch`         | Payment receipt amount does not match the resource's current price.                     |
-| `48` | `DuplicateTxHash`               | A payment receipt is already stored for the supplied settlement transaction hash (`tx_hash`). |
+| `47` | `PaymentAmountMismatch`         | Payment amount differs from resource price or cumulative refunds exceed the original payment. |
+| `48` | `DuplicateTxHash`               | A payment or refund receipt already uses the supplied transaction hash (`tx_hash`).      |
 | `49` | `FeeConfigNotSet`               | `set_fee_recipient` or `set_fee_destination` was called before any fee config was set via `set_fee_config`. |
 | `50` | `AdminNominationExpired`        | The pending admin nomination is missing or has expired.                                   |
-| `51` | `InvalidRefundWindow`           | Refund window must be between 1 and `MAX_REFUND_WINDOW_LEDGERS` ledgers.                  |
-| `52` | `PaymentNotSettled`             | A refund can only be recorded for a settled payment receipt.                              |
-| `53` | `RefundRecipientMismatch`       | Refund recipient must match the original payment payer.                                   |
-| `54` | `RefundAmountExceeded`           | Cumulative refunds cannot exceed the original payment amount.                             |
-| `55` | `RefundWindowExpired`           | The creator refund window expired; use the admin override path.                           |
-| `56` | `RefundAlreadyExists`           | A refund receipt already exists for the supplied `refund_id`.                             |
-| `57` | `DuplicateRefundTxHash`          | A transaction hash is already recorded for a payment or refund.                           |
 
 ### Resource ID format and reserved words
 

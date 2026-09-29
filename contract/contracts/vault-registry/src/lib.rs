@@ -223,7 +223,7 @@ pub const ERROR_SCHEMA: &[(u32, &str, &str)] = &[
     (3, "InvalidPrice", "Price is `<= 0`, exceeds `MAX_PRICE`, or is not strictly greater than the active `royalty_bps`."),
     (4, "MetadataTooLong", "Metadata pointer exceeds `MAX_METADATA_POINTER_LEN` (512 bytes)."),
     (5, "InvalidTag", "Tag validation failed (too many tags, empty tag, tag exceeds 32 bytes, or duplicate normalized tag)."),
-    (6, "Unauthorized", "Caller authentication check failed or unauthorized."),
+    (6, "Unauthorized", "Caller is unauthorized, including a refund recipient mismatch."),
     (7, "PendingAdminNotSet", "No pending admin is set, or caller does not match the pending admin."),
     (8, "PendingAdminAlreadySet", "A pending admin nomination is already active."),
     (9, "SameAdmin", "Nominated new admin is already the current contract admin."),
@@ -242,7 +242,7 @@ pub const ERROR_SCHEMA: &[(u32, &str, &str)] = &[
     (22, "MetadataFrozen", "`update_metadata` was called on a resource whose metadata has been frozen."),
     (23, "DuplicateInRepair", "`repair_index` received a list with duplicate resource ids."),
     (24, "InvalidTxHash", "A payment or refund `tx_hash` is empty or exceeds `MAX_TX_HASH_LEN` (128 bytes)."),
-    (25, "InvalidPaymentAmount", "A payment or refund `amount` is `<= 0`."),
+    (25, "InvalidPaymentAmount", "A payment or refund `amount` is `<= 0`, or a refund window is outside its allowed bounds."),
     (26, "NotModerator", "Caller does not hold the moderator role."),
     (27, "AlreadyFlagged", "Resource is already flagged as disputed."),
     (28, "NotFlagged", "Resource is not currently flagged as disputed."),
@@ -259,22 +259,15 @@ pub const ERROR_SCHEMA: &[(u32, &str, &str)] = &[
     (39, "FlagReasonHashTooLong", "`reason_hash` in `set_flag_reason_hash` exceeds `MAX_FLAG_REASON_HASH_LEN` (64 bytes)."),
     (40, "ContractPaused", "A state-changing method was called while the registry is paused."),
     (41, "NotSettler", "Caller does not hold the settler role."),
-    (42, "ReceiptAlreadyExists", "A payment receipt is already stored for the supplied `receipt_id`."),
-    (43, "InvalidPaymentTransition", "The requested payment receipt state transition is not allowed (e.g. settling an already-settled receipt)."),
+    (42, "ReceiptAlreadyExists", "A payment or refund receipt is already stored for the supplied id."),
+    (43, "InvalidPaymentTransition", "Payment is not settled, its creator refund deadline has expired, or a payment state transition is not allowed."),
     (44, "InvalidReceiptId", "`receipt_id` is empty or exceeds `MAX_RECEIPT_ID_LEN` (64 bytes)."),
     (45, "ContentHashTooLong", "`content_hash` exceeds `MAX_CONTENT_HASH_LEN` (128 bytes)."),
     (46, "AttestationHashTooLong", "`attestation_hash` exceeds `MAX_ATTESTATION_HASH_LEN` (64 bytes)."),
-    (47, "PaymentAmountMismatch", "Payment receipt amount does not match the resource's current price."),
-    (48, "DuplicateTxHash", "A payment receipt is already stored for the supplied settlement transaction hash (`tx_hash`)."),
+    (47, "PaymentAmountMismatch", "Payment amount differs from the resource price or cumulative refunds exceed the original payment."),
+    (48, "DuplicateTxHash", "A payment or refund receipt already uses the supplied transaction hash (`tx_hash`)."),
     (49, "FeeConfigNotSet", "`set_fee_recipient` or `set_fee_destination` was called before any fee config was set via `set_fee_config`."),
     (50, "AdminNominationExpired", "The pending admin nomination is missing or has expired."),
-    (51, "InvalidRefundWindow", "Refund window must be between 1 and `MAX_REFUND_WINDOW_LEDGERS` ledgers."),
-    (52, "PaymentNotSettled", "A refund can only be recorded for a settled payment receipt."),
-    (53, "RefundRecipientMismatch", "Refund recipient must match the original payment payer."),
-    (54, "RefundAmountExceeded", "Cumulative refunds cannot exceed the original payment amount."),
-    (55, "RefundWindowExpired", "The creator refund window has expired; use the admin override path."),
-    (56, "RefundAlreadyExists", "A refund receipt already exists for the supplied `refund_id`."),
-    (57, "DuplicateRefundTxHash", "A transaction hash is already recorded for a payment or refund."),
 ];
 
 /// Canonical list of every event topic this contract emits, paired with a
@@ -665,6 +658,8 @@ pub enum DataKey {
     RefundWindow,
     /// Resource creator who received the payment when it was recorded.
     PaymentRecipient(String),
+    TopTags,
+    TagCount(String),
 }
 
 /// Event data emitted when a resource's metadata pointer is updated.
@@ -891,7 +886,7 @@ pub enum Error {
     DuplicateInRepair = 23,
     /// A payment or refund `tx_hash` is empty or exceeds `MAX_TX_HASH_LEN` (128 bytes).
     InvalidTxHash = 24,
-    /// A payment or refund `amount` is `<= 0`.
+    /// A payment/refund `amount` is `<= 0`, or a refund window is invalid.
     InvalidPaymentAmount = 25,
     NotModerator = 26,
     AlreadyFlagged = 27,
@@ -937,13 +932,6 @@ pub enum Error {
     FeeConfigNotSet = 49,
     /// The pending admin nomination is missing or has expired.
     AdminNominationExpired = 50,
-    InvalidRefundWindow = 51,
-    PaymentNotSettled = 52,
-    RefundRecipientMismatch = 53,
-    RefundAmountExceeded = 54,
-    RefundWindowExpired = 55,
-    RefundAlreadyExists = 56,
-    DuplicateRefundTxHash = 57,
 }
 
 #[contract]
@@ -2689,15 +2677,11 @@ impl VaultRegistry {
 
     /// Configure the creator refund window for payments settled after this call.
     /// Existing payment deadlines are not changed. The initial value is one day.
-    pub fn set_refund_window(
-        env: Env,
-        admin: Address,
-        window_ledgers: u32,
-    ) -> Result<(), Error> {
+    pub fn set_refund_window(env: Env, admin: Address, window_ledgers: u32) -> Result<(), Error> {
         Self::require_current_admin(&env, &admin)?;
         Self::require_not_paused(&env)?;
         if window_ledgers == 0 || window_ledgers > MAX_REFUND_WINDOW_LEDGERS {
-            return Err(Error::InvalidRefundWindow);
+            return Err(Error::InvalidPaymentAmount);
         }
 
         let old_window = Self::refund_window(env.clone());
@@ -2705,8 +2689,10 @@ impl VaultRegistry {
             .instance()
             .set(&DataKey::RefundWindow, &window_ledgers);
         Self::bump_instance(&env);
-        env.events()
-            .publish((symbol_short!("refwin"), admin), (old_window, window_ledgers));
+        env.events().publish(
+            (symbol_short!("refwin"), admin),
+            (old_window, window_ledgers),
+        );
         Ok(())
     }
 
@@ -2974,7 +2960,7 @@ impl VaultRegistry {
     pub fn get_refund_deadline(env: Env, payment_receipt_id: String) -> Result<u32, Error> {
         let payment = Self::get_payment(env.clone(), payment_receipt_id.clone())?;
         if payment.state != PaymentState::Settled {
-            return Err(Error::PaymentNotSettled);
+            return Err(Error::InvalidPaymentTransition);
         }
         let key = DataKey::RefundDeadline(payment_receipt_id);
         if let Some(deadline) = env.storage().persistent().get(&key) {
@@ -3320,7 +3306,7 @@ impl VaultRegistry {
 
         let refund_key = DataKey::RefundReceipt(refund_id.clone());
         if env.storage().persistent().has(&refund_key) {
-            return Err(Error::RefundAlreadyExists);
+            return Err(Error::ReceiptAlreadyExists);
         }
         let refund_tx_key = DataKey::RefundTxHash(tx_hash.clone());
         if env.storage().persistent().has(&refund_tx_key)
@@ -3329,15 +3315,15 @@ impl VaultRegistry {
                 .persistent()
                 .has(&DataKey::PaymentTxHash(tx_hash.clone()))
         {
-            return Err(Error::DuplicateRefundTxHash);
+            return Err(Error::DuplicateTxHash);
         }
 
         let payment = Self::get_payment(env.clone(), payment_receipt_id.clone())?;
         if payment.state != PaymentState::Settled {
-            return Err(Error::PaymentNotSettled);
+            return Err(Error::InvalidPaymentTransition);
         }
         if recipient != payment.payer {
-            return Err(Error::RefundRecipientMismatch);
+            return Err(Error::Unauthorized);
         }
         let resource = Self::load(env, &payment.resource_id)?;
         let recipient_key = DataKey::PaymentRecipient(payment_receipt_id.clone());
@@ -3362,7 +3348,7 @@ impl VaultRegistry {
                         .saturating_add(DEFAULT_REFUND_WINDOW_LEDGERS)
                 });
             if env.ledger().sequence() >= deadline {
-                return Err(Error::RefundWindowExpired);
+                return Err(Error::InvalidPaymentTransition);
             }
         }
 
@@ -3373,11 +3359,11 @@ impl VaultRegistry {
             .get::<DataKey, i128>(&refunded_key)
             .unwrap_or(0);
         if amount > payment.amount.saturating_sub(refunded) {
-            return Err(Error::RefundAmountExceeded);
+            return Err(Error::PaymentAmountMismatch);
         }
         let next_refunded = refunded
             .checked_add(amount)
-            .ok_or(Error::RefundAmountExceeded)?;
+            .ok_or(Error::PaymentAmountMismatch)?;
 
         let refund = RefundReceipt {
             refund_id: refund_id.clone(),
@@ -3396,9 +3382,7 @@ impl VaultRegistry {
             .persistent()
             .set(&refunded_key, &next_refunded);
         Self::bump_persistent(env, &refunded_key);
-        env.storage()
-            .persistent()
-            .set(&refund_tx_key, &refund_id);
+        env.storage().persistent().set(&refund_tx_key, &refund_id);
         Self::bump_persistent(env, &refund_tx_key);
 
         env.events()

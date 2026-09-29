@@ -438,7 +438,7 @@ fn refunds_require_settled_payment_payer_and_remaining_amount() {
             &100i128,
             &String::from_str(&env, "refundtx2a"),
         ),
-        Err(Ok(Error::PaymentNotSettled))
+        Err(Ok(Error::InvalidPaymentTransition))
     );
 
     client.settle_payment(&settler, &payment_id);
@@ -451,7 +451,7 @@ fn refunds_require_settled_payment_payer_and_remaining_amount() {
             &100i128,
             &String::from_str(&env, "refundtx2b"),
         ),
-        Err(Ok(Error::RefundRecipientMismatch))
+        Err(Ok(Error::Unauthorized))
     );
     assert_eq!(
         client.try_record_creator_refund(
@@ -462,7 +462,7 @@ fn refunds_require_settled_payment_payer_and_remaining_amount() {
             &1_000_001i128,
             &String::from_str(&env, "refundtx2c"),
         ),
-        Err(Ok(Error::RefundAmountExceeded))
+        Err(Ok(Error::PaymentAmountMismatch))
     );
 
     client.record_creator_refund(
@@ -482,7 +482,7 @@ fn refunds_require_settled_payment_payer_and_remaining_amount() {
             &400_001i128,
             &String::from_str(&env, "refundtx2e"),
         ),
-        Err(Ok(Error::RefundAmountExceeded))
+        Err(Ok(Error::PaymentAmountMismatch))
     );
     assert_eq!(client.get_refunded_amount(&payment_id), 600_000i128);
 }
@@ -517,7 +517,7 @@ fn refund_deadline_is_snapshotted_and_admin_can_override_expiry() {
             &1_000_000i128,
             &String::from_str(&env, "refundtx3a"),
         ),
-        Err(Ok(Error::RefundWindowExpired))
+        Err(Ok(Error::InvalidPaymentTransition))
     );
 
     client.record_admin_refund(
