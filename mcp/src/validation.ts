@@ -319,6 +319,18 @@ export const TOOL_ARGUMENT_SPECS: Record<string, ToolArgumentSpec> = {
     confirmMainnet: CONFIRM_MAINNET,
     confirmPaid: CONFIRM_PAID,
   },
+  mindvault_buy_lease: {
+    resourceId: RESOURCE_ID,
+    tier: { kind: "enum", required: true, values: ["hour", "day", "week"] },
+    dryRun: DRY_RUN,
+    maxAutoPayUsdc: { kind: "string", maxLength: 32 },
+    confirmMainnet: CONFIRM_MAINNET,
+    confirmPaid: CONFIRM_PAID,
+  },
+  mindvault_lease_status: {
+    resourceId: RESOURCE_ID,
+    holder: STELLAR_ADDRESS,
+  },
   mindvault_agent_status: {},
   mindvault_registry_info: {},
   mindvault_terms: {

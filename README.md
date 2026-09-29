@@ -71,6 +71,8 @@ Available tools:
 | `mindvault_publish`            | Publish a resource and pay for verification via x402                       | `"Publish 'My Dataset' for 5 USDC at https://example.com/data"` |
 | `mindvault_publish_status`     | Poll verification and on-chain sync status after publish                   | `"Check publish status for swcn98besxpp6t1u8e77fqz3"`           |
 | `mindvault_buy`                | Pay USDC and access a resource via x402 (optional wait for settlement)     | `"Buy resource swcn98besxpp6t1u8e77fqz3"`                       |
+| `mindvault_buy_lease`          | Buy an hour, day, or week access lease, paid to the creator in USDC        | `"Lease swcn98besxpp6t1u8e77fqz3 for a day"`                    |
+| `mindvault_lease_status`       | Read the on-chain lease for a resource and holder and whether it is active | `"Is my lease on swcn98besxpp6t1u8e77fqz3 still active?"`       |
 | `mindvault_purchase_history`   | List locally persisted purchase receipts (filter by resource/network)      | `"Show my purchase history for stellar:testnet"`                |
 | `mindvault_export_receipts`    | Export purchase receipts as a schema-versioned JSON or CSV document        | `"Export August's receipts as CSV"`                             |
 | `mindvault_metrics`            | Read opt-in tool metrics, optionally reset, exported as JSON or OTLP       | `"Show metrics"`                                                |
@@ -220,7 +222,7 @@ The `PAYMENT-REQUIRED` header contains the price, destination wallet, network, a
 
 ## What Is Not Yet Built
 
-- Recurring access or time-limited leases (currently per-request) — see the design spike in [docs/adr-time-limited-access-leases.md](docs/adr-time-limited-access-leases.md)
+- Lease-aware access on the server (the paywall still charges per request; leases are recorded on-chain and bought through the MCP, see the implementation status in [docs/adr-time-limited-access-leases.md](docs/adr-time-limited-access-leases.md))
 - Full-text / indexed catalog search — current catalog filtering runs **in memory over the listed set** on each request (no database full-text index), which is fine at current scale but not a scalable search backend
 - Refund mechanism
 - Rate limiting

@@ -70,6 +70,7 @@ export const USDC_SPENDING_TOOLS = [
   "mindvault_publish",
   "mindvault_publish_batch",
   "mindvault_buy",
+  "mindvault_buy_lease",
 ] as const;
 
 /**

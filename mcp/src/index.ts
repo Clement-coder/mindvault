@@ -213,6 +213,7 @@ import {
   recordPreviewSnapshot,
 } from "./catalogCache.js";
 import { publishBatch, type BatchPublishItem } from "./tools/publish.js";
+import { buyLease, leaseStatus } from "./tools/leases.js";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -2228,13 +2229,7 @@ export async function buy(
     }
     assertAutoPaymentWithinCeiling({ price: meta.data.price, maxAutoPayUsdc });
     return JSON.stringify(
-      dryRunBuy(
-        resourceId,
-        NETWORK,
-        BASE_URL,
-        !!activeProfile().wallet,
-        String(meta.data.price),
-      ),
+      dryRunBuy(resourceId, NETWORK, BASE_URL, !!activeProfile().wallet, String(meta.data.price)),
       null,
       2,
     );
@@ -3766,6 +3761,7 @@ const STATE_MUTATING_TOOLS = new Set([
   "mindvault_publish",
   "mindvault_publish_batch",
   "mindvault_buy",
+  "mindvault_buy_lease",
   "mindvault_register_onchain",
   "mindvault_update_metadata",
   "mindvault_set_price",
@@ -3922,6 +3918,14 @@ async function dispatchToolOutcome(
           args.timeoutMs,
           args.intervalMs,
         );
+      case "mindvault_buy_lease":
+        return buyLease(requiredString(args, "resourceId"), requiredString(args, "tier"), {
+          dryRun: flag(args, "dryRun"),
+          maxAutoPayUsdc: optionalString(args, "maxAutoPayUsdc"),
+          onProgress,
+        });
+      case "mindvault_lease_status":
+        return leaseStatus(requiredString(args, "resourceId"), optionalString(args, "holder"));
       case "mindvault_purchase_history":
         return purchaseHistoryTool(rawRecord);
       case "mindvault_export_receipts":

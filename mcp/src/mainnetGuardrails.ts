@@ -44,6 +44,7 @@ export const MAINNET_GATED_TOOLS = [
   "mindvault_publish",
   "mindvault_publish_batch",
   "mindvault_buy",
+  "mindvault_buy_lease",
   "mindvault_register_onchain",
   "mindvault_reset",
   "mindvault_update_metadata",
