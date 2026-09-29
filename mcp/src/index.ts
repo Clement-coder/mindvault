@@ -2209,8 +2209,32 @@ export async function buy(
   intervalMs?: unknown,
 ): Promise<string> {
   if (dryRun) {
+    const initialDryRun = dryRunBuy(
+      resourceId,
+      NETWORK,
+      BASE_URL,
+      !!activeProfile().wallet,
+      estimatedPrice ?? null,
+    );
+    if (!initialDryRun.validation.resourceId.valid) {
+      return JSON.stringify(initialDryRun, null, 2);
+    }
+
+    const meta = await jsonFetch(`${BASE_URL}/resources/${resourceId}/meta`);
+    if (!meta.ok || meta.data?.price == null) {
+      throw new Error(
+        "Automatic payment blocked because the resource price could not be determined; no x402 payment was submitted.",
+      );
+    }
+    assertAutoPaymentWithinCeiling({ price: meta.data.price, maxAutoPayUsdc });
     return JSON.stringify(
-      dryRunBuy(resourceId, NETWORK, BASE_URL, !!activeProfile().wallet, estimatedPrice ?? null),
+      dryRunBuy(
+        resourceId,
+        NETWORK,
+        BASE_URL,
+        !!activeProfile().wallet,
+        String(meta.data.price),
+      ),
       null,
       2,
     );

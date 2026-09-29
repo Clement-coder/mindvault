@@ -144,8 +144,10 @@ Source: MindVault API · Category: network
 Next: Check network connectivity to the MindVault API and retry; if it stays down the mutation cannot succeed, so defer it.
 ```
 
-Dry-run publish and buy still skip the probe — they inspect validation without
-touching the network.
+Dry-run publish skips the probe and does not touch the network. Dry-run buy also
+skips this generic probe, but reads `GET /resources/{id}/meta` to obtain the
+quoted price and apply the same automatic-payment ceiling as a live buy. It
+does not submit a payment.
 
 ## Soft failures are not errors
 
