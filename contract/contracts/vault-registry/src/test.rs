@@ -10734,3 +10734,4 @@ include!("test/tombstone_read.rs");
 include!("test/creator_listed_count.rs");
 include!("test/memo_hash.rs");
 include!("test/flag_details.rs");
+include!("test/payment_idempotency.rs");

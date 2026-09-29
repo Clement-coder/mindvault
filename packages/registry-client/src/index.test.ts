@@ -209,6 +209,7 @@ describe("generated bindings (drift guard)", () => {
     "propose_transfer",
     "reactivate_resource",
     "record_payment",
+    "record_payment_idempotent",
     "register",
     "register_batch",
     "register_with_hash",

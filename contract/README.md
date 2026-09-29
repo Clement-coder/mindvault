@@ -289,6 +289,7 @@ See [`docs/adr-fee-config.md`](../docs/adr-fee-config.md) for the full design ra
 | `repair_index(ids)`                                                          | `admin`                                                  | `ids: Vec<String>` — authoritative ordered id list                                                                                                                                                                                                   | `Result<(), Error>`                    | Rebuild the pagination index and `Count` from an admin-supplied id list. Rejects duplicates with `DuplicateInRepair`. Emits `reindex`.                                                                                                                                                                   |
 | `repair_tag_index(ids)`                                                      | `admin`                                                  | `ids: Vec<String>` — authoritative ordered id list                                                                                                                                                                                                   | `Result<(), Error>`                    | Rebuild tag indexes from registered resources. Emits `retagidx`.                                                                                                                                                                                                                                         |
 | `record_payment(settler, receipt_id, resource_id, payer, amount, tx_hash)`   | `settler` + `payer`                                      | `settler: Address` — holder of the settler role; `receipt_id: String` — unique, 1-64 bytes; `resource_id: String`; `payer: Address`; `amount: i128` — `> 0`; `tx_hash: String` — 1-128 bytes                                                         | `Result<(), Error>`                    | Record an x402/Soroban payment receipt in `Escrowed` state and index it under `(resource_id, payer)`. Emits `payment`.                                                                                                                                                                                   |
+| `record_payment_idempotent(settler, receipt_id, resource_id, payer, amount, tx_hash)` | `settler` + `payer`                                      | Same as `record_payment`                                                                                                                                                                                                                             | `Result<PaymentReceipt, Error>`        | Retry-safe `record_payment` with the same auth, validation, and pause rules. When `receipt_id` is already stored with the same `resource_id`, `payer`, `amount`, and `tx_hash`, returns that receipt (in whatever state it is now) without writing or emitting an event; otherwise records a new receipt, emits `payment`, and returns it. The same id with different arguments errors `ReceiptAlreadyExists`. See [Retry-safe payment recording](#retry-safe-payment-recording). |
 | `settle_payment(settler, receipt_id)`                                        | `settler`                                                | `settler: Address`; `receipt_id: String`                                                                                                                                                                                                             | `Result<(), Error>`                    | Advance a receipt from `Escrowed` to `Settled`. Errors `InvalidPaymentTransition` if it is not escrowed. Emits `settle`.                                                                                                                                                                                 |
 | `get_payment(receipt_id)`                                                    | —                                                        | `receipt_id: String`                                                                                                                                                                                                                                 | `Result<PaymentReceipt, Error>`        | Fetch a receipt by id. Errors `NotFound` if absent. Bumps the entry's TTL.                                                                                                                                                                                                                               |
 | `get_payment_receipt(resource_id, payer)`                                    | —                                                        | `resource_id: String`; `payer: Address`                                                                                                                                                                                                              | `Result<PaymentReceipt, Error>`        | Fetch the most recent receipt recorded for the pair, via the `PaymentIndex` secondary index. Errors `NotFound` if absent.                                                                                                                                                                                |
@@ -754,6 +755,34 @@ pub struct AnchorFailure {
 }
 ```
 
+### Retry-safe payment recording
+
+`record_payment` keys each receipt by its caller-assigned `receipt_id` and
+rejects a second call with the same id as `ReceiptAlreadyExists`. That keeps
+receipts unique, but it means a settlement service that retries after a timeout
+or a restart cannot tell a duplicate from a payment it already recorded without
+first calling `get_payment`.
+
+`record_payment_idempotent` takes the same arguments and runs the same checks
+in the same order (settler role and auth, `receipt_id` shape, payer auth,
+pause, resource id, amount, `tx_hash` shape), then looks the id up:
+
+| Stored receipt for `receipt_id`                                  | Result                                                                  |
+| ---------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| None                                                             | Recorded exactly as `record_payment` would; emits `payment`; returns it |
+| Same `resource_id`, `payer`, `amount`, and `tx_hash`             | Returns the stored receipt as it is now; no write, no event             |
+| Any of `resource_id`, `payer`, `amount`, or `tx_hash` different  | `ReceiptAlreadyExists`                                                  |
+
+A retry is answered from the stored receipt, so it keeps working after the
+receipt has been settled (it comes back `Settled`) or the resource's price has
+changed since. It is still a write entry point, so it returns `ContractPaused`
+while the registry is paused, retry or not. A new `receipt_id` whose `tx_hash`
+already backs another receipt errors `DuplicateTxHash`, as with
+`record_payment`.
+
+`record_payment` itself is unchanged: callers that want a duplicate id to be an
+error keep calling it.
+
 ### Moderation state in one read
 
 `flag_details(id)` returns everything a moderation consumer needs in one call,
@@ -890,8 +919,8 @@ automatically resumes without a separate transaction.
 When paused, every write method (`register`, `set_price`, `update_metadata`,
 `freeze_metadata`, `set_verification_status`, `set_tags`, `transfer_ownership`,
 `propose_transfer`, `accept_transfer`, `cancel_transfer`, `set_listed`, `delist`,
-`repair_index`, `set_terms_hash`, `record_payment`) returns `Error::ContractPaused`
-(code `40`) without modifying any state.
+`repair_index`, `set_terms_hash`, `record_payment`, `record_payment_idempotent`)
+returns `Error::ContractPaused` (code `40`) without modifying any state.
 
 Read-only methods (`get`, `exists`, `list*`, `count`, `get_owner`, `registry_info`,
 `contract_version`, `get_terms_hash`, `get_payment_receipt`, `is_flagged`,
