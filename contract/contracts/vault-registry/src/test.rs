@@ -9176,11 +9176,7 @@ fn storage_key_wire_contract(env: &Env) -> [(DataKey, &'static str, u32); 37] {
         (DataKey::RefundTxHash(id.clone()), "RefundTxHash", 2),
         (DataKey::RefundDeadline(id.clone()), "RefundDeadline", 2),
         (DataKey::RefundWindow, "RefundWindow", 1),
-        (
-            DataKey::PaymentRecipient(id.clone()),
-            "PaymentRecipient",
-            2,
-        ),
+        (DataKey::PaymentRecipient(id.clone()), "PaymentRecipient", 2),
         (DataKey::TopTags, "TopTags", 1),
         (DataKey::TagCount(id), "TagCount", 2),
     ]
