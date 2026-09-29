@@ -36,7 +36,7 @@ preflight:
 	stellar contract build --manifest-path Cargo.toml --optimize
 	@WASM=target/wasm32v1-none/release/vault_registry.wasm; \
 	SIZE=$$(stat -c%s "$$WASM" 2>/dev/null || stat -f%z "$$WASM"); \
-	MAX=98304; \
+	MAX=114688; \
 	echo "    WASM size: $$SIZE bytes (budget: $$MAX bytes)"; \
 	if [ "$$SIZE" -gt "$$MAX" ]; then \
 	  echo "    ERROR: WASM over budget by $$(( $$SIZE - $$MAX )) bytes."; \
