@@ -2437,7 +2437,10 @@ fn expired_admin_nomination_can_be_replaced() {
     env.ledger().set_sequence_number(expiry);
 
     assert_eq!(client.try_nominate_new_admin(&replacement), Ok(Ok(())));
-    assert_eq!(client.pending_admin(), Some(replacement));
+    assert_eq!(client.pending_admin(), Some(replacement.clone()));
+    assert!(client.pending_admin_expiry().unwrap() > expiry);
+    client.accept_admin(&replacement);
+    assert_eq!(client.admin(), Some(replacement));
 }
 
 #[test]
@@ -2457,26 +2460,6 @@ fn expired_admin_nomination_cannot_be_accepted() {
     );
     assert_eq!(client.admin(), Some(admin));
     assert_eq!(client.pending_admin(), Some(pending));
-}
-
-#[test]
-fn expired_admin_nomination_can_be_replaced() {
-    let (env, _creator, client) = setup();
-    let admin = Address::generate(&env);
-    let expired_pending = Address::generate(&env);
-    let replacement = Address::generate(&env);
-
-    client.nominate_new_admin(&admin);
-    client.nominate_new_admin(&expired_pending);
-    let expiry = client.pending_admin_expiry().unwrap();
-    env.ledger().set_sequence_number(expiry);
-
-    client.nominate_new_admin(&replacement);
-
-    assert_eq!(client.pending_admin(), Some(replacement.clone()));
-    assert!(client.pending_admin_expiry().unwrap() > expiry);
-    client.accept_admin(&replacement);
-    assert_eq!(client.admin(), Some(replacement));
 }
 
 #[test]
@@ -9139,7 +9122,7 @@ fn storage_key_variant(env: &Env, key: &DataKey) -> Symbol {
 /// Every `DataKey` variant, with the name and arity it must keep across
 /// upgrades. Adding a variant means adding a row here — the exhaustive match in
 /// `storage_key_migration_covers_every_variant` will not compile until you do.
-fn storage_key_wire_contract(env: &Env) -> [(DataKey, &'static str, u32); 28] {
+fn storage_key_wire_contract(env: &Env) -> [(DataKey, &'static str, u32); 37] {
     let id = String::from_str(env, "migkey");
     let who = Address::generate(env);
     [
@@ -9187,6 +9170,19 @@ fn storage_key_wire_contract(env: &Env) -> [(DataKey, &'static str, u32); 28] {
             2,
         ),
         (DataKey::MemoHash(id), "MemoHash", 2),
+        (DataKey::FeeDestination, "FeeDestination", 1),
+        (DataKey::RefundReceipt(id.clone()), "RefundReceipt", 2),
+        (DataKey::RefundedAmount(id.clone()), "RefundedAmount", 2),
+        (DataKey::RefundTxHash(id.clone()), "RefundTxHash", 2),
+        (DataKey::RefundDeadline(id.clone()), "RefundDeadline", 2),
+        (DataKey::RefundWindow, "RefundWindow", 1),
+        (
+            DataKey::PaymentRecipient(id.clone()),
+            "PaymentRecipient",
+            2,
+        ),
+        (DataKey::TopTags, "TopTags", 1),
+        (DataKey::TagCount(id), "TagCount", 2),
     ]
 }
 
@@ -9228,7 +9224,7 @@ fn storage_key_migration_covers_every_variant() {
     let contract = storage_key_wire_contract(&env);
     assert_eq!(
         contract.len(),
-        28,
+        37,
         "storage_key_wire_contract must list every DataKey variant"
     );
 
@@ -9276,8 +9272,7 @@ fn same_string_addresses_a_different_entry_per_key_variant() {
     let (env, _creator, client) = setup();
     let shared = String::from_str(&env, "collide");
 
-    // Six variants take a bare String. If any two encoded to the same address,
-    // one would overwrite another and a resource id could clobber a tag index.
+    // String-keyed variants must remain distinct even when given identical ids.
     env.as_contract(&client.address, || {
         let keys = [
             DataKey::Resource(shared.clone()),
@@ -9286,6 +9281,12 @@ fn same_string_addresses_a_different_entry_per_key_variant() {
             DataKey::DisputeFlag(shared.clone()),
             DataKey::FlagReasonHash(shared.clone()),
             DataKey::MemoHash(shared.clone()),
+            DataKey::RefundReceipt(shared.clone()),
+            DataKey::RefundedAmount(shared.clone()),
+            DataKey::RefundTxHash(shared.clone()),
+            DataKey::RefundDeadline(shared.clone()),
+            DataKey::PaymentRecipient(shared.clone()),
+            DataKey::TagCount(shared.clone()),
         ];
         for (marker, key) in keys.iter().enumerate() {
             env.storage().persistent().set(key, &(marker as u32));
