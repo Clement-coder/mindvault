@@ -9169,7 +9169,7 @@ fn storage_key_wire_contract(env: &Env) -> [(DataKey, &'static str, u32); 37] {
             "CreatorListedCount",
             2,
         ),
-        (DataKey::MemoHash(id), "MemoHash", 2),
+        (DataKey::MemoHash(id.clone()), "MemoHash", 2),
         (DataKey::FeeDestination, "FeeDestination", 1),
         (DataKey::RefundReceipt(id.clone()), "RefundReceipt", 2),
         (DataKey::RefundedAmount(id.clone()), "RefundedAmount", 2),
@@ -9255,6 +9255,14 @@ fn storage_key_migration_covers_every_variant() {
             DataKey::CreatorListedCount(_) => "CreatorListedCount",
             DataKey::MemoHash(_) => "MemoHash",
             DataKey::FeeDestination => "FeeDestination",
+            DataKey::RefundReceipt(_) => "RefundReceipt",
+            DataKey::RefundedAmount(_) => "RefundedAmount",
+            DataKey::RefundTxHash(_) => "RefundTxHash",
+            DataKey::RefundDeadline(_) => "RefundDeadline",
+            DataKey::RefundWindow => "RefundWindow",
+            DataKey::PaymentRecipient(_) => "PaymentRecipient",
+            DataKey::TopTags => "TopTags",
+            DataKey::TagCount(_) => "TagCount",
         };
         assert_eq!(
             matched, *name,
