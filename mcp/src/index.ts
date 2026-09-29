@@ -110,6 +110,7 @@ import {
   normalizeTimeoutMs,
   normalizeWaitFlag,
   pollPublishStatus,
+  publishStatusFromResponses,
   type PublishProgressReporter,
   type PublishStatusFetch,
 } from "./publishStatus.js";
@@ -123,7 +124,10 @@ import {
 } from "./resourceSubscriptionTool.js";
 import { type ApiResponse } from "./apiResponse.js";
 import { safeErrorMessage, safeLog } from "./redaction.js";
-import { assertAutoPaymentWithinCeiling, assertTransactionFeeWithinCeiling } from "./paymentCeiling.js";
+import {
+  assertAutoPaymentWithinCeiling,
+  assertTransactionFeeWithinCeiling,
+} from "./paymentCeiling.js";
 import {
   compareUsdc,
   normalizeUsdcBalance,
@@ -332,8 +336,7 @@ export function _setAgentWallet(w: AgentWallet | null): void {
   if (w) {
     activeProfile().wallet = w;
     bindActiveProfileToNetwork();
-  }
-  else delete activeProfile().wallet;
+  } else delete activeProfile().wallet;
 }
 export function _setAgentApiKey(k: string | null): void {
   if (k) activeProfile().apiKey = k;
@@ -1944,33 +1947,7 @@ export async function preview(resourceId: string): Promise<string> {
 async function fetchPublishStatusData(resourceId: string): Promise<PublishStatusFetch> {
   const metaRes = await jsonFetch(`${BASE_URL}/resources/${resourceId}/meta`);
   const verRes = await jsonFetch(`${BASE_URL}/resources/${resourceId}/verification`);
-
-  if (metaRes.status === 404 && verRes.status === 404) {
-    throw new Error(
-      `Resource "${resourceId}" not found. Confirm the id from mindvault_publish or mindvault_browse.`,
-    );
-  }
-
-  if (!metaRes.ok && metaRes.status !== 404) {
-    throw new Error(
-      `Publish status meta failed [${metaRes.status}]: ${JSON.stringify(metaRes.data)}`,
-    );
-  }
-  if (!verRes.ok && verRes.status !== 404) {
-    throw new Error(
-      `Publish status verification failed [${verRes.status}]: ${JSON.stringify(verRes.data)}`,
-    );
-  }
-  if (!metaRes.ok && !verRes.ok) {
-    throw new Error(
-      `Resource "${resourceId}" not found. Confirm the id from mindvault_publish or mindvault_browse.`,
-    );
-  }
-
-  return {
-    meta: metaRes.ok ? metaRes.data : null,
-    verification: verRes.ok ? verRes.data : null,
-  };
+  return publishStatusFromResponses(resourceId, metaRes, verRes);
 }
 
 function sleepMs(ms: number): Promise<void> {
@@ -3887,13 +3864,19 @@ async function dispatchToolOutcome(
             throw new Error(`mindvault_publish_batch: items[${i}] must be an object.`);
           }
           if (typeof item.title !== "string" || item.title.trim() === "") {
-            throw new Error(`mindvault_publish_batch: items[${i}].title must be a non-empty string.`);
+            throw new Error(
+              `mindvault_publish_batch: items[${i}].title must be a non-empty string.`,
+            );
           }
           if (typeof item.price !== "string" || item.price.trim() === "") {
-            throw new Error(`mindvault_publish_batch: items[${i}].price must be a non-empty string.`);
+            throw new Error(
+              `mindvault_publish_batch: items[${i}].price must be a non-empty string.`,
+            );
           }
           if (typeof item.externalUrl !== "string" || item.externalUrl.trim() === "") {
-            throw new Error(`mindvault_publish_batch: items[${i}].externalUrl must be a non-empty string.`);
+            throw new Error(
+              `mindvault_publish_batch: items[${i}].externalUrl must be a non-empty string.`,
+            );
           }
           return {
             title: item.title,
