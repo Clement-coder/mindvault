@@ -225,6 +225,9 @@ pub const ERROR_SCHEMA: &[(u32, &str, &str)] = &[
     (43, "InvalidPaymentTransition", "The requested payment receipt state transition is not allowed (e.g. settling an already-settled receipt)."),
     (44, "InvalidReceiptId", "`receipt_id` is empty or exceeds `MAX_RECEIPT_ID_LEN` (64 bytes)."),
     (45, "ContentHashTooLong", "`content_hash` exceeds `MAX_CONTENT_HASH_LEN` (128 bytes)."),
+    (46, "AttestationHashTooLong", "`attestation_hash` exceeds `MAX_ATTESTATION_HASH_LEN` (64 bytes)."),
+    (47, "PaymentAmountMismatch", "Payment receipt amount does not match the resource's current price."),
+    (48, "ResourceTombstoned", "Operation attempted on a tombstoned resource; tombstoned resources cannot be modified."),
 ];
 
 /// Canonical list of every event topic this contract emits, paired with a
@@ -740,6 +743,8 @@ pub enum Error {
     AttestationHashTooLong = 46,
     /// Payment receipt amount does not match the resource's current price.
     PaymentAmountMismatch = 47,
+    /// Operation attempted on a tombstoned resource. Tombstoned resources cannot be modified.
+    ResourceTombstoned = 48,
 }
 
 #[contract]
@@ -2612,6 +2617,10 @@ impl VaultRegistry {
         resource: &mut Resource,
         next: ResourceState,
     ) -> Result<(), Error> {
+        // Check if resource is tombstoned first - tombstoned resources have no outgoing transitions
+        if resource.state == ResourceState::Tombstoned {
+            return Err(Error::ResourceTombstoned);
+        }
         let allowed = matches!(
             (resource.state, next),
             (ResourceState::Listed, ResourceState::Delisted)
