@@ -163,6 +163,10 @@ jobs:
         working-directory: contract
         run: cargo test
 
+      - name: Refresh storage footprint report
+        working-directory: contract/contracts/vault-registry
+        run: make footprint
+
   no-std-check:
     name: Check no_std Compatibility
     runs-on: ubuntu-latest

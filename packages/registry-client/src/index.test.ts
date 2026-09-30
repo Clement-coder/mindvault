@@ -1,9 +1,11 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import { Networks } from "@stellar/stellar-sdk";
+import { Client as ContractClient } from "@stellar/stellar-sdk/contract";
 import {
   Client,
   Errors,
   createRegistryClient,
+  getAttestationHash,
   listResources,
   networks,
   getNetworkPreset,
@@ -40,6 +42,7 @@ describe("network defaults", () => {
     expect(t.networkPassphrase).toBe(Networks.TESTNET);
     expect(t.x402Network).toBe("stellar:testnet");
     expect(t.sorobanRpcUrl).toBe("https://soroban-testnet.stellar.org");
+    expect(t.explorerBaseUrl).toBe("https://stellar.expert");
     expect(t.explorerNetwork).toBe("testnet");
     // Testnet ships a known deployed registry; consumers default to it.
     expect(t.defaultRegistryContractId).toMatch(/^C[A-Z0-9]{55}$/);
@@ -51,6 +54,7 @@ describe("network defaults", () => {
     expect(m.networkPassphrase).toBe(Networks.PUBLIC);
     expect(m.x402Network).toBe("stellar:pubnet");
     expect(m.sorobanRpcUrl).toBe("https://soroban.stellar.org");
+    expect(m.explorerBaseUrl).toBe("https://stellar.expert");
     expect(m.explorerNetwork).toBe("public");
     // Mainnet operators deploy their own contract; no baked-in default.
     expect(m.defaultRegistryContractId).toBeNull();
@@ -86,7 +90,8 @@ describe("network defaults", () => {
 
 describe("generated bindings (drift guard)", () => {
   // The exact error variants the vault-registry contract defines. Re-generating
-  // bindings against a contract with different errors changes this map.
+  // bindings against a contract with different errors changes this map. Soroban
+  // caps a contract error enum at 50 cases, so 50 is the ceiling, not a choice.
   const EXPECTED_ERRORS: Record<number, string> = {
     1: "AlreadyRegistered",
     2: "NotFound",
@@ -121,49 +126,120 @@ describe("generated bindings (drift guard)", () => {
     31: "NetworkAlreadyInitialized",
     32: "NetworkIdMismatch",
     33: "NetworkNotInitialized",
+    34: "FeeBpsTooHigh",
+    35: "TotalFeeTooHigh",
+    36: "CountOverflow",
+    37: "BatchTooLarge",
+    38: "DuplicateReceipt",
+    39: "FlagReasonHashTooLong",
+    40: "ContractPaused",
+    41: "NotSettler",
+    42: "ReceiptAlreadyExists",
+    43: "InvalidPaymentTransition",
+    44: "InvalidReceiptId",
+    45: "ContentHashTooLong",
+    46: "AttestationHashTooLong",
+    47: "PaymentAmountMismatch",
+    48: "DuplicateTxHash",
+    49: "FeeConfigNotSet",
+    50: "AdminNominationExpired",
   };
-
-  // The full set of contract methods consumers call. Adding/removing/renaming a
-  // contract function changes this set.
+  // The full set of contract methods consumers call, mirroring the contract's
+  // METHOD_SCHEMA. Adding, removing or renaming a contract function changes
+  // this set, and the bindings must be regenerated with pnpm contract:bindings
+  // to match.
   const EXPECTED_METHODS = [
     "accept_admin",
     "accept_transfer",
+    "add_moderator",
+    "add_settler",
     "add_verifier",
     "admin",
+    "anchor_purchase_receipt",
+    "attempt_anchor_purchase_receipt",
     "cancel_transfer",
     "contract_version",
     "count",
+    "creator_listed_count",
     "creator_resource_count",
     "delist",
+    "emergency_delist",
     "exists",
+    "exists_many",
+    "extend_resource_ttl",
+    "flag_details",
+    "flag_resource",
     "freeze_metadata",
     "freeze_resource",
     "get",
+    "get_attestation_hash",
+    "get_fee_config",
+    "get_fee_destination",
+    "get_flag_reason_hash",
+    "get_many",
+    "get_memo_hash",
     "get_owner",
+    "get_owner_many",
+    "get_payment",
+    "get_payment_receipt",
+    "get_purchase_receipt",
+    "get_resource_state",
     "get_terms_hash",
     "initialize_network",
+    "is_flagged",
+    "is_moderator",
+    "is_paused",
+    "is_settler",
     "is_verifier",
     "list",
     "list_by_creator",
+    "list_by_dispute_status",
+    "list_by_tag",
+    "list_by_verification_status",
     "list_listed",
     "list_page",
+    "listed_count",
     "network_id",
     "nominate_new_admin",
     "open_dispute",
+    "override_purchase_receipt_anchor",
+    "pause_until",
     "pending_admin",
+    "pending_admin_expiry",
     "propose_transfer",
+    "reactivate_resource",
+    "record_payment",
+    "record_payment_idempotent",
     "register",
+    "register_batch",
+    "register_with_hash",
+    "register_with_memo",
     "registry_info",
+    "remove_moderator",
+    "remove_settler",
     "remove_verifier",
     "repair_index",
+    "repair_tag_index",
     "resolve_dispute",
+    "rotate_verifier",
+    "set_fee_config",
+    "set_fee_destination",
+    "set_fee_recipient",
+    "set_flag_reason_hash",
     "set_listed",
+    "set_paused",
+    "set_paused_until",
     "set_price",
+    "set_price_many",
+    "set_royalty_recipient",
     "set_tags",
+    "top_tags",
     "set_terms_hash",
     "set_verification_status",
+    "settle_payment",
     "tombstone_resource",
     "transfer_ownership",
+    "unflag_resource",
     "update_metadata",
   ];
 
@@ -197,6 +273,54 @@ describe("generated bindings (drift guard)", () => {
     }
 
     expect(typeof listResources).toBe("function");
+  });
+});
+
+describe("getAttestationHash", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("reads the deployed contract method and returns its result", async () => {
+    const method = vi.fn().mockResolvedValue({ result: "attestation-1" });
+    vi.spyOn(ContractClient, "from").mockResolvedValue({
+      get_attestation_hash: method,
+    } as never);
+
+    await expect(
+      getAttestationHash({
+        contractId: networks.testnet.defaultRegistryContractId!,
+        rpcUrl: networks.testnet.sorobanRpcUrl,
+        resourceId: "res1",
+      }),
+    ).resolves.toBe("attestation-1");
+    expect(method).toHaveBeenCalledWith({ id: "res1" });
+  });
+
+  it("returns null when the contract has no recorded attestation", async () => {
+    vi.spyOn(ContractClient, "from").mockResolvedValue({
+      get_attestation_hash: vi.fn().mockResolvedValue({ result: null }),
+    } as never);
+
+    await expect(
+      getAttestationHash({
+        contractId: networks.testnet.defaultRegistryContractId!,
+        rpcUrl: networks.testnet.sorobanRpcUrl,
+        resourceId: "res1",
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it("fails clearly when the deployed contract lacks the method", async () => {
+    vi.spyOn(ContractClient, "from").mockResolvedValue({} as never);
+
+    await expect(
+      getAttestationHash({
+        contractId: networks.testnet.defaultRegistryContractId!,
+        rpcUrl: networks.testnet.sorobanRpcUrl,
+        resourceId: "res1",
+      }),
+    ).rejects.toThrow("does not expose get_attestation_hash");
   });
 });
 

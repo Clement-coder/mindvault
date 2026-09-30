@@ -133,6 +133,7 @@ export const openApiSpec = {
           listed: { type: "boolean" },
           onchainStatus: { type: "string", enum: ["none", "pending", "registered", "failed"] },
           onchainTxHash: { type: "string", nullable: true },
+          tags: { type: "array", items: { type: "string" } },
           contentHash: {
             type: "string",
             nullable: true,

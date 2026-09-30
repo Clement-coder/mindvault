@@ -34,7 +34,7 @@ export async function pollResourceSubscription<T>(
   const startedAt = now();
   let attempts = 0;
 
-  while (true) {
+  for (;;) {
     const snapshot = await options.fetch();
     attempts += 1;
     if (options.isSettled(snapshot)) {

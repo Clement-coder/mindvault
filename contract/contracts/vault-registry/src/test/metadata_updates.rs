@@ -681,7 +681,7 @@ proptest! {
         meta_str_2 in r"[a-zA-Z0-9:/\\._-]{1,500}",
         listed in any::<bool>(),
     ) {
-        let env = env_without_snapshots();
+        let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register(VaultRegistry, ());
         let client = VaultRegistryClient::new(&env, &contract_id);

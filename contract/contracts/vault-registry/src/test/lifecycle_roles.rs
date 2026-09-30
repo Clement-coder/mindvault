@@ -336,7 +336,7 @@ fn verifier_can_verify_pending_resource() {
     let verifier = Address::generate(&env);
     client.add_verifier(&verifier);
 
-    client.set_verification_status(&id, &verifier, &VerificationStatus::Verified);
+    client.set_verification_status(&id, &verifier, &VerificationStatus::Verified, &None::<String>);
     assert_eq!(client.get(&id).verified, VerificationStatus::Verified);
 }
 
@@ -347,15 +347,16 @@ fn set_verification_status_emits_old_and_new_status() {
     let verifier = Address::generate(&env);
     client.add_verifier(&verifier);
 
-    client.set_verification_status(&id, &verifier, &VerificationStatus::Verified);
+    client.set_verification_status(&id, &verifier, &VerificationStatus::Verified, &None::<String>);
 
     let all = env.events().all();
     let (_contract, _topics, data) = all.get_unchecked(all.len() - 1);
-    let decoded: (VerificationStatus, VerificationStatus) =
-        <(VerificationStatus, VerificationStatus)>::try_from_val(&env, &data)
+    let decoded: (VerificationStatus, VerificationStatus, Option<String>) =
+        <(VerificationStatus, VerificationStatus, Option<String>)>::try_from_val(&env, &data)
             .expect("failed to decode verification event");
     assert_eq!(decoded.0, VerificationStatus::Pending);
     assert_eq!(decoded.1, VerificationStatus::Verified);
+    assert_eq!(decoded.2, None);
 }
 
 #[test]
@@ -364,7 +365,7 @@ fn non_verifier_cannot_set_verification_status() {
     let id = register_default(&env, &creator, &client, "vres3");
     let stranger = Address::generate(&env);
 
-    let res = client.try_set_verification_status(&id, &stranger, &VerificationStatus::Verified);
+    let res = client.try_set_verification_status(&id, &stranger, &VerificationStatus::Verified, &None::<String>);
     assert_eq!(res, Err(Ok(Error::NotVerifier)));
     assert_eq!(client.get(&id).verified, VerificationStatus::Pending);
 }
@@ -377,7 +378,7 @@ fn revoked_verifier_cannot_set_verification_status() {
     client.add_verifier(&verifier);
     client.remove_verifier(&verifier);
 
-    let res = client.try_set_verification_status(&id, &verifier, &VerificationStatus::Verified);
+    let res = client.try_set_verification_status(&id, &verifier, &VerificationStatus::Verified, &None::<String>);
     assert_eq!(res, Err(Ok(Error::NotVerifier)));
 }
 
@@ -389,7 +390,7 @@ fn verification_self_transition_rejected() {
     client.add_verifier(&verifier);
 
     // Pending -> Pending is a no-op and rejected as invalid.
-    let res = client.try_set_verification_status(&id, &verifier, &VerificationStatus::Pending);
+    let res = client.try_set_verification_status(&id, &verifier, &VerificationStatus::Pending, &None::<String>);
     assert_eq!(res, Err(Ok(Error::InvalidVerificationTransition)));
 }
 
@@ -400,8 +401,8 @@ fn verification_cannot_revert_to_pending() {
     let verifier = Address::generate(&env);
     client.add_verifier(&verifier);
 
-    client.set_verification_status(&id, &verifier, &VerificationStatus::Verified);
-    let res = client.try_set_verification_status(&id, &verifier, &VerificationStatus::Pending);
+    client.set_verification_status(&id, &verifier, &VerificationStatus::Verified, &None::<String>);
+    let res = client.try_set_verification_status(&id, &verifier, &VerificationStatus::Pending, &None::<String>);
     assert_eq!(res, Err(Ok(Error::InvalidVerificationTransition)));
 }
 
@@ -412,11 +413,11 @@ fn verification_round_trip_verified_rejected_verified() {
     let verifier = Address::generate(&env);
     client.add_verifier(&verifier);
 
-    client.set_verification_status(&id, &verifier, &VerificationStatus::Verified);
-    client.set_verification_status(&id, &verifier, &VerificationStatus::Rejected);
+    client.set_verification_status(&id, &verifier, &VerificationStatus::Verified, &None::<String>);
+    client.set_verification_status(&id, &verifier, &VerificationStatus::Rejected, &None::<String>);
     assert_eq!(client.get(&id).verified, VerificationStatus::Rejected);
 
-    client.set_verification_status(&id, &verifier, &VerificationStatus::Verified);
+    client.set_verification_status(&id, &verifier, &VerificationStatus::Verified, &None::<String>);
     assert_eq!(client.get(&id).verified, VerificationStatus::Verified);
 }
 
@@ -426,11 +427,7 @@ fn verification_status_on_missing_resource_fails() {
     let verifier = Address::generate(&env);
     client.add_verifier(&verifier);
 
-    let res = client.try_set_verification_status(
-        &String::from_str(&env, "nosuchresource"),
-        &verifier,
-        &VerificationStatus::Verified,
-    );
+    let res = client.try_set_verification_status(&String::from_str(&env, "nosuchresource"), &verifier, &VerificationStatus::Verified, &None::<String>);
     assert_eq!(res, Err(Ok(Error::NotFound)));
 }
 
@@ -1031,4 +1028,168 @@ proptest! {
         prop_assert_eq!(after.creator, before.creator);
         prop_assert_eq!(after.metadata, before.metadata);
     }
+}
+
+// ─── list_by_verification_status query (#621) ─────────────────────────────
+
+#[test]
+fn list_by_verification_status_empty_registry_returns_empty() {
+    let (env, _creator, _admin, client) = setup_with_admin();
+    
+    let pending = client.list_by_verification_status(&VerificationStatus::Pending, &0u32, &20u32);
+    assert_eq!(pending.items.len(), 0);
+    assert_eq!(pending.next_cursor, None);
+    
+    let verified = client.list_by_verification_status(&VerificationStatus::Verified, &0u32, &20u32);
+    assert_eq!(verified.items.len(), 0);
+    assert_eq!(verified.next_cursor, None);
+    
+    let rejected = client.list_by_verification_status(&VerificationStatus::Rejected, &0u32, &20u32);
+    assert_eq!(rejected.items.len(), 0);
+    assert_eq!(rejected.next_cursor, None);
+}
+
+#[test]
+fn list_by_verification_status_only_verified_records() {
+    let (env, creator, _admin, client) = setup_with_admin();
+    let verifier = Address::generate(&env);
+    client.add_verifier(&verifier);
+    
+    let id1 = register_default(&env, &creator, &client, "verif0");
+    let id2 = register_default(&env, &creator, &client, "verif1");
+    
+    client.set_verification_status(&id1, &verifier, &VerificationStatus::Verified, &None);
+    client.set_verification_status(&id2, &verifier, &VerificationStatus::Verified, &None);
+    
+    let verified = client.list_by_verification_status(&VerificationStatus::Verified, &0u32, &20u32);
+    assert_eq!(verified.items.len(), 2);
+    assert_eq!(verified.items.get(0).unwrap().id, id1);
+    assert_eq!(verified.items.get(1).unwrap().id, id2);
+    assert_eq!(verified.next_cursor, None);
+    
+    let pending = client.list_by_verification_status(&VerificationStatus::Pending, &0u32, &20u32);
+    assert_eq!(pending.items.len(), 0);
+    
+    let rejected = client.list_by_verification_status(&VerificationStatus::Rejected, &0u32, &20u32);
+    assert_eq!(rejected.items.len(), 0);
+}
+
+#[test]
+fn list_by_verification_status_only_unverified_records() {
+    let (env, creator, _admin, client) = setup_with_admin();
+    let verifier = Address::generate(&env);
+    client.add_verifier(&verifier);
+    
+    let id1 = register_default(&env, &creator, &client, "pend0");
+    let id2 = register_default(&env, &creator, &client, "pend1");
+    let id3 = register_default(&env, &creator, &client, "reject0");
+    
+    client.set_verification_status(&id3, &verifier, &VerificationStatus::Rejected, &None);
+    
+    let pending = client.list_by_verification_status(&VerificationStatus::Pending, &0u32, &20u32);
+    assert_eq!(pending.items.len(), 2);
+    assert_eq!(pending.items.get(0).unwrap().id, id1);
+    assert_eq!(pending.items.get(1).unwrap().id, id2);
+    
+    let rejected = client.list_by_verification_status(&VerificationStatus::Rejected, &0u32, &20u32);
+    assert_eq!(rejected.items.len(), 1);
+    assert_eq!(rejected.items.get(0).unwrap().id, id3);
+    
+    let verified = client.list_by_verification_status(&VerificationStatus::Verified, &0u32, &20u32);
+    assert_eq!(verified.items.len(), 0);
+}
+
+#[test]
+fn list_by_verification_status_mixed_records() {
+    let (env, creator, _admin, client) = setup_with_admin();
+    let verifier = Address::generate(&env);
+    client.add_verifier(&verifier);
+    
+    let pending1 = register_default(&env, &creator, &client, "mixpend1");
+    let verified1 = register_default(&env, &creator, &client, "mixverif1");
+    let rejected1 = register_default(&env, &creator, &client, "mixreject1");
+    let pending2 = register_default(&env, &creator, &client, "mixpend2");
+    let verified2 = register_default(&env, &creator, &client, "mixverif2");
+    
+    client.set_verification_status(&verified1, &verifier, &VerificationStatus::Verified, &None);
+    client.set_verification_status(&verified2, &verifier, &VerificationStatus::Verified, &None);
+    client.set_verification_status(&rejected1, &verifier, &VerificationStatus::Rejected, &None);
+    
+    let verified_page = client.list_by_verification_status(&VerificationStatus::Verified, &0u32, &20u32);
+    assert_eq!(verified_page.items.len(), 2);
+    assert_eq!(verified_page.items.get(0).unwrap().id, verified1);
+    assert_eq!(verified_page.items.get(1).unwrap().id, verified2);
+    
+    let pending_page = client.list_by_verification_status(&VerificationStatus::Pending, &0u32, &20u32);
+    assert_eq!(pending_page.items.len(), 2);
+    assert_eq!(pending_page.items.get(0).unwrap().id, pending1);
+    assert_eq!(pending_page.items.get(1).unwrap().id, pending2);
+    
+    let rejected_page = client.list_by_verification_status(&VerificationStatus::Rejected, &0u32, &20u32);
+    assert_eq!(rejected_page.items.len(), 1);
+    assert_eq!(rejected_page.items.get(0).unwrap().id, rejected1);
+}
+
+#[test]
+fn list_by_verification_status_is_read_only() {
+    let (env, creator, _admin, client) = setup_with_admin();
+    let verifier = Address::generate(&env);
+    client.add_verifier(&verifier);
+    
+    let id = register_default(&env, &creator, &client, "readonly");
+    client.set_verification_status(&id, &verifier, &VerificationStatus::Verified, &None);
+    
+    let before = client.get(&id);
+    let _page = client.list_by_verification_status(&VerificationStatus::Verified, &0u32, &20u32);
+    let after = client.get(&id);
+    
+    assert_eq!(before.version, after.version, "query must not modify resource version");
+    assert_eq!(before.verified, after.verified, "query must not modify verification status");
+}
+
+#[test]
+fn list_by_verification_status_respects_catalog_order() {
+    let (env, creator, _admin, client) = setup_with_admin();
+    let verifier = Address::generate(&env);
+    client.add_verifier(&verifier);
+    
+    let id1 = register_default(&env, &creator, &client, "order1");
+    let id2 = register_default(&env, &creator, &client, "order2");
+    let id3 = register_default(&env, &creator, &client, "order3");
+    
+    client.set_verification_status(&id1, &verifier, &VerificationStatus::Verified, &None);
+    client.set_verification_status(&id2, &verifier, &VerificationStatus::Verified, &None);
+    client.set_verification_status(&id3, &verifier, &VerificationStatus::Verified, &None);
+    
+    let page = client.list_by_verification_status(&VerificationStatus::Verified, &0u32, &20u32);
+    assert_eq!(page.items.len(), 3);
+    assert_eq!(page.items.get(0).unwrap().id, id1, "results must preserve registration order");
+    assert_eq!(page.items.get(1).unwrap().id, id2);
+    assert_eq!(page.items.get(2).unwrap().id, id3);
+}
+
+#[test]
+fn list_by_verification_status_pagination_works() {
+    let (env, creator, _admin, client) = setup_with_admin();
+    let verifier = Address::generate(&env);
+    client.add_verifier(&verifier);
+    
+    let id1 = register_default(&env, &creator, &client, "page1");
+    let id2 = register_default(&env, &creator, &client, "page2");
+    let id3 = register_default(&env, &creator, &client, "page3");
+    
+    client.set_verification_status(&id1, &verifier, &VerificationStatus::Verified, &None);
+    client.set_verification_status(&id2, &verifier, &VerificationStatus::Verified, &None);
+    client.set_verification_status(&id3, &verifier, &VerificationStatus::Verified, &None);
+    
+    let page1 = client.list_by_verification_status(&VerificationStatus::Verified, &0u32, &2u32);
+    assert_eq!(page1.items.len(), 2);
+    assert_eq!(page1.items.get(0).unwrap().id, id1);
+    assert_eq!(page1.items.get(1).unwrap().id, id2);
+    assert!(page1.next_cursor.is_some(), "more results should be available");
+    
+    let page2 = client.list_by_verification_status(&VerificationStatus::Verified, &page1.next_cursor.unwrap(), &2u32);
+    assert_eq!(page2.items.len(), 1);
+    assert_eq!(page2.items.get(0).unwrap().id, id3);
+    assert_eq!(page2.next_cursor, None, "no more results");
 }

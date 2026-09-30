@@ -196,6 +196,8 @@ When the MCP server runs with `STELLAR_NETWORK=mainnet` (or x402 `stellar:pubnet
 1. Pass `confirmMainnet: true` on the tool call, or
 2. Set `MINDVAULT_ALLOW_MAINNET=1` on the MCP process (unlocks all gated tools for that process).
 
+**Safer defaults for `MINDVAULT_ALLOW_MAINNET` (#606):** the env override is parsed fail-safe. Only `1` / `true` / `yes` widen the policy to process-wide `allow-all`; everything else — unset, empty, `0` / `false` / `no` / `off`, and any unrecognized value — keeps per-call confirmation. A set value that unlocks nothing (an unexpanded `$MINDVAULT_ALLOW_MAINNET` template placeholder, `on`, `enabled`, a typo) is reported as a startup **warning** so the deployment mistake surfaces immediately; explicit denials stay quiet because they state intent. A typo in a safety setting fails towards *more* confirmation, never less.
+
 Without confirmation the tool returns a deterministic, agent-safe error (no secrets). Diagnostics also appear in `mindvault_registry_info` (`network`, `x402Network`, `mainnetDiagnostics`).
 
 ```json

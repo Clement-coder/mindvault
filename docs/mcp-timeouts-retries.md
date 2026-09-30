@@ -76,12 +76,74 @@ hanging tool does not have to inspect the environment:
   Do not lower it below the default — aborting mid-settlement gives the agent an
   ambiguous result for a payment that may still land on-chain.
 
+### Per-tool overrides
+
+Budgets are per **service**, which is the right granularity for most
+deployments and the wrong one for a few specific tools. `mindvault_publish` and
+`mindvault_register_onchain` do markedly more work than a catalog read, yet all
+three sit under the same `http` budget. Raising `MINDVAULT_HTTP_TIMEOUT_MS` to
+accommodate the slow ones also makes every quick call wait four times as long
+before giving up — the opposite of what a deadline is for.
+
+`MINDVAULT_TOOL_TIMEOUTS` overrides the budget for named tools only:
+
+```
+MINDVAULT_TOOL_TIMEOUTS="mindvault_publish=120000,mindvault_browse=5000"
+```
+
+Every tool not named there keeps its service budget.
+
+| Aspect            | Behaviour                                                                    |
+| ----------------- | ---------------------------------------------------------------------------- |
+| Format            | `tool=milliseconds`, separated by commas or whitespace                       |
+| Tool name         | The `mindvault_` prefix is optional — `publish=120000` works                 |
+| `0`               | Disables the deadline for that tool, exactly as it does for a service budget |
+| Precedence        | A per-tool override always wins over the service budget                      |
+| Duplicate entries | The last one wins, so a list can be built by appending                       |
+| Malformed entry   | Reported and skipped; the remaining entries still apply                      |
+
+In a client config:
+
+```json
+{
+  "mcpServers": {
+    "mindvault": {
+      "command": "node",
+      "args": ["/absolute/path/to/mindvault/mcp/dist/index.js"],
+      "env": {
+        "MINDVAULT_TOOL_TIMEOUTS": "mindvault_publish=120000,mindvault_buy=90000"
+      }
+    }
+  }
+}
+```
+
+A malformed entry never stops the server from starting. An MCP server that
+refuses to launch over a typo in an optional tuning variable is worse than one
+that runs with a default, so `publish=oops,browse=5000` applies the `browse`
+override and reports the bad entry.
+
+Note the failure this cannot catch on its own: `mindvault_publsh=120000` parses
+perfectly and applies to nothing. Validate override names against the real tool
+list (`unknownToolNames`) rather than assuming a parsed entry took effect.
+
+#### Which tools are worth overriding
+
+- **`mindvault_publish` / `mindvault_register_onchain`** — metadata upload plus
+  an on-chain registration. Raise these rather than the `http` budget.
+- **`mindvault_buy`** — already on the generous `payment` budget; override only
+  if your settlement path is unusually slow.
+- **`mindvault_browse` / `mindvault_search`** — catalog reads. Lowering these
+  makes an unresponsive backend surface quickly instead of stalling the agent.
+
 ### Coverage
 
 - [`mcp/src/httpTimeout.test.ts`](../mcp/src/httpTimeout.test.ts) — budget
   resolution and the abort path, driven with fake timers
 - [`mcp/src/toolTimeouts.test.ts`](../mcp/src/toolTimeouts.test.ts) — real tools
   failing fast against a deliberately slow (never-answering) fetch
+- [`mcp/src/toolTimeoutOverrides.test.ts`](../mcp/src/toolTimeoutOverrides.test.ts)
+  — per-tool override parsing, precedence, and malformed-entry handling
 
 ## Retries
 
@@ -128,6 +190,19 @@ cannot fix them.
 When a server sends `Retry-After`, it is honoured in place of computed backoff,
 clamped to the max delay so a mistaken or hostile header cannot stall a call.
 
+### Polling that outlives a failed request
+
+`mindvault_publish_status` with `wait: true` reads `/resources/:id/meta` and
+`/resources/:id/verification` on every poll, each with the retry policy above.
+When one of them still fails after its last attempt, the poll fails and the tool
+returns an error — unless the other endpoint already reported a terminal
+`verificationStatus` (`verified`, `rejected`, or `skipped`). Both endpoints
+read the same status, and a settled status never returns to `pending`, so that
+poll has settled: polling stops there and the snapshot reports the terminal
+status. Fields only the failed endpoint carries come back `null` — the
+`verification` details when `/verification` failed, `onchainStatus` and
+`onchainTxHash` when `/meta` did.
+
 ### Observability
 
 Each retry writes one greppable line to stderr:
@@ -148,3 +223,6 @@ MindVault MCP: retrying GET /resources — attempt 2/3 failed (HTTP 503); next a
   `Retry-After`, and the retry-log format, with sleep and randomness injected
 - [`mcp/src/toolRetries.test.ts`](../mcp/src/toolRetries.test.ts) — real tools
   recovering from transient failures, and payments issued exactly once
+- [`mcp/src/publishStatusRetry.test.ts`](../mcp/src/publishStatusRetry.test.ts) —
+  `mindvault_publish_status` stopping at a terminal status while a companion
+  request exhausts its retries

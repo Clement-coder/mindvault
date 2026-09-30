@@ -36,7 +36,7 @@ vi.mock("./registryClient.js", () => ({
 
 vi.mock("../config.js", () => ({ config: { CATALOG_CACHE_TTL_MS: 60_000 } }));
 
-import { delistResource } from "./resourceService.js";
+import { delistResource, saveResourceTags } from "./resourceService.js";
 
 describe("delistResource on-chain sync (#218)", () => {
   beforeEach(() => {
@@ -92,5 +92,20 @@ describe("delistResource on-chain sync (#218)", () => {
 
     expect(deleteFile).toHaveBeenCalledWith("r4/file.pdf");
     expect(injected).toHaveBeenCalledWith("r4");
+  });
+});
+
+describe("saveResourceTags", () => {
+  beforeEach(() => {
+    returnedRow = undefined;
+  });
+
+  it("returns true when the resource exists", async () => {
+    returnedRow = { id: "r1" };
+    await expect(saveResourceTags("r1", ["new"])).resolves.toBe(true);
+  });
+
+  it("returns false when the resource does not exist", async () => {
+    await expect(saveResourceTags("missing", ["new"])).resolves.toBe(false);
   });
 });

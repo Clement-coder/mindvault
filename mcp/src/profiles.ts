@@ -8,6 +8,8 @@
  * mutable in-memory store and disk persistence live in `index.ts`.
  */
 
+import { redactSecrets } from "./redaction.js";
+
 export interface AgentWallet {
   publicKey: string;
   secretKey: string;
@@ -17,6 +19,7 @@ export interface AgentWallet {
 export interface WalletProfile {
   wallet?: AgentWallet;
   apiKey?: string;
+  network?: "testnet" | "mainnet";
 }
 
 /** On-disk / in-memory shape for the current (v1) state format. */
@@ -30,6 +33,13 @@ export interface MigrationResult {
   state: ProfileState;
   /** True when the input used the legacy format and the caller should re-persist. */
   migrated: boolean;
+  /**
+   * The un-transformed legacy input, present only when `migrated`. This is the
+   * rollback source: a caller can re-persist it verbatim to undo the migration,
+   * and can hand it back to cover a fresh migration. Deterministic, so tests
+   * can assert it round-trips.
+   */
+  legacy?: unknown;
 }
 
 export const DEFAULT_PROFILE = "default";
@@ -68,6 +78,7 @@ export function normalizeProfiles(raw: unknown): Record<string, WalletProfile> {
     const profile: WalletProfile = {};
     if (isValidWallet(v.wallet)) profile.wallet = v.wallet;
     if (typeof v.apiKey === "string" && v.apiKey.length > 0) profile.apiKey = v.apiKey;
+    if (v.network === "testnet" || v.network === "mainnet") profile.network = v.network;
     out[name] = profile;
   }
   return out;
@@ -79,7 +90,9 @@ export function normalizeProfiles(raw: unknown): Record<string, WalletProfile> {
  * - Current format (`{ profiles, activeProfile }`) is normalized; an unknown or
  *   missing `activeProfile` falls back to the first profile, then `default`.
  * - Legacy format (`{ wallet?, apiKey? }`) is folded into the `default` profile
- *   and flagged `migrated` so the caller re-persists in the new shape.
+ *   and flagged `migrated` so the caller re-persists in the new shape; the raw
+ *   legacy input is returned in `legacy` so the caller can roll the migration
+ *   back and the fold can be re-run from the original bytes.
  * - Anything unrecognized yields an empty state.
  */
 export function migrateState(raw: unknown): MigrationResult {
@@ -113,8 +126,37 @@ export function migrateState(raw: unknown): MigrationResult {
         profiles: { [DEFAULT_PROFILE]: legacy },
       },
       migrated: true,
+      legacy: raw,
     };
   }
 
   return { state: empty, migrated: false };
+}
+
+/**
+ * Export a wallet profile with secrets redacted. Safe for agent-facing output
+ * and logging — secret keys and API keys are never exposed.
+ */
+export interface ExportedProfile {
+  name: string;
+  address: string | null;
+  registered: boolean;
+}
+
+export function exportProfile(name: string, profile: WalletProfile): ExportedProfile {
+  return {
+    name,
+    address: profile.wallet?.publicKey ?? null,
+    registered: typeof profile.apiKey === "string" && profile.apiKey.length > 0,
+  };
+}
+
+/**
+ * Export all profiles with secrets redacted. Returns a deterministic,
+ * agent-safe snapshot suitable for debugging and transport.
+ */
+export function exportAllProfiles(state: ProfileState): ExportedProfile[] {
+  return Object.entries(state.profiles)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([name, profile]) => exportProfile(name, profile));
 }

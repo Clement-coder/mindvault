@@ -23,7 +23,13 @@ to turn it on rather than any counters.
 ## Reading metrics
 
 Call the `mindvault_metrics` tool. Pass `reset: true` to clear the counters
-after reading (useful for periodic sampling).
+after reading (useful for periodic sampling), and `format` to choose the
+export shape:
+
+- `json` (default) — the snapshot object below.
+- `otlp` — the same data as an
+  [OTLP/JSON `ExportMetricsServiceRequest`](https://opentelemetry.io/docs/specs/otlp/)
+  body (a `resourceMetrics` envelope for an OpenTelemetry collector).
 
 Example output when enabled:
 
@@ -45,6 +51,24 @@ Example output when enabled:
   (content verification) and `mindvault_buy`, with the failing subset.
 - `tools` — per-tool call/error counts and durations in milliseconds
   (`totalDurationMs` is the sum, `maxDurationMs` the slowest single call).
+
+The OTLP export represents each counter as an additive `Sum`, each duration as
+a `double` `Sum` plus a `max` `Gauge`, and the per-call budget as a `Gauge`;
+data points carry `startTimeUnixNano`/`timeUnixNano` and
+`aggregationTemporality: CUMULATIVE`.
+
+## Mirroring to stderr
+
+With metrics enabled, set `MINDVAULT_METRICS_EXPORT_CONSOLE=1` to mirror every
+tool call's metrics to **stderr** as OTLP/JSON, one line per call:
+
+```bash
+MINDVAULT_METRICS=1 MINDVAULT_METRICS_EXPORT_CONSOLE=1 node /path/to/mindvault/mcp/dist/index.js
+```
+
+Each line is `[mindvault-metrics] <otlp-payload>`, sized to the recent budget
+window. This keeps stdout clean for MCP framing while letting a wrapper daemon
+or log scraper consume the stream.
 
 ## Safety
 

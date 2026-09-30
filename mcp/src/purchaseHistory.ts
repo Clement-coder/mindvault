@@ -12,6 +12,13 @@ import { homedir } from "os";
 
 export const PURCHASE_HISTORY_VERSION = 1 as const;
 
+/**
+ * Identity of the state file the receipts belong to. `mindvault_reset` rewrites
+ * the state file, so a backup restored over it would otherwise merge a different
+ * wallet's receipts into this one (#846).
+ */
+export const PURCHASE_HISTORY_EPOCH = process.env.MINDVAULT_PURCHASES_EPOCH ?? "";
+
 /** One locally persisted purchase receipt. */
 export interface PurchaseReceipt {
   /** Resource that was purchased. */
@@ -28,15 +35,40 @@ export interface PurchaseReceipt {
   receiptRef: string | null;
   /** Optional resource title for agent-friendly listing. */
   title?: string;
+  /**
+   * Wallet profile the purchase was made under (#584).
+   *
+   * Optional because receipts written before this field existed do not have
+   * one. Those are reported as {@link UNSCOPED_PROFILE} rather than being
+   * attributed to whichever profile happens to be active now — the wallet that
+   * paid is not recoverable after the fact, and guessing would put a purchase
+   * in the wrong account's history.
+   */
+  profile?: string;
 }
+
+/**
+ * Stands in for the profile of a receipt written before profiles were
+ * recorded. Also accepted as a filter value, so those receipts remain findable.
+ */
+export const UNSCOPED_PROFILE = "(unscoped)";
 
 export interface PurchaseHistoryFilter {
   resourceId?: string;
   network?: string;
+  /** Case-insensitive free-text match against resource id or title. */
+  query?: string;
+  /**
+   * Wallet profile to scope to (#584). Pass {@link UNSCOPED_PROFILE} to find
+   * receipts recorded before profiles were tracked.
+   */
+  profile?: string;
 }
 
 export interface PurchaseHistoryFile {
   version: typeof PURCHASE_HISTORY_VERSION;
+  /** State-file epoch the receipts were recorded under; a mismatch is dropped (#846). */
+  epoch?: string;
   purchases: PurchaseReceipt[];
 }
 
@@ -62,7 +94,7 @@ export function purchasesFilePath(): string {
 }
 
 function emptyStore(): PurchaseHistoryFile {
-  return { version: PURCHASE_HISTORY_VERSION, purchases: [] };
+  return { version: PURCHASE_HISTORY_VERSION, epoch: PURCHASE_HISTORY_EPOCH, purchases: [] };
 }
 
 function isReceipt(value: unknown): value is PurchaseReceipt {
@@ -74,7 +106,8 @@ function isReceipt(value: unknown): value is PurchaseReceipt {
     typeof r.network === "string" &&
     typeof r.timestamp === "string" &&
     (r.txHash === null || typeof r.txHash === "string") &&
-    (r.receiptRef === null || typeof r.receiptRef === "string")
+    (r.receiptRef === null || typeof r.receiptRef === "string") &&
+    (r.profile === undefined || typeof r.profile === "string")
   );
 }
 
@@ -85,6 +118,11 @@ export function loadPurchaseHistory(): PurchaseHistoryFile {
   try {
     const raw = JSON.parse(readFileSync(file, "utf-8"));
     if (!raw || typeof raw !== "object" || !Array.isArray(raw.purchases)) {
+      return emptyStore();
+    }
+    // Receipts from a previous state file (pre-reset or a restored backup) are
+    // a different wallet's history; never merge them into the active one (#846).
+    if ((raw.epoch ?? "") !== PURCHASE_HISTORY_EPOCH) {
       return emptyStore();
     }
     const purchases = raw.purchases.filter(isReceipt);
@@ -125,6 +163,7 @@ export function recordPurchase(
     timestamp: input.timestamp ?? new Date().toISOString(),
     receiptRef: input.receiptRef ?? null,
     ...(input.title ? { title: input.title } : {}),
+    ...(input.profile ? { profile: input.profile } : {}),
   };
 
   const store = loadPurchaseHistory();
@@ -150,6 +189,18 @@ export function normalizePurchaseHistoryFilter(
     }
   }
 
+  if (args.profile !== undefined && args.profile !== null && args.profile !== "") {
+    if (typeof args.profile !== "string") {
+      throw new PurchaseHistoryError(
+        "Invalid profile filter: expected a string profile name (e.g. buyer.alice).",
+      );
+    }
+    filter.profile = args.profile.trim();
+    if (!filter.profile) {
+      throw new PurchaseHistoryError("Invalid profile filter: expected a non-empty string.");
+    }
+  }
+
   if (args.network !== undefined && args.network !== null && args.network !== "") {
     if (typeof args.network !== "string") {
       throw new PurchaseHistoryError(
@@ -161,6 +212,16 @@ export function normalizePurchaseHistoryFilter(
       throw new PurchaseHistoryError(
         "Invalid network filter: expected a non-empty string (e.g. stellar:testnet).",
       );
+    }
+  }
+
+  if (args.query !== undefined && args.query !== null && args.query !== "") {
+    if (typeof args.query !== "string") {
+      throw new PurchaseHistoryError("Invalid query filter: expected a string.");
+    }
+    filter.query = args.query.trim();
+    if (!filter.query) {
+      throw new PurchaseHistoryError("Invalid query filter: expected a non-empty string.");
     }
   }
 
@@ -176,6 +237,16 @@ export function listPurchases(filter: PurchaseHistoryFilter = {}): PurchaseRecei
   const filtered = purchases.filter((p) => {
     if (filter.resourceId && p.resourceId !== filter.resourceId) return false;
     if (filter.network && p.network !== filter.network) return false;
+    if (filter.profile && profileOf(p) !== filter.profile) return false;
+    if (filter.query) {
+      const query = filter.query.toLocaleLowerCase();
+      if (
+        !p.resourceId.toLocaleLowerCase().includes(query) &&
+        !(p.title ?? "").toLocaleLowerCase().includes(query)
+      ) {
+        return false;
+      }
+    }
     return true;
   });
   return filtered.sort((a, b) =>
@@ -183,26 +254,55 @@ export function listPurchases(filter: PurchaseHistoryFilter = {}): PurchaseRecei
   );
 }
 
+/**
+ * The profile a receipt belongs to, or {@link UNSCOPED_PROFILE} for one
+ * written before the field existed.
+ */
+export function profileOf(receipt: PurchaseReceipt): string {
+  return receipt.profile ?? UNSCOPED_PROFILE;
+}
+
+/** Every profile present in the store, sorted — for agent-facing summaries. */
+export function purchaseProfiles(): string[] {
+  const { purchases } = loadPurchaseHistory();
+  return [...new Set(purchases.map(profileOf))].sort();
+}
+
 /** Agent-facing formatting for the purchase history tool. */
-export function formatPurchaseHistory(receipts: PurchaseReceipt[]): string {
+export function formatPurchaseHistory(
+  receipts: PurchaseReceipt[],
+  filter: PurchaseHistoryFilter = {},
+): string {
   if (receipts.length === 0) {
+    // Naming the profile that was searched turns "no results" into something
+    // actionable: the usual cause is looking in the wrong profile.
+    const scope = filter.profile ? ` in profile "${filter.profile}"` : "";
     return JSON.stringify(
       {
         count: 0,
         purchases: [],
-        message: "No purchase receipts match the given filters (or none have been recorded yet).",
+        ...(filter.profile ? { profile: filter.profile } : {}),
+        message: `No purchase receipts match the given filters${scope} (or none have been recorded yet).`,
       },
       null,
       2,
     );
   }
-  return JSON.stringify({ count: receipts.length, purchases: receipts }, null, 2);
+  return JSON.stringify(
+    {
+      count: receipts.length,
+      ...(filter.profile ? { profile: filter.profile } : {}),
+      purchases: receipts,
+    },
+    null,
+    2,
+  );
 }
 
 /** Read-only tool entrypoint used by the MCP server. */
 export function purchaseHistoryTool(args?: Record<string, unknown>): string {
   const filter = normalizePurchaseHistoryFilter(args);
-  return formatPurchaseHistory(listPurchases(filter));
+  return formatPurchaseHistory(listPurchases(filter), filter);
 }
 
 /** Test helper: wipe the configured purchases file content. */

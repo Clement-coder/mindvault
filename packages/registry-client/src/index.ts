@@ -13,6 +13,8 @@
  */
 
 import { Networks } from "@stellar/stellar-sdk";
+import { Client as ContractClient } from "@stellar/stellar-sdk/contract";
+import type { AssembledTransaction } from "@stellar/stellar-sdk/contract";
 
 export {
   networks,
@@ -86,6 +88,31 @@ export function createRegistryClient(opts: RegistryClientOptions): Client {
     networkPassphrase: opts.networkPassphrase ?? Networks.TESTNET,
     publicKey: opts.publicKey,
   });
+}
+
+export interface AttestationHashOptions extends RegistryClientOptions {
+  resourceId: string;
+}
+
+type AttestationHashMethod = (args: { id: string }) => Promise<AssembledTransaction<string | null>>;
+
+interface DeployedClientWithAttestationHash {
+  get_attestation_hash?: AttestationHashMethod;
+}
+
+export async function getAttestationHash(options: AttestationHashOptions): Promise<string | null> {
+  const client = await ContractClient.from({
+    contractId: options.contractId,
+    rpcUrl: options.rpcUrl,
+    networkPassphrase: options.networkPassphrase ?? Networks.TESTNET,
+    publicKey: options.publicKey,
+  });
+  const method = (client as unknown as DeployedClientWithAttestationHash).get_attestation_hash;
+  if (typeof method !== "function") {
+    throw new Error("The deployed vault-registry contract does not expose get_attestation_hash.");
+  }
+  const transaction = await method({ id: options.resourceId });
+  return transaction.result ?? null;
 }
 
 /** Convenience alias so callers can write `VaultRegistryClient` if preferred. */

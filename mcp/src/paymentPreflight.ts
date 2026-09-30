@@ -12,6 +12,9 @@
 /** Recommended minimum native XLM to cover the base reserve plus transaction fees. */
 export const MIN_NATIVE_XLM = 0.5;
 
+/** Minimum USDC balance required before a paid tool call is allowed. */
+export const MIN_USDC_BALANCE = 0;
+
 export type PreflightOperation = "buy" | "verification";
 
 export interface PaymentPreflightInput {
@@ -119,4 +122,53 @@ export function buildPaymentPreflight(input: PaymentPreflightInput): PaymentPref
     warnings,
     summary,
   };
+}
+
+/**
+ * Guard that blocks a paid tool call when the wallet balance is below the
+ * required minimum. Returns null when the balance is sufficient, or an
+ * actionable error message describing the shortfall and how to resolve it.
+ *
+ * This is a pure function — all inputs are passed in — so it is deterministic
+ * and unit-testable without network access.
+ */
+export function assertMinimumBalance(input: {
+  usdcBalance: string;
+  nativeBalance: string;
+  operation: string;
+  requiredUsdc?: string;
+}): string | null {
+  const usdc = parseFloat(input.usdcBalance) || 0;
+  const native = parseFloat(input.nativeBalance) || 0;
+  const required = input.requiredUsdc ? parseFloat(input.requiredUsdc) || 0 : 0;
+
+  if (native < MIN_NATIVE_XLM) {
+    return [
+      `Insufficient native XLM to ${input.operation}.`,
+      `Current XLM balance: ${trimAmount(native)}`,
+      `Required minimum: ${MIN_NATIVE_XLM} XLM (base reserve + fees)`,
+      `Fund the wallet with at least ${(MIN_NATIVE_XLM - native).toFixed(1)} XLM and retry.`,
+    ].join("\n");
+  }
+
+  if (usdc < MIN_USDC_BALANCE) {
+    return [
+      `Insufficient USDC to ${input.operation}.`,
+      `Current USDC balance: ${trimAmount(usdc)}`,
+      `Required minimum: ${MIN_USDC_BALANCE} USDC`,
+      `Fund the wallet with USDC and retry.`,
+    ].join("\n");
+  }
+
+  if (required > 0 && usdc < required) {
+    return [
+      `Insufficient USDC to ${input.operation}.`,
+      `Amount needed: ${trimAmount(required)} USDC`,
+      `Current balance: ${trimAmount(usdc)} USDC`,
+      `Shortfall: ${trimAmount(required - usdc)} USDC`,
+      `Fund the wallet with the shortfall and retry.`,
+    ].join("\n");
+  }
+
+  return null;
 }

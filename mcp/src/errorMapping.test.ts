@@ -16,6 +16,7 @@ import {
   mapRegistryError,
   mapTransportError,
   mcpError,
+  troubleshootingHint,
   throwHttpError,
   type ErrorCategory,
 } from "./errorMapping.js";
@@ -83,6 +84,25 @@ describe("isTimeoutError", () => {
 });
 
 describe("mapTransportError — network failure", () => {
+  it("keeps a Horizon HTTP 500 as an upstream server outage", () => {
+    const mapped = mapHttpError({
+      operation: "Horizon request failed",
+      source: "horizon",
+      status: 500,
+      data: { error: "Horizon unavailable" },
+    });
+    expect(mapped.category).toBe("server");
+    expect(formatMappedError(mapped)).toContain("Source: Horizon · Category: server · HTTP 500");
+  });
+
+  it("keeps a Soroban timeout as a timeout, not a network outage", () => {
+    const error = new Error("request timed out");
+    error.name = "TimeoutError";
+    const mapped = mapTransportError({ operation: "RPC failed", source: "soroban", error });
+    expect(mapped.category).toBe("timeout");
+    expect(formatMappedError(mapped)).toContain("Source: Soroban RPC · Category: timeout");
+  });
+
   it("classifies an unreachable service as a network error", () => {
     const mapped = mapTransportError({
       operation: "MindVault API request failed",
@@ -251,6 +271,37 @@ describe("formatMappedError", () => {
   });
 });
 
+describe("troubleshootingHint", () => {
+  it("returns a stable machine-readable payload without requiring text parsing", () => {
+    expect(
+      troubleshootingHint(
+        mapHttpError({
+          operation: "Browse failed",
+          source: "api",
+          status: 429,
+          data: { error: "too many requests" },
+        }),
+      ),
+    ).toEqual({
+      schema: "mindvault.troubleshooting/v1",
+      source: "api",
+      category: "rate_limit",
+      status: 429,
+      summary: "Browse failed: too many requests",
+      detail: "too many requests",
+      action: "Rate limited. Wait for the window to pass before retrying.",
+    });
+  });
+
+  it("uses null for fields that do not apply to transport errors", () => {
+    const hint = troubleshootingHint(
+      mapTransportError({ operation: "Browse failed", source: "api", error: new Error("offline") }),
+    );
+    expect(hint.status).toBeNull();
+    expect(hint.detail).toBe("offline");
+  });
+});
+
 describe("mcpError / throwHttpError", () => {
   it("produces a throwable carrying the formatted text", () => {
     const err = mcpError(
@@ -351,5 +402,68 @@ describe("publisher API key rejection", () => {
         credential,
       }),
     ).toThrow(/Source: MindVault API · Category: auth · HTTP 401/);
+  });
+});
+
+describe("request signature clock-skew rejection (#602)", () => {
+  const credential = { kind: "publisher_api_key", profile: "publisher" } as const;
+  const skewBody = { error: "Request timestamp outside allowed window" };
+
+  it("is diagnosed as clock skew rather than a revoked key", () => {
+    const mapped = mapHttpError({
+      operation: "Publish failed",
+      source: "api",
+      status: 401,
+      data: skewBody,
+      credential,
+    });
+
+    expect(mapped.category).toBe("auth");
+    expect(mapped.status).toBe(401);
+    expect(mapped.summary).toContain("Request timestamp outside allowed window");
+    expect(mapped.summary).toContain("outside the allowed window");
+    expect(mapped.summary).not.toContain("was rejected as unknown");
+    expect(mapped.action).toContain("clock");
+  });
+
+  it("tells the agent to sync the system clock within the documented window", () => {
+    const mapped = mapHttpError({
+      operation: "Publish failed",
+      source: "api",
+      status: 401,
+      data: skewBody,
+      credential,
+    });
+
+    expect(mapped.action).toContain("5-minute");
+    expect(mapped.action).toContain("Sync the system clock");
+    expect(mapped.action).toContain("NTP");
+    expect(mapped.action).not.toContain("revoked");
+    expect(mapped.action).not.toContain("mindvault_register");
+  });
+
+  it("does not misdiagnose a plain invalid-key 401 as skew", () => {
+    const mapped = mapHttpError({
+      operation: "Publish failed",
+      source: "api",
+      status: 401,
+      data: { error: "Invalid API key" },
+      credential,
+    });
+
+    expect(mapped.summary).toContain("was rejected as unknown");
+    expect(mapped.action).not.toContain("NTP");
+  });
+
+  it("keeps the skew classification even when no credential was sent", () => {
+    const mapped = mapHttpError({
+      operation: "Publish failed",
+      source: "api",
+      status: 401,
+      data: skewBody,
+    });
+
+    expect(mapped.summary).toContain("outside the allowed window");
+    expect(mapped.action).toContain("NTP");
   });
 });

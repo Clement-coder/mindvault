@@ -188,6 +188,49 @@ function rejectionGuidance(service: string, status: number | undefined): string 
 }
 
 /**
+ * Outage kinds where the request may already have been processed.
+ *
+ * The distinction matters because account creation is not idempotent and is not
+ * replayed by the retry layer. `unreachable` means the connection never opened,
+ * so nothing ran. A `timeout` means the opposite of nothing: the service took
+ * the request and stopped answering, which is exactly the half-completed
+ * creation in #839 — the account can be minted and funded while the reply
+ * carrying its secret key is lost. A 5xx can come from the app after it acted
+ * or from a proxy before it did, and the agent cannot tell which.
+ */
+const MAY_HAVE_BEEN_PROCESSED = new Set<SponsoredOutageKind>([
+  "timeout",
+  "unavailable",
+  "server_error",
+  "unknown",
+]);
+
+/**
+ * What a retry does and does not recover.
+ *
+ * The previous wording asserted "no wallet was created, so retrying is safe" on
+ * the 5xx paths. Safe is right; "no wallet was created" is not something this
+ * server can know — it never got an answer. Retrying is safe because it mints a
+ * *new* account, not because the last attempt did nothing, and any account the
+ * service already funded is orphaned: without its secret key nobody can spend
+ * from it. Saying so keeps an operator from hunting for a wallet that was never
+ * handed over.
+ */
+function retrySafetyNote(kind: SponsoredOutageKind): string {
+  if (kind === "rejected") {
+    return "No wallet was created or persisted; the local keystore is unchanged.";
+  }
+  if (!MAY_HAVE_BEEN_PROCESSED.has(kind)) {
+    return "The request never reached the service, so no wallet was created and the local keystore is unchanged.";
+  }
+  return (
+    "No wallet was persisted locally, so retrying is safe — but it creates a NEW account: " +
+    "if the service already funded one before failing, that account is orphaned (its secret key was never delivered) " +
+    "and cannot be recovered or spent."
+  );
+}
+
+/**
  * The next steps for each kind of outage, ordered most-specific first so the
  * leading sentence is the one an agent should act on.
  */
@@ -210,7 +253,7 @@ function guidanceFor(outage: Omit<SponsoredOutage, "guidance">): string[] {
     case "unavailable":
       steps.push(
         "The account sponsorship service is unavailable; it may be restarting.",
-        "Wait for it to come back and retry — no wallet was created, so retrying is safe.",
+        "Wait for it to come back and retry.",
       );
       break;
     case "rate_limited":
@@ -219,7 +262,7 @@ function guidanceFor(outage: Omit<SponsoredOutage, "guidance">): string[] {
     case "server_error":
       steps.push(
         "The service encountered an internal error; contact support if it persists.",
-        "Retry once — no wallet was created, so retrying is safe.",
+        "Retry once.",
       );
       break;
     case "rejected":
@@ -235,6 +278,8 @@ function guidanceFor(outage: Omit<SponsoredOutage, "guidance">): string[] {
       );
       break;
   }
+
+  steps.push(retrySafetyNote(outage.kind));
 
   if (outage.retryAfterSeconds !== undefined) {
     steps.push(`The service asked for a ${outage.retryAfterSeconds}s wait before retrying.`);

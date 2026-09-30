@@ -28,9 +28,28 @@ Next: Payment was required or rejected. Check the wallet with mindvault_wallet_i
 ```
 
 Line 1 keeps the operation label the tool has always used, so existing clients
-that match on `Browse failed` / `Preview failed` keep working. Line 2 is the
-machine-readable part: an agent can branch on `Category:` without parsing prose.
-Line 3 is always present and always actionable.
+that match on `Browse failed` / `Preview failed` keep working. Line 2 is a
+human-readable classification, and line 3 is always present and actionable.
+
+Mapped failures also include an MCP `structuredContent.troubleshooting` object,
+so clients can branch without parsing any text. Its versioned shape is:
+
+```json
+{
+  "schema": "mindvault.troubleshooting/v1",
+  "source": "api",
+  "category": "rate_limit",
+  "status": 429,
+  "summary": "Browse failed: too many requests",
+  "detail": "too many requests",
+  "action": "Rate limited. Wait for the window to pass before retrying."
+}
+```
+
+`status` is `null` for failures without an HTTP response, and `detail` is
+`null` when the source did not supply a separate detail string. The text
+response remains unchanged for MCP clients that do not consume structured
+content.
 
 The mapping is a pure function of `(source, status, payload)` — the same failure
 always produces the same text, so agent behavior is reproducible.
@@ -92,6 +111,44 @@ The classification line stays `Category: auth` in all three cases, so existing
 agent branches on the category keep working — the difference is carried by the
 summary and the next step.
 
+## Request signature clock skew
+
+When signatures are enforced (`REQUIRE_REQUEST_SIGNATURE=true` on the server), a
+signed mutation whose `X-Timestamp` falls outside the server's tolerance window
+is rejected with `401 "Request timestamp outside allowed window"`. That is a
+**system-clock** problem, not a credential problem — the MCP server signs with
+its own `Date.now()`, and a skewed local clock makes every signed request stale.
+The mapper detects the message before the revoked-key branch and says so:
+
+```text
+Publish failed: Request timestamp outside allowed window (request signature timestamp rejected as outside the allowed window)
+Source: MindVault API · Category: auth · HTTP 401
+Next: The request signature was rejected because its timestamp fell outside the accepted 5-minute window — the local clock is probably skewed, not the key. Sync the system clock (e.g. enable NTP), then retry; the message disappears once the clocks agree.
+```
+
+The other signature 401s (`Missing X-Timestamp`, `Missing X-Signature`,
+`Invalid request signature`) are signing bugs and stay on the generic auth/revoked
+path. See [request-signature.md](./request-signature.md#client-side-clock-skew-diagnostics).
+
+## API health preflight before mutations
+
+`mindvault_register`, `mindvault_publish` (non-dry-run), and
+`mindvault_rotate_publisher_key` mutate server-side state, so they run a light
+reachability probe (`GET /resources`) first. When the MindVault API is down the
+tool call is refused up front instead of failing mid-mutation with a bare
+transport error:
+
+```text
+mindvault_register was not attempted because the MindVault API is not reachable (Returned HTTP 503).
+Source: MindVault API · Category: network
+Next: Check network connectivity to the MindVault API and retry; if it stays down the mutation cannot succeed, so defer it.
+```
+
+Dry-run publish skips the probe and does not touch the network. Dry-run buy also
+skips this generic probe, but reads `GET /resources/{id}/meta` to obtain the
+quoted price and apply the same automatic-payment ceiling as a live buy. It
+does not submit a payment.
+
 ## Soft failures are not errors
 
 Outcomes that are expected rather than broken stay **successful** tool results
@@ -122,7 +179,7 @@ diagnostics line between the summary and `Next:`:
 mindvault_setup_wallet failed to create wallet: service temporarily unavailable
 Service: https://stellar-sponsored-agent-account.onrender.com · Endpoint: POST /create · Status: 503 · Issue: unavailable · Reachable: yes · Retryable: yes
 Source: sponsored-account service · Category: server · HTTP 503
-Next: The account sponsorship service is unavailable; it may be restarting. Wait for it to come back and retry — no wallet was created, so retrying is safe.
+Next: The account sponsorship service is unavailable; it may be restarting. Wait for it to come back and retry. No wallet was persisted locally, so retrying is safe — but it creates a NEW account: if the service already funded one before failing, that account is orphaned (its secret key was never delivered) and cannot be recovered or spent.
 ```
 
 `Issue` is the field to branch on:
@@ -146,8 +203,59 @@ guidance then names the configuration to fix rather than a wait to sit out. When
 the service sends a `Retry-After` header, its value is echoed as `Retry-After:
 <n>s` and repeated in the guidance.
 
-Wallet creation is never partially applied: every outage above leaves no wallet
-behind, so a retry is safe.
+### Half-completed creation (#839)
+
+This page used to say wallet creation "is never partially applied: every outage
+above leaves no wallet behind, so a retry is safe." The second half is true. The
+first half is not something this server can know.
+
+Account creation is one non-idempotent POST. When it times out, or answers 5xx
+from a hop in front of the service, the request may already have been processed:
+the account can be minted and funded while the reply carrying its **secret key**
+is lost. Nothing is persisted locally either way, so retrying is safe for the
+agent — but it mints a _new_ account, and the earlier one is **orphaned**:
+without its secret key nobody can spend from it, ever. The guidance says so
+rather than implying there is a funded wallet to go and find.
+
+`unreachable` is the one case where nothing can have run, and its guidance says
+that plainly.
+
+A 200 is also not proof the service finished. A half-completed creation can
+answer with an address whose secret key is missing, malformed, or belongs to a
+different account. Persisting that gives the agent a wallet it cannot sign for,
+and everything downstream reports it as healthy — `mindvault_wallet_info` shows
+the address, queries Horizon, and reports a real balance for funds the agent can
+never spend. So the keypair is verified before anything is stored: the address
+must be derivable from the secret key received with it.
+
+```
+mindvault_setup_wallet refused the wallet returned by https://sponsor.example:
+the response carried the address GABC… but no secret key, so this agent cannot
+sign for it. Nothing was persisted — the local keystore is unchanged. If the
+service already funded that account, it is orphaned: without the matching secret
+key nobody can spend from it, and retrying creates a new account rather than
+recovering it. …
+```
+
+The same check runs over the _stored_ keypair whenever `mindvault_wallet_info`
+reports a balance, because a profile can reach that broken shape through a
+hand-edited state file or a backup restored from another profile:
+
+```
+USDC Balance: 25.0
+⚠ Keystore: This profile's stored secret key does not own this address (…).
+Any balance shown here is NOT spendable by this agent: payments will fail at
+signing. Run mindvault_import_wallet with the correct secret key, or
+mindvault_setup_wallet to create a new wallet.
+```
+
+`mindvault_wallet_info`'s structured output carries the same fact as
+`ownsAddress`, so an agent can branch on it without parsing prose.
+
+Finally, a failed state-file write no longer reports success: when the wallet is
+created but `~/.mindvault/state.json` cannot be written, the reply says the
+wallet is in memory only and will be lost when the server stops, and points at
+`mindvault_backup_state`.
 
 ### What is withheld
 
@@ -161,12 +269,13 @@ from the `Service:` field for the same reason.
 
 ## Relationship to the MCP error result
 
-Mapping decides the _text_. The CallTool handler still owns the _envelope_, and
-that contract is unchanged (see
+Mapping decides the _text_ and structured troubleshooting payload. The CallTool
+handler owns the envelope (see
 [mcp-integration-harness.md](mcp-integration-harness.md#error-handling-contract)):
 a thrown tool error becomes `isError: true` with the text prefixed `Error:`, and
 the message passes through `safeErrorMessage` so no wallet secret or API key can
-appear in it.
+appear in it. Mapped errors add `structuredContent.troubleshooting`; unmapped
+errors retain the existing text-only envelope.
 
 ## Coverage
 

@@ -16,6 +16,62 @@
  */
 
 import { redactSecrets } from "./diagnostics.js";
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+
+// ── SDK version helpers ───────────────────────────────────────────────────────
+
+/** Minimum @modelcontextprotocol/sdk version required for the ListTools shape
+ *  this server emits.  Versions below 1.x used a different wire format. */
+export const MCP_SDK_MINIMUM = "1.12.1";
+
+/**
+ * Compare two semver strings numerically.
+ * Returns negative when `a` is older than `b`, 0 when equal, positive when newer.
+ * Only compares major.minor.patch — pre-release tags are ignored.
+ */
+export function compareSemver(a: string, b: string): number {
+  const parse = (v: string) =>
+    v
+      .replace(/^v/, "")
+      .split(".")
+      .slice(0, 3)
+      .map((p) => parseInt(p.replace(/[^0-9].*/, ""), 10) || 0);
+  const [aMaj, aMin, aPat] = parse(a);
+  const [bMaj, bMin, bPat] = parse(b);
+  return aMaj !== bMaj ? aMaj - bMaj : aMin !== bMin ? aMin - bMin : aPat - bPat;
+}
+
+/**
+ * Read the installed @modelcontextprotocol/sdk version from its package.json.
+ * Returns null when the file cannot be found or parsed (e.g. in test envs
+ * where the dependency is not installed).
+ * Injectable via parameter so tests can pass a stub without real I/O.
+ */
+export function readInstalledSdkVersion(
+  resolver: (id: string) => string | null = defaultResolver,
+): string | null {
+  const jsonPath = resolver("@modelcontextprotocol/sdk/package.json");
+  if (!jsonPath) return null;
+  try {
+    const raw = readFileSync(jsonPath, "utf-8");
+    const pkg = JSON.parse(raw) as { version?: unknown };
+    return typeof pkg.version === "string" ? pkg.version : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Use createRequire to resolve a package file path relative to this module. */
+const _require = createRequire(import.meta.url);
+
+function defaultResolver(id: string): string | null {
+  try {
+    return _require.resolve(id);
+  } catch {
+    return null;
+  }
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -79,10 +135,17 @@ const NODE_MINIMUM = 20;
 /**
  * Run install verification against the provided environment and Node.js version.
  * Both parameters are injectable so the function is deterministic in tests.
+ *
+ * @param env         Process environment to inspect.
+ * @param nodeVersion Node.js version string (default: process.version).
+ * @param sdkVersion  Installed @modelcontextprotocol/sdk version, or null when
+ *                    the package cannot be found.  Defaults to reading the real
+ *                    installed package — pass a string to override in tests.
  */
 export function verifyInstall(
   env: NodeJS.ProcessEnv,
   nodeVersion: string = process.version,
+  sdkVersion: string | null = readInstalledSdkVersion(),
 ): InstallVerification {
   const checks: InstallCheck[] = [];
 
@@ -97,7 +160,32 @@ export function verifyInstall(
         : `Node.js ${nodeVersion} is below the minimum v${NODE_MINIMUM}. Upgrade Node.js.`,
   });
 
-  // 2. STELLAR_NETWORK — must be "testnet", "mainnet", or absent (defaults to testnet)
+  // 2. @modelcontextprotocol/sdk version — must be ≥ MCP_SDK_MINIMUM.
+  //    A stale SDK with a breaking ListTools wire format passes node-version
+  //    validation but silently fails real clients at runtime.
+  if (sdkVersion === null) {
+    checks.push({
+      name: "mcp_sdk_version",
+      ok: false,
+      detail: `@modelcontextprotocol/sdk not found. Run: pnpm install (or npm install) inside the mcp/ directory.`,
+    });
+  } else if (compareSemver(sdkVersion, MCP_SDK_MINIMUM) < 0) {
+    checks.push({
+      name: "mcp_sdk_version",
+      ok: false,
+      detail:
+        `@modelcontextprotocol/sdk ${sdkVersion} is below the minimum ${MCP_SDK_MINIMUM}. ` +
+        `Run: pnpm install inside mcp/ to upgrade.`,
+    });
+  } else {
+    checks.push({
+      name: "mcp_sdk_version",
+      ok: true,
+      detail: `@modelcontextprotocol/sdk ${sdkVersion} (>= ${MCP_SDK_MINIMUM} required) ✓`,
+    });
+  }
+
+  // 3. STELLAR_NETWORK — must be "testnet", "mainnet", or absent (defaults to testnet)
   const rawNetwork = (env.STELLAR_NETWORK ?? "").trim().toLowerCase();
   const knownNetworks = new Set(["testnet", "mainnet", "pubnet", "public"]);
   if (rawNetwork === "" || knownNetworks.has(rawNetwork)) {
@@ -137,7 +225,20 @@ export function verifyInstall(
     },
   );
 
-  // 5. VAULT_REGISTRY_CONTRACT_ID — required on mainnet; optional on testnet
+  // 5. HORIZON_URL and SOROBAN_RPC_URL — optional network-service overrides,
+  // but must be valid HTTP(S) URLs before any request is attempted.
+  for (const variable of ["HORIZON_URL", "SOROBAN_RPC_URL"] as const) {
+    const check = urlIssue(variable, env[variable]);
+    checks.push(
+      check ?? {
+        name: variable,
+        ok: true,
+        detail: `${variable}: unset (network preset in use)`,
+      },
+    );
+  }
+
+  // 6. VAULT_REGISTRY_CONTRACT_ID — required on mainnet; optional on testnet
   const isMainnet = rawNetwork === "mainnet" || rawNetwork === "pubnet" || rawNetwork === "public";
   const contractId = (env.VAULT_REGISTRY_CONTRACT_ID ?? "").trim();
   if (isMainnet && !contractId) {
@@ -164,7 +265,7 @@ export function verifyInstall(
     });
   }
 
-  // 6. No plaintext secret key in the environment.  Operators sometimes
+  // 7. No plaintext secret key in the environment.  Operators sometimes
   //    accidentally put AGENT_SECRET_KEY or similar in the MCP client config;
   //    this check catches the most common variable names without echoing the value.
   const secretEnvVars = Object.keys(env).filter((k) => /secret|private.*key|mnemonic/i.test(k));

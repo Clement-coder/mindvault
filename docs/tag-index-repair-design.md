@@ -19,10 +19,10 @@ tag to the resource ids that carry it, on-chain or off-chain:
   own yet — flagged as a follow-up in index-repair.md's "What this does not
   solve"). Nothing derives a tag-keyed index.
 - **Off-chain**: the server's `resources` table
-  ([`server/src/db/schema.ts`](../server/src/db/schema.ts)) has no `tags`
-  column at all. Tag-based filtering isn't possible through the API today;
-  the only way to see a resource's tags is to read `Resource.tags` directly
-  (via `get`/`list*`).
+  ([`server/src/db/schema.ts`](../server/src/db/schema.ts)) stores the
+  normalized tag list in a `tags` JSONB column. The event listener replaces it
+  from the `settags` payload; tag-based filtering through the API is not yet
+  implemented.
 
 `set_tags` validates against `MAX_TAGS` (8) and `MAX_TAG_LEN` (32 bytes,
 `validate_tags` in `src/lib.rs`) and emits a `settags` event carrying

@@ -4,7 +4,10 @@ import { pollResourceSubscription } from "./resourceSubscription.js";
 describe("pollResourceSubscription", () => {
   it("returns the settled subscription after polling", async () => {
     let clock = 0;
-    const fetch = vi.fn().mockResolvedValueOnce({ active: false }).mockResolvedValueOnce({ active: true });
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce({ active: false })
+      .mockResolvedValueOnce({ active: true });
     const result = await pollResourceSubscription({
       fetch,
       isSettled: (subscription) => subscription.active,
@@ -15,7 +18,12 @@ describe("pollResourceSubscription", () => {
         clock += ms;
       },
     });
-    expect(result).toEqual({ snapshot: { active: true }, attempts: 2, settled: true, timedOut: false });
+    expect(result).toEqual({
+      snapshot: { active: true },
+      attempts: 2,
+      settled: true,
+      timedOut: false,
+    });
   });
 
   it("returns the latest snapshot when the subscription does not settle in time", async () => {
@@ -30,7 +38,12 @@ describe("pollResourceSubscription", () => {
         clock += ms;
       },
     });
-    expect(result).toEqual({ snapshot: { active: false }, attempts: 2, settled: false, timedOut: true });
+    expect(result).toEqual({
+      snapshot: { active: false },
+      attempts: 2,
+      settled: false,
+      timedOut: true,
+    });
   });
 
   it("rejects invalid timing inputs", async () => {

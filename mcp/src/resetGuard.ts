@@ -11,8 +11,6 @@
  * or process state. `index.ts` gathers the live scope and performs the wipe.
  */
 
-import { isTruthyConfirm } from "./mainnetGuardrails.js";
-
 /** A snapshot of what a reset call would destroy, gathered before any mutation. */
 export interface ResetScope {
   /** True when the call targets every profile and the state file itself. */
@@ -30,14 +28,44 @@ export interface ResetScope {
 }
 
 /**
+ * The complete set of string spellings that confirm a reset.
+ *
+ * Frozen and compared case-insensitively after trimming. This list is the
+ * whole vocabulary: a value not in it is not a confirmation, whatever else in
+ * the server might consider it truthy.
+ */
+export const RESET_CONFIRM_STRINGS = Object.freeze(["true", "1", "yes"] as const);
+
+/** The non-string values that confirm a reset. */
+export const RESET_CONFIRM_LITERALS = Object.freeze([true, 1] as const);
+
+/**
  * Whether a reset call carries explicit confirmation.
  *
- * Accepts the same truthy forms as the mainnet guardrail (`true`, `1`, `"true"`,
- * `"yes"`) so agents get one consistent confirmation convention across tools.
- * Everything else — including a missing argument — reads as "not confirmed".
+ * The accepted vocabulary is spelled out here rather than delegated to the
+ * mainnet guardrail's `isTruthyConfirm`, even though the two sets are identical
+ * today. The server already carries more than one notion of "truthy" — mock
+ * mode additionally accepts `"on"`, and the argument validator coerces its own
+ * set of flag spellings — and reset is the one tool whose false positive is
+ * unrecoverable: it deletes wallet secret keys, and with `all` it deletes every
+ * profile and the state file.
+ *
+ * Sharing a widening helper means a change made for a reversible confirmation
+ * silently widens this one too, and an agent that meant something else by a
+ * newly-truthy value wipes a keystore it believed it was only inspecting. So
+ * the vocabulary is pinned here and in `resetGuard.test.ts`: widening reset has
+ * to be an explicit edit to this list, reviewed on its own terms.
+ *
+ * Everything else — a missing argument, an unlisted string, any object — reads
+ * as "not confirmed".
  */
 export function isResetConfirmed(value: unknown): boolean {
-  return isTruthyConfirm(value);
+  if (typeof value === "boolean" || typeof value === "number") {
+    return (RESET_CONFIRM_LITERALS as readonly unknown[]).includes(value);
+  }
+  if (typeof value !== "string") return false;
+  const normalized = value.trim().toLowerCase();
+  return (RESET_CONFIRM_STRINGS as readonly string[]).includes(normalized);
 }
 
 /** Human description of what the reset would clear, used in the warning. */

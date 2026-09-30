@@ -57,6 +57,13 @@
       "when": 1751241600000,
       "tag": "0007_thumbnail_path",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1780200000000,
+      "tag": "0008_resource_tags",
+      "breakpoints": true
     }
   ]
 }
