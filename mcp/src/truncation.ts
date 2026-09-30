@@ -4,6 +4,14 @@
  * Tool handlers build a single text string with no size ceiling, so one long
  * description or a large registry listing can dominate an agent's context window.
  * This module provides a configurable byte budget with safe truncation.
+ *
+ * ⚠️  IMPORTANT: Use `truncateResponse` only on tool *call results* (the text
+ * returned from a handler).  Never apply it to tool *definition descriptions*
+ * (the `description` field in `tools.ts`).  Some MCP clients key tools by the
+ * exact description string for routing — truncating it changes the advertised
+ * contract and silently breaks those clients.  The `assertToolDescriptionSafe`
+ * guard below can be called in tests to verify that no tool description is so
+ * long it looks like a response that needs truncating.
  */
 
 /** Default max bytes for tool responses (32 KiB). */
@@ -70,4 +78,40 @@ export function truncateResponse(
 
   const truncated = decoder.decode(encoded.slice(0, cutLength));
   return truncated + TRUNCATION_NOTICE;
+}
+
+/**
+ * Maximum byte length for a tool definition description.
+ *
+ * MCP clients that key tools by exact description text will break if the
+ * description is mutated (e.g. by `truncateResponse`).  This constant sets a
+ * soft ceiling so descriptions stay well below any truncation threshold.
+ *
+ * The MCP protocol itself does not impose a hard limit, but the SDK's
+ * `ListTools` response is typically rendered inline by clients, so keeping
+ * descriptions concise is good practice anyway.  1 KiB is generous — any
+ * description longer than this is almost certainly a documentation block that
+ * belongs in a separate doc, not in the wire-level tool surface.
+ */
+export const MAX_TOOL_DESCRIPTION_BYTES = 1024;
+
+/**
+ * Assert that a tool description string is safe to advertise verbatim.
+ *
+ * Throws when the description exceeds {@link MAX_TOOL_DESCRIPTION_BYTES}.
+ * Call this from tests (e.g. in `toolDescriptions.test.ts`) to ensure no
+ * tool definition ever grows large enough to look like a truncation candidate.
+ *
+ * @param toolName   The `name` field — included in the error message.
+ * @param description The `description` field to check.
+ */
+export function assertToolDescriptionSafe(toolName: string, description: string): void {
+  const bytes = new TextEncoder().encode(description).length;
+  if (bytes > MAX_TOOL_DESCRIPTION_BYTES) {
+    throw new Error(
+      `Tool "${toolName}" description is ${bytes} bytes, which exceeds the ` +
+        `${MAX_TOOL_DESCRIPTION_BYTES}-byte limit.  Move verbose documentation ` +
+        `to docs/ and keep the description concise.`,
+    );
+  }
 }

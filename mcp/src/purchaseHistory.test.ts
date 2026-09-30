@@ -123,12 +123,41 @@ describe("purchaseHistory", () => {
     expect(both[0].receiptRef).toBe("p2");
   });
 
+  it("searches resource ids and titles case-insensitively and composes with network", () => {
+    recordPurchase({
+      resourceId: "stellar-guide-v2",
+      title: "Soroban Security Handbook",
+      amount: "1.00",
+      network: "stellar:testnet",
+      txHash: null,
+      receiptRef: null,
+    });
+    recordPurchase({
+      resourceId: "other",
+      title: "Soroban Security Handbook",
+      amount: "2.00",
+      network: "stellar:pubnet",
+      txHash: null,
+      receiptRef: null,
+    });
+
+    expect(listPurchases({ query: "STELLAR-GUIDE" })).toHaveLength(1);
+    const result = JSON.parse(
+      purchaseHistoryTool({ query: "security handbook", network: "stellar:testnet" }),
+    );
+    expect(result.count).toBe(1);
+    expect(result.purchases[0].resourceId).toBe("stellar-guide-v2");
+  });
+
   it("rejects non-string filters deterministically", () => {
     expect(() => normalizePurchaseHistoryFilter({ resourceId: 123 as unknown as string })).toThrow(
       PurchaseHistoryError,
     );
     expect(() => normalizePurchaseHistoryFilter({ network: true as unknown as string })).toThrow(
       /Invalid network filter/,
+    );
+    expect(() => normalizePurchaseHistoryFilter({ query: 7 as unknown as string })).toThrow(
+      /Invalid query filter/,
     );
   });
 });

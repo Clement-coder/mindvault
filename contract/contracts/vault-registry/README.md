@@ -11,15 +11,16 @@ see [`contract/README.md`](../../README.md).
 
 ## Constants quick-reference
 
-| Symbol              | Value                                                      | Notes                                            |
-| ------------------- | ---------------------------------------------------------- | ------------------------------------------------ |
-| Testnet contract ID | `CDQKUIADLO5S5WEHEUTTXX2M45WAHVRU2PBEBD6ZGDKMOP5A72FJ3OD4` | Soroban testnet                                  |
-| Soroban RPC         | `https://soroban-testnet.stellar.org`                      |                                                  |
-| 1 USDC              | `10_000_000` stroops                                       | `price` field uses 7 decimal places              |
-| 0.10 USDC           | `1_000_000` stroops                                        |                                                  |
-| Max price           | `1_000_000_000_000_000_000` stroops                        | 1 trillion USDC                                  |
-| Max metadata        | 512 bytes                                                  | Must start with a supported prefix (see below)   |
-| Max tags            | 8                                                          | Each max 32 bytes, normalized to lowercase ASCII |
+| Symbol              | Value                                                      | Notes                                                  |
+| ------------------- | ---------------------------------------------------------- | ------------------------------------------------------ |
+| Testnet contract ID | `CDQKUIADLO5S5WEHEUTTXX2M45WAHVRU2PBEBD6ZGDKMOP5A72FJ3OD4` | Soroban testnet                                        |
+| Soroban RPC         | `https://soroban-testnet.stellar.org`                      |                                                        |
+| 1 USDC              | `10_000_000` stroops                                       | `price` field uses 7 decimal places                    |
+| 0.10 USDC           | `1_000_000` stroops                                        |                                                        |
+| Max price           | `1_000_000_000_000_000_000` stroops                        | 1 trillion USDC                                        |
+| Max metadata        | 512 bytes                                                  | Must start with a supported prefix (see below)         |
+| Max tags            | 8                                                          | Each max 32 bytes, normalized to lowercase ASCII       |
+| Max top tags        | 20                                                         | `top_tags` response cap; counts saturate at `u32::MAX` |
 
 **Metadata pointer prefixes accepted:** `ipfs://`, `ar://`, `https://`,
 `http://`, `sha256:`, `sha-256:`, `0x`.
@@ -43,6 +44,19 @@ need to worry about case or surrounding whitespace:
 
 When you read a resource back, `resource.tags` already holds the normalized
 values, so comparing them against your input string is safe.
+
+### Tag popularity
+
+`top_tags(limit)` returns `TagPopularity { tag, count }` entries sorted by
+descending count, with lexicographic tag order for ties. The contract keeps a
+per-tag counter and a bounded top-N materialized view. The response is capped
+at `TOP_TAGS_CAP` (20), and a zero limit returns an empty result. Counts are
+successful registrations carrying the tag at registration time; `set_tags` and
+tombstoning do not rewrite the historical signal. Resources already stored when
+this feature is installed are not backfilled because their original tags cannot
+be reconstructed after `set_tags`; counters cover registrations processed after
+introduction. Counters saturate at `u32::MAX`, and failed registrations do not
+increment them.
 
 ---
 
@@ -140,12 +154,12 @@ The recorded schema changes are: **v2** added `tags`, **v4** added
 v3 and v5 were never written down. Any future bump should add a row here,
 naming the field that changed:
 
-| Schema version | Change                                                    |
-| -------------- | --------------------------------------------------------- |
-| 2              | Added `tags` — discovery labels, normalized to lowercase. |
-| 4              | Added `dispute_flag` — moderator dispute state.           |
-| 6              | Current value of `RESOURCE_SCHEMA_VERSION`.               |
-| 6              | Added `metadata_frozen_at`; current value of `RESOURCE_SCHEMA_VERSION`.      |
+| Schema version | Change                                                                  |
+| -------------- | ----------------------------------------------------------------------- |
+| 2              | Added `tags` — discovery labels, normalized to lowercase.               |
+| 4              | Added `dispute_flag` — moderator dispute state.                         |
+| 6              | Current value of `RESOURCE_SCHEMA_VERSION`.                             |
+| 6              | Added `metadata_frozen_at`; current value of `RESOURCE_SCHEMA_VERSION`. |
 
 ### What is and is not a breaking change
 
@@ -216,6 +230,11 @@ stellar contract invoke \
   --id $CONTRACT --rpc-url $RPC --network-passphrase "Test SDF Network ; September 2015" \
   -- get_owner --id swcn98besxpp6t1u8e77fqz3
 
+# Fetch several owner addresses in one call
+stellar contract invoke \
+  --id $CONTRACT --rpc-url $RPC --network-passphrase "Test SDF Network ; September 2015" \
+  -- get_owner_many --ids '["swcn98besxpp6t1u8e77fqz3","anotherresource"]'
+
 # Registry discovery metadata (name, version, network id)
 stellar contract invoke \
   --id $CONTRACT --rpc-url $RPC --network-passphrase "Test SDF Network ; September 2015" \
@@ -257,10 +276,20 @@ stellar contract invoke \
   --id $CONTRACT --rpc-url $RPC --network-passphrase "Test SDF Network ; September 2015" \
   -- list_by_tag --tag dataset --start 0 --limit 20
 
+# Most-used tags by successful registration count
+stellar contract invoke \
+  --id $CONTRACT --rpc-url $RPC --network-passphrase "Test SDF Network ; September 2015" \
+  -- top_tags --limit 10
+
 # Resources with an active moderator dispute flag
 stellar contract invoke \
   --id $CONTRACT --rpc-url $RPC --network-passphrase "Test SDF Network ; September 2015" \
   -- list_by_dispute_status --flagged true --start 0 --limit 20
+
+# One resource's moderation state: dispute flag, reason hash, last moderator
+stellar contract invoke \
+  --id $CONTRACT --rpc-url $RPC --network-passphrase "Test SDF Network ; September 2015" \
+  -- flag_details --id swcn98besxpp6t1u8e77fqz3
 
 # How many resources does a creator currently own?
 stellar contract invoke \
@@ -472,6 +501,12 @@ const ownerTx = await registry.get_owner({ id: "swcn98besxpp6t1u8e77fqz3" });
 if (ownerTx.result.isOk()) {
   console.log("Owner:", ownerTx.result.unwrap());
 }
+
+// Batch owners for multi-select validation
+const ownersTx = await registry.get_owner_many({
+  ids: ["swcn98besxpp6t1u8e77fqz3", "anotherresource"],
+});
+const owners = ownersTx.result; // Array<string | null>
 
 // Registry identity and capabilities
 const infoTx = await registry.registry_info();
@@ -705,8 +740,13 @@ client.add_verifier(&verifier);
 assert!(client.is_verifier(verifier.clone()));
 
 // Set on-chain verification status (verifier only)
-// Valid transitions: Pending→Verified, Pending→Rejected, Verified→Rejected, Rejected→Verified
-client.set_verification_status(&id, &verifier, &VerificationStatus::Verified);
+// Valid transitions: Pending->Verified, Pending->Rejected, Verified->Rejected, Rejected->Verified
+client.set_verification_status(
+    &id,
+    &verifier,
+    &VerificationStatus::Verified,
+    &Some(String::from_str(&env, "sha256:abcdef01")),
+);
 
 let resource = client.get(&id);
 assert_eq!(resource.verified, VerificationStatus::Verified);

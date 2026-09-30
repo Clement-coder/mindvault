@@ -196,3 +196,23 @@ export function getPrompt(
       throw new Error(`Unknown prompt: ${name}. Available prompts: publish, buy.`);
   }
 }
+
+/**
+ * Validate prompt arguments against `PROMPT_DEFINITIONS`.
+ * Returns an array of error messages (empty when valid).
+ */
+export function validatePromptArgs(name: string, args: Record<string, unknown>): string[] {
+  const def = PROMPT_DEFINITIONS.find((p) => p.name === name);
+  if (!def) return [`Unknown prompt: ${name}`];
+
+  const issues: string[] = [];
+  for (const param of def.arguments) {
+    const val = (args as Record<string, unknown>)[param.name];
+    if (param.required) {
+      if (val === undefined || val === null || (typeof val === "string" && val.trim() === "")) {
+        issues.push(`Missing required argument: ${param.name}`);
+      }
+    }
+  }
+  return issues;
+}

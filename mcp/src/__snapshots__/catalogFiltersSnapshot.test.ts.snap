@@ -1,0 +1,574 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`buildCatalogQueryString — snapshots > empty filters produce an empty string 1`] = `""`;
+
+exports[`buildCatalogQueryString — snapshots > full filter set with skipped status — skipped omitted, all others present 1`] = `"search=dataset&minPrice=0.10&maxPrice=1.00&resourceType=file&owner=Bob&sort=newest&limit=5&offset=0"`;
+
+exports[`buildCatalogQueryString — snapshots > full server-supported filter set — all params present, client-only absent 1`] = `"search=Soroban+guide&minPrice=1.00&maxPrice=10.00&verificationStatus=verified&resourceType=link&owner=Alice&sort=price_asc&limit=25&offset=50"`;
+
+exports[`buildCatalogQueryString — snapshots > keyword search maps to the 'search' param 1`] = `"search=Stellar+tutorial"`;
+
+exports[`buildCatalogQueryString — snapshots > limit and offset map to their respective params 1`] = `"limit=10&offset=20"`;
+
+exports[`buildCatalogQueryString — snapshots > listed is NOT forwarded — filtered client-side only 1`] = `""`;
+
+exports[`buildCatalogQueryString — snapshots > owner maps to the owner param 1`] = `"owner=Alice"`;
+
+exports[`buildCatalogQueryString — snapshots > pending status is forwarded to the server 1`] = `"verificationStatus=pending"`;
+
+exports[`buildCatalogQueryString — snapshots > price range maps to minPrice and maxPrice params 1`] = `"minPrice=0.50&maxPrice=5.00"`;
+
+exports[`buildCatalogQueryString — snapshots > rejected status is forwarded to the server 1`] = `"verificationStatus=rejected"`;
+
+exports[`buildCatalogQueryString — snapshots > resourceType maps to the resourceType param 1`] = `"resourceType=link"`;
+
+exports[`buildCatalogQueryString — snapshots > resourceType maps to the resourceType param 2`] = `"resourceType=file"`;
+
+exports[`buildCatalogQueryString — snapshots > skipped status is NOT forwarded — filtered client-side only 1`] = `""`;
+
+exports[`buildCatalogQueryString — snapshots > sort maps to the sort param 1`] = `"sort=price_asc"`;
+
+exports[`buildCatalogQueryString — snapshots > sort maps to the sort param 2`] = `"sort=price_desc"`;
+
+exports[`buildCatalogQueryString — snapshots > sort maps to the sort param 3`] = `"sort=title"`;
+
+exports[`buildCatalogQueryString — snapshots > sort maps to the sort param 4`] = `"sort=newest"`;
+
+exports[`buildCatalogQueryString — snapshots > tags are NOT forwarded — filtered client-side only 1`] = `""`;
+
+exports[`buildCatalogQueryString — snapshots > verified status is forwarded to the server 1`] = `"verificationStatus=verified"`;
+
+exports[`describeCatalogFilters — snapshots > bare keyword shortcut — single query with no other filters 1`] = `""Stellar tutorial""`;
+
+exports[`describeCatalogFilters — snapshots > empty filters describe as 'the catalog' 1`] = `"the catalog"`;
+
+exports[`describeCatalogFilters — snapshots > full filter set description 1`] = `"query "Soroban", min $1.00, max $10.00, status verified, type link, owner "Alice", sort price_asc, limit 20, offset 0, tags [smart-contracts, tutorial], listed true"`;
+
+exports[`describeCatalogFilters — snapshots > listed appears in description 1`] = `"listed true"`;
+
+exports[`describeCatalogFilters — snapshots > listed appears in description 2`] = `"listed false"`;
+
+exports[`describeCatalogFilters — snapshots > pagination in description 1`] = `"limit 10, offset 40"`;
+
+exports[`describeCatalogFilters — snapshots > price range without query 1`] = `"min $0.50, max $5.00"`;
+
+exports[`describeCatalogFilters — snapshots > query with at least one other filter uses the long form 1`] = `"query "Stellar", min $1.00"`;
+
+exports[`describeCatalogFilters — snapshots > resourceType in description 1`] = `"type file"`;
+
+exports[`describeCatalogFilters — snapshots > sort in description 1`] = `"sort price_asc"`;
+
+exports[`describeCatalogFilters — snapshots > tags appear in description 1`] = `"tags [dataset, research]"`;
+
+exports[`describeCatalogFilters — snapshots > verificationStatus labels in description 1`] = `"status verified"`;
+
+exports[`describeCatalogFilters — snapshots > verificationStatus labels in description 2`] = `"status skipped"`;
+
+exports[`parseCatalogFilters — round-trip snapshots > all four verificationStatus values accepted 1`] = `
+{
+  "filters": {
+    "limit": undefined,
+    "listed": undefined,
+    "maxPrice": undefined,
+    "minPrice": undefined,
+    "offset": undefined,
+    "owner": undefined,
+    "query": undefined,
+    "resourceType": undefined,
+    "sort": undefined,
+    "tags": undefined,
+    "verificationStatus": "pending",
+  },
+  "ok": true,
+}
+`;
+
+exports[`parseCatalogFilters — round-trip snapshots > all four verificationStatus values accepted 2`] = `
+{
+  "filters": {
+    "limit": undefined,
+    "listed": undefined,
+    "maxPrice": undefined,
+    "minPrice": undefined,
+    "offset": undefined,
+    "owner": undefined,
+    "query": undefined,
+    "resourceType": undefined,
+    "sort": undefined,
+    "tags": undefined,
+    "verificationStatus": "verified",
+  },
+  "ok": true,
+}
+`;
+
+exports[`parseCatalogFilters — round-trip snapshots > all four verificationStatus values accepted 3`] = `
+{
+  "filters": {
+    "limit": undefined,
+    "listed": undefined,
+    "maxPrice": undefined,
+    "minPrice": undefined,
+    "offset": undefined,
+    "owner": undefined,
+    "query": undefined,
+    "resourceType": undefined,
+    "sort": undefined,
+    "tags": undefined,
+    "verificationStatus": "rejected",
+  },
+  "ok": true,
+}
+`;
+
+exports[`parseCatalogFilters — round-trip snapshots > all four verificationStatus values accepted 4`] = `
+{
+  "filters": {
+    "limit": undefined,
+    "listed": undefined,
+    "maxPrice": undefined,
+    "minPrice": undefined,
+    "offset": undefined,
+    "owner": undefined,
+    "query": undefined,
+    "resourceType": undefined,
+    "sort": undefined,
+    "tags": undefined,
+    "verificationStatus": "skipped",
+  },
+  "ok": true,
+}
+`;
+
+exports[`parseCatalogFilters — round-trip snapshots > both resourceType values accepted 1`] = `
+{
+  "filters": {
+    "limit": undefined,
+    "listed": undefined,
+    "maxPrice": undefined,
+    "minPrice": undefined,
+    "offset": undefined,
+    "owner": undefined,
+    "query": undefined,
+    "resourceType": "link",
+    "sort": undefined,
+    "tags": undefined,
+    "verificationStatus": undefined,
+  },
+  "ok": true,
+}
+`;
+
+exports[`parseCatalogFilters — round-trip snapshots > both resourceType values accepted 2`] = `
+{
+  "filters": {
+    "limit": undefined,
+    "listed": undefined,
+    "maxPrice": undefined,
+    "minPrice": undefined,
+    "offset": undefined,
+    "owner": undefined,
+    "query": undefined,
+    "resourceType": "file",
+    "sort": undefined,
+    "tags": undefined,
+    "verificationStatus": undefined,
+  },
+  "ok": true,
+}
+`;
+
+exports[`parseCatalogFilters — round-trip snapshots > empty object for browse (no criteria required) 1`] = `
+{
+  "filters": {
+    "limit": undefined,
+    "listed": undefined,
+    "maxPrice": undefined,
+    "minPrice": undefined,
+    "offset": undefined,
+    "owner": undefined,
+    "query": undefined,
+    "resourceType": undefined,
+    "sort": undefined,
+    "tags": undefined,
+    "verificationStatus": undefined,
+  },
+  "ok": true,
+}
+`;
+
+exports[`parseCatalogFilters — round-trip snapshots > error shape for invalid listed value 1`] = `
+{
+  "error": "Invalid listed: must be a boolean (true/false) or 'true'/'false'.",
+  "ok": false,
+}
+`;
+
+exports[`parseCatalogFilters — round-trip snapshots > error shape for invalid minPrice 1`] = `
+{
+  "error": "Invalid minPrice: must be a non-negative number string (e.g. '0.50').",
+  "ok": false,
+}
+`;
+
+exports[`parseCatalogFilters — round-trip snapshots > error shape for invalid sort value 1`] = `
+{
+  "error": "Invalid sort: must be one of newest, price_asc, price_desc, title.",
+  "ok": false,
+}
+`;
+
+exports[`parseCatalogFilters — round-trip snapshots > error shape for invalid verificationStatus 1`] = `
+{
+  "error": "Invalid verificationStatus: must be one of pending, verified, rejected, skipped.",
+  "ok": false,
+}
+`;
+
+exports[`parseCatalogFilters — round-trip snapshots > error shape for inverted price range 1`] = `
+{
+  "error": "Invalid price range: minPrice cannot be greater than maxPrice.",
+  "ok": false,
+}
+`;
+
+exports[`parseCatalogFilters — round-trip snapshots > error shape for limit out of range 1`] = `
+{
+  "error": "Invalid limit: must be an integer between 1 and 100.",
+  "ok": false,
+}
+`;
+
+exports[`parseCatalogFilters — round-trip snapshots > error shape for limit out of range 2`] = `
+{
+  "error": "Invalid limit: must be an integer between 1 and 100.",
+  "ok": false,
+}
+`;
+
+exports[`parseCatalogFilters — round-trip snapshots > error shape for negative offset 1`] = `
+{
+  "error": "Invalid offset: must be a non-negative integer.",
+  "ok": false,
+}
+`;
+
+exports[`parseCatalogFilters — round-trip snapshots > error shape for requireCriteria with no filters 1`] = `
+{
+  "error": "Provide a search query or at least one catalog filter.",
+  "ok": false,
+}
+`;
+
+exports[`parseCatalogFilters — round-trip snapshots > full browse filter set — all fields present 1`] = `
+{
+  "filters": {
+    "limit": 25,
+    "listed": true,
+    "maxPrice": "10.00",
+    "minPrice": "1.00",
+    "offset": 50,
+    "owner": "Alice",
+    "query": "Soroban guide",
+    "resourceType": "link",
+    "sort": "price_asc",
+    "tags": [
+      "smart-contracts",
+      "tutorial",
+    ],
+    "verificationStatus": "verified",
+  },
+  "ok": true,
+}
+`;
+
+exports[`parseCatalogFilters — round-trip snapshots > keyword via legacy search alias 1`] = `
+{
+  "filters": {
+    "limit": undefined,
+    "listed": undefined,
+    "maxPrice": undefined,
+    "minPrice": undefined,
+    "offset": undefined,
+    "owner": undefined,
+    "query": "Stellar",
+    "resourceType": undefined,
+    "sort": undefined,
+    "tags": undefined,
+    "verificationStatus": undefined,
+  },
+  "ok": true,
+}
+`;
+
+exports[`parseCatalogFilters — round-trip snapshots > keyword via query field 1`] = `
+{
+  "filters": {
+    "limit": undefined,
+    "listed": undefined,
+    "maxPrice": undefined,
+    "minPrice": undefined,
+    "offset": undefined,
+    "owner": undefined,
+    "query": "Stellar",
+    "resourceType": undefined,
+    "sort": undefined,
+    "tags": undefined,
+    "verificationStatus": undefined,
+  },
+  "ok": true,
+}
+`;
+
+exports[`parseCatalogFilters — round-trip snapshots > limit and offset coerced from string to integer 1`] = `
+{
+  "filters": {
+    "limit": 10,
+    "listed": undefined,
+    "maxPrice": undefined,
+    "minPrice": undefined,
+    "offset": 20,
+    "owner": undefined,
+    "query": undefined,
+    "resourceType": undefined,
+    "sort": undefined,
+    "tags": undefined,
+    "verificationStatus": undefined,
+  },
+  "ok": true,
+}
+`;
+
+exports[`parseCatalogFilters — round-trip snapshots > listed as boolean true/false 1`] = `
+{
+  "filters": {
+    "limit": undefined,
+    "listed": true,
+    "maxPrice": undefined,
+    "minPrice": undefined,
+    "offset": undefined,
+    "owner": undefined,
+    "query": undefined,
+    "resourceType": undefined,
+    "sort": undefined,
+    "tags": undefined,
+    "verificationStatus": undefined,
+  },
+  "ok": true,
+}
+`;
+
+exports[`parseCatalogFilters — round-trip snapshots > listed as boolean true/false 2`] = `
+{
+  "filters": {
+    "limit": undefined,
+    "listed": false,
+    "maxPrice": undefined,
+    "minPrice": undefined,
+    "offset": undefined,
+    "owner": undefined,
+    "query": undefined,
+    "resourceType": undefined,
+    "sort": undefined,
+    "tags": undefined,
+    "verificationStatus": undefined,
+  },
+  "ok": true,
+}
+`;
+
+exports[`parseCatalogFilters — round-trip snapshots > listed as string 'true'/'false' 1`] = `
+{
+  "filters": {
+    "limit": undefined,
+    "listed": true,
+    "maxPrice": undefined,
+    "minPrice": undefined,
+    "offset": undefined,
+    "owner": undefined,
+    "query": undefined,
+    "resourceType": undefined,
+    "sort": undefined,
+    "tags": undefined,
+    "verificationStatus": undefined,
+  },
+  "ok": true,
+}
+`;
+
+exports[`parseCatalogFilters — round-trip snapshots > listed as string 'true'/'false' 2`] = `
+{
+  "filters": {
+    "limit": undefined,
+    "listed": false,
+    "maxPrice": undefined,
+    "minPrice": undefined,
+    "offset": undefined,
+    "owner": undefined,
+    "query": undefined,
+    "resourceType": undefined,
+    "sort": undefined,
+    "tags": undefined,
+    "verificationStatus": undefined,
+  },
+  "ok": true,
+}
+`;
+
+exports[`parseCatalogFilters — round-trip snapshots > price filters as strings 1`] = `
+{
+  "filters": {
+    "limit": undefined,
+    "listed": undefined,
+    "maxPrice": "5.00",
+    "minPrice": "0.50",
+    "offset": undefined,
+    "owner": undefined,
+    "query": undefined,
+    "resourceType": undefined,
+    "sort": undefined,
+    "tags": undefined,
+    "verificationStatus": undefined,
+  },
+  "ok": true,
+}
+`;
+
+exports[`parseCatalogFilters — round-trip snapshots > requireCriteria=true with a valid filter set 1`] = `
+{
+  "filters": {
+    "limit": undefined,
+    "listed": undefined,
+    "maxPrice": undefined,
+    "minPrice": undefined,
+    "offset": undefined,
+    "owner": undefined,
+    "query": "Stellar",
+    "resourceType": undefined,
+    "sort": undefined,
+    "tags": undefined,
+    "verificationStatus": undefined,
+  },
+  "ok": true,
+}
+`;
+
+exports[`parseCatalogFilters — round-trip snapshots > sort — all four values accepted and passed through 1`] = `
+{
+  "filters": {
+    "limit": undefined,
+    "listed": undefined,
+    "maxPrice": undefined,
+    "minPrice": undefined,
+    "offset": undefined,
+    "owner": undefined,
+    "query": undefined,
+    "resourceType": undefined,
+    "sort": "newest",
+    "tags": undefined,
+    "verificationStatus": undefined,
+  },
+  "ok": true,
+}
+`;
+
+exports[`parseCatalogFilters — round-trip snapshots > sort — all four values accepted and passed through 2`] = `
+{
+  "filters": {
+    "limit": undefined,
+    "listed": undefined,
+    "maxPrice": undefined,
+    "minPrice": undefined,
+    "offset": undefined,
+    "owner": undefined,
+    "query": undefined,
+    "resourceType": undefined,
+    "sort": "price_asc",
+    "tags": undefined,
+    "verificationStatus": undefined,
+  },
+  "ok": true,
+}
+`;
+
+exports[`parseCatalogFilters — round-trip snapshots > sort — all four values accepted and passed through 3`] = `
+{
+  "filters": {
+    "limit": undefined,
+    "listed": undefined,
+    "maxPrice": undefined,
+    "minPrice": undefined,
+    "offset": undefined,
+    "owner": undefined,
+    "query": undefined,
+    "resourceType": undefined,
+    "sort": "price_desc",
+    "tags": undefined,
+    "verificationStatus": undefined,
+  },
+  "ok": true,
+}
+`;
+
+exports[`parseCatalogFilters — round-trip snapshots > sort — all four values accepted and passed through 4`] = `
+{
+  "filters": {
+    "limit": undefined,
+    "listed": undefined,
+    "maxPrice": undefined,
+    "minPrice": undefined,
+    "offset": undefined,
+    "owner": undefined,
+    "query": undefined,
+    "resourceType": undefined,
+    "sort": "title",
+    "tags": undefined,
+    "verificationStatus": undefined,
+  },
+  "ok": true,
+}
+`;
+
+exports[`parseCatalogFilters — round-trip snapshots > tags as array 1`] = `
+{
+  "filters": {
+    "limit": undefined,
+    "listed": undefined,
+    "maxPrice": undefined,
+    "minPrice": undefined,
+    "offset": undefined,
+    "owner": undefined,
+    "query": undefined,
+    "resourceType": undefined,
+    "sort": undefined,
+    "tags": [
+      "dataset",
+      "research",
+    ],
+    "verificationStatus": undefined,
+  },
+  "ok": true,
+}
+`;
+
+exports[`parseCatalogFilters — round-trip snapshots > tags as comma-separated string 1`] = `
+{
+  "filters": {
+    "limit": undefined,
+    "listed": undefined,
+    "maxPrice": undefined,
+    "minPrice": undefined,
+    "offset": undefined,
+    "owner": undefined,
+    "query": undefined,
+    "resourceType": undefined,
+    "sort": undefined,
+    "tags": [
+      "dataset",
+      "research",
+    ],
+    "verificationStatus": undefined,
+  },
+  "ok": true,
+}
+`;

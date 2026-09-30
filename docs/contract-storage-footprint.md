@@ -8,6 +8,8 @@ measured it.
 
 This report is generated and enforced by the `storage_footprint_report` test in
 [`contract/contracts/vault-registry/src/test.rs`](../contract/contracts/vault-registry/src/test.rs).
+Contract CI runs the same report explicitly through `make footprint`, so
+storage growth fails unless the budget and this report are updated together.
 
 ## Running it
 
@@ -39,6 +41,8 @@ baseline for comparing one revision of the contract against another.
 | Resource (typical)         | persistent |  48 |   528 |   576 |    640 |
 | Index(u32) -> id           | persistent |  36 |    32 |    68 |     96 |
 | Count                      | instance   |  28 |     8 |    36 |     48 |
+| TagCount (max-size tag)    | instance   |  68 |     8 |    76 |    160 |
+| TopTags                    | instance   |  28 |  1772 |  1800 |   2000 |
 | CreatorResources           | persistent |  76 |    64 |   140 |    160 |
 | CreatorCount               | instance   |  72 |     8 |    80 |     96 |
 | TagIndex (max-size tag)    | persistent |  68 |    44 |   112 |    160 |
@@ -47,7 +51,10 @@ baseline for comparing one revision of the contract against another.
 | PaymentIndex -> receipt id | persistent | 104 |    72 |   176 |    240 |
 | PurchaseReceipt (anchor)   | persistent | 108 |   300 |   408 |    480 |
 | FlagReasonHash             | persistent |  68 |    72 |   140 |    200 |
+| FlagModerator              | persistent |  68 |    40 |   108 |    160 |
+| AttestationHash            | persistent |  56 |    80 |   136 |    160 |
 | FeeConfig                  | instance   |  32 |   136 |   168 |    192 |
+| FeeDestination             | instance   |  36 |    76 |   112 |    192 |
 | Admin                      | instance   |  28 |    40 |    68 |     80 |
 | Verifier grant             | instance   |  68 |     8 |    76 |     96 |
 | Moderator grant            | instance   |  72 |     8 |    80 |     96 |
@@ -55,14 +62,15 @@ baseline for comparing one revision of the contract against another.
 
 Aggregates, which are the numbers that scale with usage:
 
-| Operation                                                         | Bytes | Budget |
-| ----------------------------------------------------------------- | ----: | -----: |
-| One max-size registration (`Resource` + `Index` + one `TagIndex`) |  1728 |   1900 |
-| One payment (`PaymentReceipt` + `PaymentIndex`)                   |   756 |    850 |
+| Operation                                                                          | Bytes | Budget |
+| ---------------------------------------------------------------------------------- | ----: | -----: |
+| One max-size registration (`Resource` + `Index` + one `TagIndex` + one `TagCount`) |  1868 |   1900 |
+| One payment (`PaymentReceipt` + `PaymentIndex`)                                    |   756 |    850 |
 
-A registration with all 8 tags writes 8 `TagIndex` entries, one per tag, plus
-the `CreatorResources` and `CreatorCount` updates — the aggregate above counts
-a single tag so the per-tag cost stays visible.
+A registration with all 8 tags writes 8 `TagIndex` and 8 `TagCount` entries, one
+per tag, plus the `CreatorResources` and `CreatorCount` updates — the aggregate
+above counts one of each so the per-tag cost stays visible. `TopTags` is a
+shared bounded view and is not included in the per-registration aggregate.
 
 ## Notes on individual entries
 
@@ -75,10 +83,14 @@ a single tag so the per-tag cost stays visible.
   measured at this fixture's cardinality (two resources for the creator, one
   resource per tag); read them as a per-member baseline. Each additional member
   adds roughly one id's worth of bytes.
-- **Instance entries** (`Count`, `CreatorCount`, `FeeConfig`, `Admin`, and the
+- **Instance entries** (`Count`, `CreatorCount`, `FeeConfig`, `FeeDestination`, `Admin`, and the
   three role grants) share the contract's instance TTL, so they are bumped
   together and never archive independently. They are all small; `CreatorCount`
   is the only one that grows with the number of distinct creators.
+- **`FlagModerator`** holds a single `Address`: the moderator whose
+  `flag_resource`, `unflag_resource`, or `set_flag_reason_hash` came last,
+  read back by `flag_details`. It is one entry per moderated resource and is
+  overwritten in place, so it never grows.
 - **`DataKey::DisputeFlag` is never written.** The dispute flag lives on the
   `Resource` struct (see `flag_resource`), so the key exists in the `DataKey`
   enum without a corresponding entry.

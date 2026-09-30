@@ -1,66 +1,61 @@
-# Test Coverage, Release Automation, and Dependency Management
+# Harden state persistence against partial writes and leaked secret files
 
-This PR adds comprehensive test coverage for previously untested endpoints, implements automated release tagging with changelog generation, and configures Dependabot for automated dependency updates.
+This PR fixes a real data-safety bug in the MindVault MCP state persistence path. The app writes credentials to `~/.mindvault/state.json`, but the old implementation used a direct `writeFileSync()` to the target path. If that write fails mid-flight, the destination can be left truncated, and the next load silently loses wallet and API state.
 
-## Changes
+This change makes persisted state atomic, keeps secrets protected with `0600` permissions, and adds a regression test covering the failure case.
 
-### Test Coverage
+## What changed
 
-- **#295** - Added integration tests for `POST /verify-content` and `GET /agent/status` endpoints
-  - Created `server/src/routes/verify.test.ts`
-  - Tests mock the OpenRouter API call and assert verification request/response shapes
-  - Covers both approve and reject outcomes for content verification
-  - Validates agent status response shape and recent activity structure
-  - Tests run deterministically without real API calls
+### Safe atomic state writes
 
-- **#296** - Added tests for `GET /registry/status` endpoint
-  - Created `server/src/routes/registry.test.ts`
-  - Mocks `registryClient` and config to avoid live Soroban RPC calls
-  - Asserts response shape including contractId, network, and resourceCount
-  - Validates Cache-Control header behavior (30 second max-age)
-  - Covers RPC/registry failure paths with 503 error responses
-  - Removed the `// TODO: add tests` comment from `registry.ts`
+- Added a helper in `mcp/src/stateBackup.ts` that writes to a same-directory temp file, then renames it over the destination.
+- Keeps the file mode at `0600` so wallet secrets and API keys remain owner-only.
+- Cleans up the temp file if the rename fails so the live state file is never left partially written.
 
-### Release Automation
+### Live persistence path updated
 
-- **#302** - Added automated release tagging and changelog generation
-  - Created `.github/workflows/release.yml` using release-please action
-  - Configured to trigger on pushes to `main` branch
-  - Supports semantic versioning based on Conventional Commits:
-    - `feat:` triggers minor version bumps
-    - `fix:` triggers patch version bumps
-  - Automatically generates `CHANGELOG.md` with release notes
-  - Monitors version files across all workspace packages (server, web, mcp, registry-client)
-  - Documented release workflow in `CONTRIBUTING.md`
+- Switched the production state-save logic in:
+  - `mcp/src/index.ts`
+  - `mcp/src/runtime.ts`
+- Both now use the atomic write helper instead of writing directly to `state.json`.
 
-### Dependency Management
+### Regression coverage
 
-- **#301** - Added Dependabot configuration for automated dependency updates
-  - Created `.github/dependabot.yml`
-  - Configured for three ecosystems:
-    - npm/pnpm workspace (root directory)
-    - GitHub Actions (root directory)
-    - Cargo (contract directory)
-  - Set weekly schedule (Mondays) to limit PR noise
-  - Grouped dependencies to reduce number of PRs
-  - Configured open-pull-requests limits to prevent flooding
-  - Ignored major version updates for stability
+- Added tests in `mcp/src/stateBackup.test.ts` covering:
+  - temp-file write flow in the same directory
+  - permission preservation at `0600`
+  - failure case where rename fails and the destination remains intact
+  - cleanup of stale temp artifacts
 
-## Testing
+## Why this matters
 
-All new tests follow the existing test patterns in the codebase:
-- Use vitest for test framework
-- Mock external dependencies (API calls, database, config)
-- Test both success and failure paths
-- Validate response shapes and headers
+The state file contains sensitive material:
 
-## Files Changed
+- wallet secret keys
+- publisher API keys
 
-- `server/src/routes/verify.test.ts` (new)
-- `server/src/routes/registry.test.ts` (new)
-- `server/src/routes/registry.ts` (removed TODO comment)
-- `.github/workflows/release.yml` (new)
-- `.github/dependabot.yml` (new)
-- `CONTRIBUTING.md` (added Releases section)
+A partial write leaves the state file in a corrupt or truncated state. The previous behavior could silently discard valid credentials after a crash, I/O error, or interrupted write, which is especially risky for agent environments.
 
-Closes #295, #296, #302, #301
+This fix is deterministic and safe for issue-driven contributor work: failure cases are isolated, the destination stays valid, and permissions remain tight.
+
+## Verification
+
+Ran the project-proven check:
+
+```bash
+cd /home/semi/Documents/Drip/mindvault && corepack pnpm --filter @mindvault/registry-client build && corepack pnpm --filter @mindvault/mcp exec vitest run src/stateBackup.test.ts
+```
+
+Result:
+
+- 1 test file passed
+- 20 tests passed
+- exit code 0
+
+## Files changed
+
+- `mcp/src/stateBackup.ts`
+- `mcp/src/index.ts`
+- `mcp/src/runtime.ts`
+- `mcp/src/stateBackup.test.ts`
+- `PR_DESCRIPTION.md`

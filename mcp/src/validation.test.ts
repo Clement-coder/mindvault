@@ -10,23 +10,45 @@
 import { describe, it, expect } from "vitest";
 import { TOOL_DEFINITIONS } from "./tools.js";
 import {
+  BATCH_LOOKUP_MAX_IDS,
   TOOL_ARGUMENT_SPECS,
+  TOOLS_WITHOUT_ARG_VALIDATION,
   ToolValidationError,
   UnknownToolError,
   flag,
   knownToolNames,
   optionalString,
   requiredString,
+  requiredStringArray,
   validateToolArgs,
 } from "./validation.js";
 
 const VALID_SHA256 = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
 
+/** One id longer than BATCH_LOOKUP_MAX_IDS allows, for the batch tool's ceiling test. */
+const OVERSIZE_BATCH = Array.from({ length: 26 }, (_, i) => `res-${String(i).padStart(3, "0")}`);
+
+/**
+ * Advertised tools that go through this layer.
+ *
+ * `mindvault_publish_status` and `mindvault_purchase_history` normalize their
+ * own arguments (see TOOLS_WITHOUT_ARG_VALIDATION) and so have no spec to
+ * compare against. The exemption itself is checked below.
+ */
+function specValidatedTools() {
+  const exempt = new Set(TOOLS_WITHOUT_ARG_VALIDATION);
+  return TOOL_DEFINITIONS.filter((tool) => !exempt.has(tool.name));
+}
+
 /** Minimum arguments that must pass for each tool. */
 const VALID_CALLS: Record<string, Record<string, unknown>> = {
   mindvault_setup_wallet: {},
+  mindvault_repair_sponsored_account: {
+    secretKey: "SAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  },
   mindvault_wallet_info: {},
   mindvault_use_profile: { name: "publisher" },
+  mindvault_switch_network_profile: { name: "mainnet", network: "mainnet" },
   mindvault_list_profiles: {},
   mindvault_browse: {},
   mindvault_search: { query: "stellar" },
@@ -42,14 +64,26 @@ const VALID_CALLS: Record<string, Record<string, unknown>> = {
   mindvault_register_onchain: { resourceId: "res-001" },
   mindvault_agent_status: {},
   mindvault_registry_info: {},
+  mindvault_terms: {
+    operation: "get",
+    creator: "GA6HCMBLTZS5VYYBCATRBRZ3BZJMAFUDKYYF6AH6MVCMGWMRDNSWJPIH",
+  },
   mindvault_network_profile: {},
   mindvault_check_bindings: {},
   mindvault_check_consistency: { resourceId: "res-001" },
+  mindvault_verify_attestation: {
+    resourceId: "res001",
+    attestationHash: "a".repeat(64),
+  },
   mindvault_registry_lookup: { resourceId: "res-001" },
   mindvault_registry_list: {},
+  mindvault_registry_count: {},
+  mindvault_registry_count: {},
   mindvault_tx_status: { txHash: VALID_SHA256 },
   mindvault_reset: {},
   mindvault_backup_state: { passphrase: "correct-horse" },
+  mindvault_resource_provenance: { resourceId: "res-001" },
+  mindvault_resource_change_log: { resourceId: "res-001" },
   mindvault_restore_state: { blob: "v1:abc", passphrase: "correct-horse" },
   mindvault_metrics: {},
   mindvault_update_metadata: { resourceId: "res-001", metadata: "ipfs://Qm123" },
@@ -58,13 +92,30 @@ const VALID_CALLS: Record<string, Record<string, unknown>> = {
     resourceId: "res-001",
     newCreator: "GA6HCMBLTZS5VYYBCATRBRZ3BZJMAFUDKYYF6AH6MVCMGWMRDNSWJPIH",
   },
+  mindvault_accept_transfer: { resourceId: "res-001" },
+  mindvault_cancel_transfer: { resourceId: "res-001" },
+  mindvault_pending_transfer: { resourceId: "res-001" },
   mindvault_set_listed: { resourceId: "res-001", listed: true },
+  mindvault_dispute: { resourceId: "res-001", action: "flag", reason: "Duplicate listing" },
   mindvault_set_tags: { resourceId: "res-001", tags: ["dataset"] },
+  mindvault_freeze: { resourceId: "res-001", confirm: "freeze_metadata" },
+  mindvault_fee_config: {},
+  mindvault_royalty: {
+    resourceId: "res-001",
+    royaltyRecipient: "GA6HCMBLTZS5VYYBCATRBRZ3BZJMAFUDKYYF6AH6MVCMGWMRDNSWJPIH",
+  },
   mindvault_check_state_permissions: {},
   mindvault_registry_health: {},
+  mindvault_prewarm_catalog: {},
+  mindvault_client_config: {},
+  mindvault_mainnet_banner: {},
   mindvault_import_wallet: {},
   mindvault_rotate_publisher_key: {},
   mindvault_verify_install: {},
+  mindvault_debug_bundle: { auditLogLines: 50, includeEnvironment: true },
+  mindvault_recover_catalog_cache: {},
+  mindvault_wallet_balances: {},
+  mindvault_server_endpoints: {},
 };
 
 function expectInvalid(tool: string, args: unknown): ToolValidationError {
@@ -81,9 +132,19 @@ function expectInvalid(tool: string, args: unknown): ToolValidationError {
 
 describe("spec coverage", () => {
   it("every advertised tool has a validation spec", () => {
-    for (const tool of TOOL_DEFINITIONS) {
+    for (const tool of specValidatedTools()) {
       expect(TOOL_ARGUMENT_SPECS, `${tool.name} has no validation spec`).toHaveProperty(tool.name);
     }
+  });
+
+  it("the self-validating exemption names exactly the tools without a spec", () => {
+    // Keeps TOOLS_WITHOUT_ARG_VALIDATION honest in both directions: a tool that
+    // gains a spec must leave the list, and a tool that loses one must not
+    // silently join it.
+    const withoutSpec = TOOL_DEFINITIONS.filter((tool) => !(tool.name in TOOL_ARGUMENT_SPECS)).map(
+      (tool) => tool.name,
+    );
+    expect(withoutSpec.sort()).toEqual([...TOOLS_WITHOUT_ARG_VALIDATION].sort());
   });
 
   it("every validation spec belongs to an advertised tool", () => {
@@ -94,7 +155,7 @@ describe("spec coverage", () => {
   });
 
   it("spec arguments match the advertised inputSchema properties", () => {
-    for (const tool of TOOL_DEFINITIONS) {
+    for (const tool of specValidatedTools()) {
       const spec = TOOL_ARGUMENT_SPECS[tool.name];
       expect(Object.keys(spec).sort(), `${tool.name} argument names`).toEqual(
         Object.keys(tool.inputSchema.properties).sort(),
@@ -103,7 +164,7 @@ describe("spec coverage", () => {
   });
 
   it("required arguments match the advertised required list", () => {
-    for (const tool of TOOL_DEFINITIONS) {
+    for (const tool of specValidatedTools()) {
       const spec = TOOL_ARGUMENT_SPECS[tool.name];
       const specRequired = Object.entries(spec)
         .filter(([, argSpec]) => argSpec.required)
@@ -221,6 +282,20 @@ describe("string arguments", () => {
         "pattern_mismatch",
       );
     }
+  });
+
+  it("enforces the on-chain resource id and attestation hash limits", () => {
+    const invalidId = expectInvalid("mindvault_verify_attestation", {
+      resourceId: "res-001",
+      attestationHash: "a".repeat(64),
+    });
+    expect(invalidId.issues[0].code).toBe("pattern_mismatch");
+
+    const oversizedHash = expectInvalid("mindvault_verify_attestation", {
+      resourceId: "res001",
+      attestationHash: "a".repeat(65),
+    });
+    expect(oversizedHash.issues[0].code).toBe("too_long");
   });
 
   it("rejects a malformed email and accepts a valid one", () => {
@@ -351,6 +426,65 @@ describe("hash arguments", () => {
   });
 });
 
+describe("string_array arguments", () => {
+  it("accepts an array and keeps case and duplicates (#608)", () => {
+    const args = validateToolArgs("mindvault_batch_catalog_lookup", {
+      resourceIds: ["Res-001", "res-001"],
+    });
+    expect(requiredStringArray(args, "resourceIds")).toEqual(["Res-001", "res-001"]);
+  });
+
+  it("trims entries and drops empties", () => {
+    const args = validateToolArgs("mindvault_batch_catalog_lookup", {
+      resourceIds: [" res-001 ", "", "   ", "res-002"],
+    });
+    expect(requiredStringArray(args, "resourceIds")).toEqual(["res-001", "res-002"]);
+  });
+
+  it("accepts a comma-separated string", () => {
+    const args = validateToolArgs("mindvault_batch_catalog_lookup", {
+      resourceIds: "res-001, res-002,res-003",
+    });
+    expect(requiredStringArray(args, "resourceIds")).toEqual(["res-001", "res-002", "res-003"]);
+  });
+
+  it("rejects a non-string entry with a deterministic message", () => {
+    const err = expectInvalid("mindvault_batch_catalog_lookup", {
+      resourceIds: ["res-001", 42],
+    });
+    expect(err.issues[0].code).toBe("invalid_string_array");
+    expect(err.message).toContain("array of strings");
+    // Rejected values are never echoed back.
+    expect(err.message).not.toContain("42");
+  });
+
+  it("reports the position of a malformed entry", () => {
+    const err = expectInvalid("mindvault_batch_catalog_lookup", {
+      resourceIds: ["res-001", "not ok!"],
+    });
+    expect(err.issues[0].code).toBe("invalid_string_array");
+    expect(err.issues[0].message).toContain("resourceIds[2]");
+  });
+
+  it("rejects an empty selection after normalization", () => {
+    const err = expectInvalid("mindvault_batch_catalog_lookup", { resourceIds: [] });
+    expect(err.issues[0].code).toBe("invalid_string_array");
+    expect(err.message).toContain("at least 1");
+  });
+
+  it("rejects a batch above the advertised ceiling", () => {
+    const err = expectInvalid("mindvault_batch_catalog_lookup", { resourceIds: OVERSIZE_BATCH });
+    expect(err.issues[0].code).toBe("invalid_string_array");
+    expect(err.message).toContain(`at most ${BATCH_LOOKUP_MAX_IDS}`);
+  });
+
+  it("rejects a non-array bag for the batch field", () => {
+    const err = expectInvalid("mindvault_batch_catalog_lookup", { resourceIds: 7 });
+    expect(err.issues[0].code).toBe("invalid_string_array");
+    expect(err.message).toContain("array of strings or a comma-separated string");
+  });
+});
+
 describe("multi-issue reporting", () => {
   it("reports every problem in one deterministic error", () => {
     const err = expectInvalid("mindvault_publish", {
@@ -383,6 +517,44 @@ describe("normalized output", () => {
 });
 
 // ── Catalog filters: the browse/search argument surface ─────────────────────
+
+describe("tag array arguments", () => {
+  it("normalizes, deduplicates, and accepts an empty replacement", () => {
+    const args = validateToolArgs("mindvault_set_tags", {
+      resourceId: "res-001",
+      tags: [" Dataset ", "dataset", "API"],
+    });
+    expect(requiredTagArray(args, "tags")).toEqual(["dataset", "api"]);
+    expect(
+      requiredTagArray(
+        validateToolArgs("mindvault_set_tags", { resourceId: "res-001", tags: [] }),
+        "tags",
+      ),
+    ).toEqual([]);
+  });
+
+  it("accepts the documented comma-separated convenience form", () => {
+    const args = validateToolArgs("mindvault_set_tags", {
+      resourceId: "res-001",
+      tags: "dataset, research",
+    });
+    expect(requiredTagArray(args, "tags")).toEqual(["dataset", "research"]);
+  });
+
+  it("rejects invalid tag arrays with a stable issue code", () => {
+    const tooMany = expectInvalid("mindvault_set_tags", {
+      resourceId: "res-001",
+      tags: Array.from({ length: 9 }, (_, i) => `tag-${i}`),
+    });
+    expect(tooMany.issues[0].code).toBe("invalid_tag_array");
+
+    const invalidCharacter = expectInvalid("mindvault_set_tags", {
+      resourceId: "res-001",
+      tags: ["not valid"],
+    });
+    expect(invalidCharacter.issues[0].code).toBe("invalid_tag_array");
+  });
+});
 
 describe("catalog filter arguments", () => {
   it("accepts every sort value on browse and on search", () => {
@@ -449,5 +621,20 @@ describe("mindvault_export_receipts arguments", () => {
 
   it("rejects a limit outside the supported range", () => {
     expect(expectInvalid("mindvault_export_receipts", { limit: 0 }).issues).toHaveLength(1);
+  });
+});
+
+describe("mindvault_debug_bundle", () => {
+  it("accepts an empty call and both arguments", () => {
+    expect(() => validateToolArgs("mindvault_debug_bundle", {})).not.toThrow();
+    expect(() =>
+      validateToolArgs("mindvault_debug_bundle", { auditLogLines: 0, includeEnvironment: false }),
+    ).not.toThrow();
+  });
+
+  it("rejects an audit line count outside 0..500 and a non-boolean flag", () => {
+    expectInvalid("mindvault_debug_bundle", { auditLogLines: 501 });
+    expectInvalid("mindvault_debug_bundle", { auditLogLines: -1 });
+    expectInvalid("mindvault_debug_bundle", { includeEnvironment: "maybe" });
   });
 });

@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
+const getAttestationHashMock = vi.hoisted(() => vi.fn());
+
 vi.mock("@modelcontextprotocol/sdk/server/index.js", () => ({
   Server: class MockServer {
     setRequestHandler = vi.fn();
@@ -15,11 +17,11 @@ vi.mock("@modelcontextprotocol/sdk/server/stdio.js", () => ({
 
 vi.mock("@modelcontextprotocol/sdk/types.js", () => ({
   CallToolRequestSchema: {},
-  ListPromptsRequestSchema: {},
-  GetPromptRequestSchema: {},
   ListToolsRequestSchema: {},
   ListPromptsRequestSchema: {},
   GetPromptRequestSchema: {},
+  ListResourcesRequestSchema: {},
+  ReadResourceRequestSchema: {},
 }));
 
 vi.mock("@x402/stellar", () => ({ createEd25519Signer: vi.fn() }));
@@ -37,6 +39,7 @@ vi.mock("@mindvault/registry-client", async (importOriginal) => {
   const actual = (await importOriginal()) as any;
   return {
     ...actual,
+    getAttestationHash: getAttestationHashMock,
     networks: {
       ...actual.networks,
       testnet: {
@@ -55,20 +58,33 @@ import {
   preview,
   publishStatus,
   txStatus,
+  verifyAttestation,
   buy,
   registerOnchain,
   walletInfo,
   useProfile,
+  switchNetworkProfile,
   listProfiles,
   networkProfile,
   updateMetadata,
   setPrice,
   transferOwnership,
+  acceptTransfer,
+  cancelTransfer,
+  pendingTransfer,
   setListed,
+  setTags,
+  normalizeMetadataPointer,
   _setAgentWallet,
   _setAgentApiKey,
   _resetProfiles,
 } from "./index.js";
+import {
+  recordCatalogSnapshot,
+  recordPreviewSnapshot,
+  _clearCatalogCache,
+} from "./catalogCache.js";
+import { Keypair } from "@stellar/stellar-sdk";
 
 function mockResponse(data: unknown, ok = true, status = 200): Response {
   const body = JSON.stringify(data);
@@ -162,6 +178,97 @@ describe("browse", () => {
         headers: expect.objectContaining({ "Content-Type": "application/json" }),
       }),
     );
+  });
+});
+
+describe("prewarmCatalogCache", () => {
+  beforeEach(() => {
+    _clearCatalogCache();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    _clearCatalogCache();
+  });
+
+  it("reports the resource count and populates the catalog cache", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(() =>
+      Promise.resolve(mockResponse(sampleResources)),
+    );
+    const result = await prewarmCatalogCache();
+    expect(result).toContain("Catalog pre-warmed");
+    expect(result).toContain("2 resource(s)");
+
+    // The offline fallback cache should now be warm — a subsequent transport
+    // failure falls back to it rather than throwing outright.
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Network error"));
+    const fallback = await browse();
+    expect(fallback).toContain("res-001");
+    expect(fallback).toMatch(/Offline catalog snapshot served/);
+  });
+
+  it("never throws on a server error — reports it in the return value instead", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(() =>
+      Promise.resolve(mockResponse({ error: "Internal server error" }, false, 503)),
+    );
+    const result = await prewarmCatalogCache();
+    expect(result).toContain("Catalog pre-warm failed");
+  });
+
+  it("never throws on a network failure — reports it in the return value instead", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Network error"));
+    const result = await prewarmCatalogCache();
+    expect(result).toContain("Catalog pre-warm failed");
+  });
+});
+
+describe("clientConfig", () => {
+  it("defaults to a placeholder path and testnet under the test harness", () => {
+    const result = clientConfig("cursor");
+    expect(result).toContain("/absolute/path/to/mindvault/mcp/dist/index.js");
+    expect(result).toContain('"STELLAR_NETWORK": "testnet"');
+  });
+
+  it("uses the servers key (not mcpServers) for vscode", () => {
+    const result = clientConfig("vscode");
+    const parsed = JSON.parse(result.replace(/^## .*\n\n```json\n/, "").replace(/\n```$/, ""));
+    expect(parsed.servers).toBeDefined();
+    expect(parsed.mcpServers).toBeUndefined();
+    expect(parsed.servers.mindvault.type).toBe("stdio");
+  });
+
+  it("emits TOML for codex", () => {
+    const result = clientConfig("codex");
+    expect(result).toContain("[mcp_servers.mindvault]");
+    expect(result).toContain('command = "node"');
+    expect(result).not.toContain("{");
+  });
+
+  it("rejects an unknown client name", () => {
+    expect(() => clientConfig("not-a-real-client")).toThrow(/Unknown client/);
+  });
+
+  it("returns every client's section when none is specified", () => {
+    const result = clientConfig();
+    for (const heading of [
+      "## Claude Code",
+      "## Claude Desktop",
+      "## Codex",
+      "## Cursor",
+      "## VS Code",
+      "## Windsurf",
+    ]) {
+      expect(result).toContain(heading);
+    }
+  });
+});
+
+describe("mainnetBanner", () => {
+  it("reflects testnet by default and mentions the paid-confirmation policy", () => {
+    const result = mainnetBanner();
+    expect(result).toContain("testnet");
+    expect(result).toContain("not real funds");
+    expect(result).toContain("Paid-operation confirmation:");
   });
 });
 
@@ -675,7 +782,7 @@ describe("buy – happy path (402 → sign → retry → success)", () => {
     // mock: meta fetch (balance check) → balance covers price
     // mock: Horizon balance check → sufficient balance
     // mock: paid fetch → success
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation((url) => {
+    vi.spyOn(globalThis, "fetch").mockImplementation((url) => {
       const u = String(url);
       if (u.includes("/accounts/")) {
         // Horizon balance: enough USDC
@@ -731,7 +838,9 @@ describe("buy – happy path (402 → sign → retry → success)", () => {
       return Promise.resolve(mockResponse({}, false, 402));
     });
 
-    const result = await buy("res-001");
+    // Authorize the $50 price explicitly so the ceiling guard passes and the
+    // funds check (the behavior under test) is what reports the shortfall.
+    const result = await buy("res-001", false, undefined, undefined, "50.00");
     expect(result).toContain("Insufficient USDC");
     expect(result).toContain("50 USDC");
     expect(result).toContain("1 USDC");
@@ -805,7 +914,7 @@ describe("buy – output shape for agent consumption", () => {
       return () => Promise.resolve(mockResponse(resourcePayload));
     });
 
-    const result = await buy("res-007");
+    const result = await buy("res-007", false, undefined, undefined, "20.00");
     // Output must be parseable JSON – agents rely on this.
     expect(() => JSON.parse(result)).not.toThrow();
     const parsed = JSON.parse(result);
@@ -869,7 +978,7 @@ describe("buy – purchase receipt persistence", () => {
       return () => Promise.resolve(mockResponse(resourcePayload));
     });
 
-    await buy("res-purchase-001");
+    await buy("res-purchase-001", false, undefined, undefined, "10.50");
 
     const { listPurchases } = await import("./purchaseHistory.js");
     const purchases = listPurchases();
@@ -1060,11 +1169,34 @@ describe("dry-run – publish validation", () => {
 describe("dry-run – buy validation", () => {
   beforeEach(() => {
     _setAgentWallet(testWallet);
+    vi.stubEnv("MINDVAULT_MAX_AUTO_PAY_USDC", undefined);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(mockResponse({ price: "5.00" }));
   });
 
   afterEach(() => {
     _setAgentWallet(null);
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
+  });
+
+  it("uses the live payment ceiling and per-call override for the quoted price", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(mockResponse({ price: "10.01" }));
+
+    const result = await dispatchTool("mindvault_buy", {
+      resourceId: "res-001",
+      dryRun: true,
+      maxAutoPayUsdc: "10.01",
+    });
+
+    expect(JSON.parse(result).intentions.estimatedPrice).toBe("10.01");
+  });
+
+  it("rejects a quoted price above the default ceiling without an override", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(mockResponse({ price: "10.01" }));
+
+    await expect(
+      dispatchTool("mindvault_buy", { resourceId: "res-001", dryRun: true }),
+    ).rejects.toThrow(/exceeds the automatic payment ceiling/);
   });
 
   it("returns dry-run result without submitting payment", async () => {
@@ -1090,6 +1222,7 @@ describe("dry-run – buy validation", () => {
 
     const parsed = JSON.parse(result);
     expect(parsed.validation.resourceId.valid).toBe(false);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
   it("shows required wallet state in intentions", async () => {
@@ -1133,7 +1266,7 @@ describe("registerOnchain – happy path", () => {
     const unsignedXdr = "AAAAAQAAAAD...unsigned";
     const txHash = "abc123txhash";
 
-    vi.spyOn(globalThis, "fetch").mockImplementation((url, init) => {
+    vi.spyOn(globalThis, "fetch").mockImplementation((url, _init) => {
       const u = String(url);
       if (u.includes("/register/prepare")) {
         return Promise.resolve(
@@ -1346,7 +1479,7 @@ describe("setupWallet – sponsored account failure diagnostics", () => {
       await dispatchTool("mindvault_setup_wallet", {});
     } catch (err: any) {
       const msg = err.message;
-      expect(msg).toContain("Failed to create wallet");
+      expect(msg).toContain("failed to create wallet");
       expect(msg).toContain("unavailable");
       expect(msg).toMatch(/restarting|wait/i);
     }
@@ -1476,6 +1609,60 @@ describe("setupWallet – sponsored account failure diagnostics", () => {
   });
 });
 
+describe("repairSponsoredAccount", () => {
+  const secretKey = "SAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+  const publicKey = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+  beforeEach(() => {
+    _resetProfiles();
+    vi.doMock("@stellar/stellar-sdk", () => ({
+      Keypair: {
+        fromSecret: vi.fn().mockReturnValue({ publicKey: () => publicKey }),
+      },
+    }));
+  });
+
+  afterEach(() => {
+    _resetProfiles();
+    vi.restoreAllMocks();
+  });
+
+  it("re-fetches Horizon state before restoring a half-created wallet", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      mockResponse({
+        subentry_count: 1,
+        balances: [
+          { asset_type: "native", balance: "2.0000000" },
+          { asset_type: "credit_alphanum4", asset_code: "USDC", balance: "0.0000000" },
+        ],
+      }),
+    );
+
+    const result = JSON.parse(
+      await dispatchTool("mindvault_repair_sponsored_account", {
+        secretKey,
+        profile: "recovered",
+      }),
+    );
+    expect(result).toMatchObject({
+      status: "repaired",
+      profile: "recovered",
+      address: publicKey,
+      accountStatus: "zero",
+      persisted: true,
+    });
+    expect(JSON.stringify(result)).not.toContain(secretKey);
+  });
+
+  it("does not restore a key when Horizon says the account is missing", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(mockResponse({}, false, 404));
+
+    await expect(dispatchTool("mindvault_repair_sponsored_account", { secretKey })).rejects.toThrow(
+      /does not exist.*no local key was changed/i,
+    );
+  });
+});
+
 describe("multi-wallet profiles", () => {
   beforeEach(() => {
     _resetProfiles();
@@ -1509,6 +1696,20 @@ describe("multi-wallet profiles", () => {
   it("use_profile rejects invalid names with a deterministic message", () => {
     expect(() => useProfile("has space")).toThrow("Invalid profile name");
     expect(() => useProfile("")).toThrow("Invalid profile name");
+  });
+
+  it("switches the active profile and re-verifies the selected network", () => {
+    try {
+      const result = JSON.parse(switchNetworkProfile("mainnet", "mainnet"));
+      expect(result.profile).toBe("mainnet");
+      expect(result.network).toBe("mainnet");
+      expect(result.verification.checks).toEqual(
+        expect.arrayContaining([expect.objectContaining({ name: "STELLAR_NETWORK", ok: true })]),
+      );
+      expect(listProfiles()).toContain("mainnet");
+    } finally {
+      switchNetworkProfile("testnet", "testnet");
+    }
   });
 
   it("keeps wallets isolated per profile", () => {
@@ -1800,6 +2001,71 @@ describe("dispatchTool argument validation", () => {
   });
 });
 
+describe("verifyAttestation", () => {
+  afterEach(() => {
+    delete process.env.MINDVAULT_MOCK;
+    getAttestationHashMock.mockReset();
+  });
+
+  it("reads the registered hash through the registry client", async () => {
+    getAttestationHashMock.mockResolvedValue("mock-attestation-1");
+    const parsed = JSON.parse(await verifyAttestation("mock1", "mock-attestation-1"));
+    expect(parsed.matches).toBe(true);
+    expect(getAttestationHashMock).toHaveBeenCalledWith(
+      expect.objectContaining({ resourceId: "mock1" }),
+    );
+  });
+
+  it("maps a deployed contract without the getter to a contract error", async () => {
+    getAttestationHashMock.mockRejectedValue(
+      new Error("The deployed vault-registry contract does not expose get_attestation_hash."),
+    );
+    const error = await verifyAttestation("mock1", "mock-attestation-1").catch((err) => err);
+    expect(error.message).toContain("Category: contract");
+    expect(error.message).toContain("mindvault_check_bindings");
+  });
+
+  it("reports a matching mock attestation", async () => {
+    process.env.MINDVAULT_MOCK = "1";
+    const parsed = JSON.parse(await verifyAttestation("mock1", "mock-attestation-1"));
+    expect(parsed.matches).toBe(true);
+    expect(parsed.verified).toBe(true);
+    expect(parsed.registeredAttestationHash).toBe("mock-attestation-1");
+  });
+
+  it("reports a mismatch without treating it as a transport failure", async () => {
+    process.env.MINDVAULT_MOCK = "1";
+    const parsed = JSON.parse(await verifyAttestation("mock1", "different"));
+    expect(parsed.matches).toBe(false);
+    expect(parsed.verified).toBe(false);
+    expect(parsed.summary).toContain("does not match");
+  });
+
+  it("reports when no attestation is registered", async () => {
+    process.env.MINDVAULT_MOCK = "1";
+    const parsed = JSON.parse(await verifyAttestation("mock2", "different"));
+    expect(parsed.registeredAttestationHash).toBeNull();
+    expect(parsed.matches).toBe(false);
+    expect(parsed.summary).toContain("No attestation hash");
+  });
+
+  it("dispatches through the MCP tool name", async () => {
+    process.env.MINDVAULT_MOCK = "1";
+    const result = await dispatchTool("mindvault_verify_attestation", {
+      resourceId: "mock1",
+      attestationHash: "mock-attestation-1",
+    });
+    expect(result).toContain('"verified": true');
+  });
+
+  it("rejects an attestation hash longer than the contract limit", async () => {
+    process.env.MINDVAULT_MOCK = "1";
+    await expect(verifyAttestation("mock1", "a".repeat(65))).rejects.toThrow(
+      "at most 64 characters",
+    );
+  });
+});
+
 // ── updateMetadata (#398) ───────────────────────────────────────────────────
 
 describe("updateMetadata", () => {
@@ -1829,21 +2095,85 @@ describe("updateMetadata", () => {
     }
   });
 
-  it("dispatches through dispatchTool with valid arguments", async () => {
+  it("normalizes the metadata pointer (strips trailing slash) in mock mode", async () => {
     _setAgentWallet({
       publicKey: "GA6HCMBLTZS5VYYBCATRBRZ3BZJMAFUDKYYF6AH6MVCMGWMRDNSWJPIH",
       secretKey: "SD1234567890123456789012345678901234567890123456789012345",
     });
     process.env.MINDVAULT_MOCK = "1";
     try {
-      const res = await dispatchTool("mindvault_update_metadata", {
-        resourceId: "res-001",
-        metadata: "ipfs://Qm123",
-      });
-      expect(res).toContain("success");
+      const res = await updateMetadata("res-001", "https://example.com/meta.json/");
+      const parsed = JSON.parse(res);
+      // Trailing slash must be stripped before the on-chain call.
+      expect(parsed.metadata).toBe("https://example.com/meta.json");
     } finally {
       delete process.env.MINDVAULT_MOCK;
     }
+  });
+});
+
+// ── normalizeMetadataPointer (#842) ────────────────────────────────────────
+
+describe("normalizeMetadataPointer", () => {
+  it("strips a trailing slash from an HTTP URL path", () => {
+    expect(normalizeMetadataPointer("https://example.com/path/")).toBe("https://example.com/path");
+  });
+
+  it("strips multiple trailing slashes", () => {
+    expect(normalizeMetadataPointer("https://example.com/path///")).toBe(
+      "https://example.com/path",
+    );
+  });
+
+  it("preserves the root path slash", () => {
+    expect(normalizeMetadataPointer("https://example.com/")).toBe("https://example.com/");
+  });
+
+  it("lowercases scheme and host", () => {
+    expect(normalizeMetadataPointer("HTTPS://Example.COM/path")).toBe("https://example.com/path");
+  });
+
+  it("sorts query parameters alphabetically", () => {
+    expect(normalizeMetadataPointer("https://example.com/meta?z=1&a=2")).toBe(
+      "https://example.com/meta?a=2&z=1",
+    );
+  });
+
+  it("passes ipfs:// pointers through unchanged", () => {
+    const ipfs = "ipfs://QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG";
+    expect(normalizeMetadataPointer(ipfs)).toBe(ipfs);
+  });
+
+  it("passes ar:// pointers through unchanged", () => {
+    const ar = "ar://abc123";
+    expect(normalizeMetadataPointer(ar)).toBe(ar);
+  });
+
+  it("passes sha256: pointers through unchanged", () => {
+    const sha = "sha256:abc123def456";
+    expect(normalizeMetadataPointer(sha)).toBe(sha);
+  });
+
+  it("passes 0x pointers through unchanged", () => {
+    const hex = "0xdeadbeef";
+    expect(normalizeMetadataPointer(hex)).toBe(hex);
+  });
+
+  it("trims surrounding whitespace", () => {
+    expect(normalizeMetadataPointer("  https://example.com/path/  ")).toBe(
+      "https://example.com/path",
+    );
+  });
+
+  it("returns malformed URLs unchanged (no throw)", () => {
+    const bad = "https://not a valid url";
+    // URL constructor throws; we return the trimmed input
+    expect(() => normalizeMetadataPointer(bad)).not.toThrow();
+  });
+
+  it("a URL without a trailing slash is unchanged", () => {
+    const clean = "https://example.com/metadata.json";
+    expect(normalizeMetadataPointer(clean)).toBe(clean);
   });
 });
 
@@ -1966,12 +2296,149 @@ describe("transferOwnership", () => {
   });
 });
 
+// ── acceptTransfer ──────────────────────────────────────────────────────────
+
+describe("acceptTransfer", () => {
+  beforeEach(() => {
+    _resetProfiles();
+  });
+
+  it("throws when no wallet is set up", async () => {
+    await expect(acceptTransfer("res-001")).rejects.toThrow("No wallet");
+  });
+
+  it("succeeds in mock mode when wallet is present", async () => {
+    _setAgentWallet({
+      publicKey: "GA6HCMBLTZS5VYYBCATRBRZ3BZJMAFUDKYYF6AH6MVCMGWMRDNSWJPIH",
+      secretKey: "SD1234567890123456789012345678901234567890123456789012345",
+    });
+    process.env.MINDVAULT_MOCK = "1";
+    try {
+      const res = await acceptTransfer("res-001");
+      const parsed = JSON.parse(res);
+      expect(parsed.status).toBe("success");
+      expect(parsed.resourceId).toBe("res-001");
+      expect(parsed.txHash).toBeTruthy();
+    } finally {
+      delete process.env.MINDVAULT_MOCK;
+    }
+  });
+
+  it("dispatches through dispatchTool with valid arguments", async () => {
+    _setAgentWallet({
+      publicKey: "GA6HCMBLTZS5VYYBCATRBRZ3BZJMAFUDKYYF6AH6MVCMGWMRDNSWJPIH",
+      secretKey: "SD1234567890123456789012345678901234567890123456789012345",
+    });
+    process.env.MINDVAULT_MOCK = "1";
+    try {
+      const res = await dispatchTool("mindvault_accept_transfer", { resourceId: "res-001" });
+      expect(res).toContain("success");
+    } finally {
+      delete process.env.MINDVAULT_MOCK;
+    }
+  });
+});
+
+// ── cancelTransfer ──────────────────────────────────────────────────────────
+
+describe("cancelTransfer", () => {
+  beforeEach(() => {
+    _resetProfiles();
+  });
+
+  it("throws when no wallet is set up", async () => {
+    await expect(cancelTransfer("res-001")).rejects.toThrow("No wallet");
+  });
+
+  it("succeeds in mock mode when wallet is present", async () => {
+    _setAgentWallet({
+      publicKey: "GA6HCMBLTZS5VYYBCATRBRZ3BZJMAFUDKYYF6AH6MVCMGWMRDNSWJPIH",
+      secretKey: "SD1234567890123456789012345678901234567890123456789012345",
+    });
+    process.env.MINDVAULT_MOCK = "1";
+    try {
+      const res = await cancelTransfer("res-001");
+      const parsed = JSON.parse(res);
+      expect(parsed.status).toBe("success");
+      expect(parsed.resourceId).toBe("res-001");
+      expect(parsed.txHash).toBeTruthy();
+    } finally {
+      delete process.env.MINDVAULT_MOCK;
+    }
+  });
+
+  it("dispatches through dispatchTool with valid arguments", async () => {
+    _setAgentWallet({
+      publicKey: "GA6HCMBLTZS5VYYBCATRBRZ3BZJMAFUDKYYF6AH6MVCMGWMRDNSWJPIH",
+      secretKey: "SD1234567890123456789012345678901234567890123456789012345",
+    });
+    process.env.MINDVAULT_MOCK = "1";
+    try {
+      const res = await dispatchTool("mindvault_cancel_transfer", { resourceId: "res-001" });
+      expect(res).toContain("success");
+    } finally {
+      delete process.env.MINDVAULT_MOCK;
+    }
+  });
+});
+
+// ── pendingTransfer ─────────────────────────────────────────────────────────
+
+describe("pendingTransfer", () => {
+  beforeEach(() => {
+    _resetProfiles();
+  });
+
+  it("succeeds in mock mode and returns a found pending transfer", async () => {
+    process.env.MINDVAULT_MOCK = "1";
+    try {
+      const res = await pendingTransfer("res-001");
+      const parsed = JSON.parse(res);
+      expect(parsed.source).toBe("on-chain (mock)");
+      expect(parsed.resourceId).toBe("res-001");
+      expect(parsed.found).toBe(true);
+      expect(typeof parsed.proposedNewOwner).toBe("string");
+      expect(parsed.proposedNewOwner).toMatch(/^G[A-Z2-7]{55}$/);
+      expect(parsed.message).toContain("res-001");
+    } finally {
+      delete process.env.MINDVAULT_MOCK;
+    }
+  });
+
+  it("dispatches through dispatchTool with valid arguments in mock mode", async () => {
+    process.env.MINDVAULT_MOCK = "1";
+    try {
+      const res = await dispatchTool("mindvault_pending_transfer", { resourceId: "res-001" });
+      const parsed = JSON.parse(res);
+      expect(parsed.found).toBe(true);
+      expect(parsed.resourceId).toBe("res-001");
+    } finally {
+      delete process.env.MINDVAULT_MOCK;
+    }
+  });
+
+  it("returns consistent output shape with required schema fields", async () => {
+    process.env.MINDVAULT_MOCK = "1";
+    try {
+      const res = await pendingTransfer("res-001");
+      const parsed = JSON.parse(res);
+      // Required fields from PENDING_TRANSFER_OUTPUT_SCHEMA
+      expect(parsed).toHaveProperty("source");
+      expect(parsed).toHaveProperty("resourceId");
+      expect(parsed).toHaveProperty("found");
+      expect(parsed).toHaveProperty("message");
+      expect(parsed).toHaveProperty("contract");
+    } finally {
+      delete process.env.MINDVAULT_MOCK;
+    }
+  });
+});
+
 // ── setListed (#400) ────────────────────────────────────────────────────────
 
 describe("setListed", () => {
   beforeEach(() => {
-    _resetProfiles();
-  });
+    _resetProfiles();  });
 
   it("throws when no wallet is set up", async () => {
     await expect(setListed("res-001", false)).rejects.toThrow("No wallet");
@@ -2007,6 +2474,570 @@ describe("setListed", () => {
         listed: true,
       });
       expect(res).toContain("success");
+    } finally {
+      delete process.env.MINDVAULT_MOCK;
+    }
+  });
+});
+
+describe("setTags (#832)", () => {
+  beforeEach(() => {
+    _resetProfiles();
+  });
+
+  it("throws when no wallet is set up", async () => {
+    await expect(setTags("res-001", ["dataset"])).rejects.toThrow("No wallet");
+  });
+
+  it("succeeds in mock mode when wallet is present", async () => {
+    _setAgentWallet({
+      publicKey: "GA6HCMBLTZS5VYYBCATRBRZ3BZJMAFUDKYYF6AH6MVCMGWMRDNSWJPIH",
+      secretKey: "SD1234567890123456789012345678901234567890123456789012345",
+    });
+    process.env.MINDVAULT_MOCK = "1";
+    try {
+      const res = await setTags("res-001", ["dataset", "research"]);
+      expect(res).toContain('Tags updated for resource "res-001".');
+      expect(res).toContain("Tags: dataset, research");
+      expect(res).toContain("MOCK_TX_SET_TAGS_res-001");
+    } finally {
+      delete process.env.MINDVAULT_MOCK;
+    }
+  });
+
+  it("normalizes and deduplicates tags through dispatchTool", async () => {
+    _setAgentWallet({
+      publicKey: "GA6HCMBLTZS5VYYBCATRBRZ3BZJMAFUDKYYF6AH6MVCMGWMRDNSWJPIH",
+      secretKey: "SD1234567890123456789012345678901234567890123456789012345",
+    });
+    process.env.MINDVAULT_MOCK = "1";
+    try {
+      const res = await dispatchTool("mindvault_set_tags", {
+        resourceId: "res-001",
+        tags: [" Dataset ", "DATASET", "research"],
+      });
+      expect(res).toContain("Tags: dataset, research");
+    } finally {
+      delete process.env.MINDVAULT_MOCK;
+    }
+  });
+
+  it("allows an empty list to clear tags", async () => {
+    _setAgentWallet({
+      publicKey: "GA6HCMBLTZS5VYYBCATRBRZ3BZJMAFUDKYYF6AH6MVCMGWMRDNSWJPIH",
+      secretKey: "SD1234567890123456789012345678901234567890123456789012345",
+    });
+    process.env.MINDVAULT_MOCK = "1";
+    try {
+      const res = await dispatchTool("mindvault_set_tags", { resourceId: "res-001", tags: [] });
+      expect(res).toContain("Tags: (none)");
+    } finally {
+      delete process.env.MINDVAULT_MOCK;
+    }
+  });
+});
+
+describe("API health preflight before mutation tools (#603)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    _setAgentWallet(null);
+    _setAgentApiKey(null);
+    _resetProfiles();
+  });
+
+  it("refuses register before touching the network when the API is unreachable", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => mockResponse({ error: "down" }, false, 401));
+
+    await expect(
+      dispatchTool("mindvault_register", { name: "n", email: "e@example.com" }),
+    ).rejects.toThrow("not reachable");
+
+    // Only the preflight GET happened — no POST /publishers.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toContain("/resources");
+  });
+
+  it("refuses publish when the API is unreachable", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      mockResponse({ error: "down" }, false, 401),
+    );
+
+    await expect(
+      dispatchTool("mindvault_publish", {
+        title: "t",
+        price: "5.00",
+        externalUrl: "https://example.com/x",
+      }),
+    ).rejects.toThrow("mindvault_publish was not attempted");
+  });
+
+  it("refuses rotate_key when the API is unreachable", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      mockResponse({ error: "down" }, false, 401),
+    );
+
+    await expect(dispatchTool("mindvault_rotate_publisher_key", {})).rejects.toThrow(
+      "not reachable",
+    );
+  });
+
+  it("lets register proceed past the preflight when the API is healthy", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => mockResponse(sampleResources));
+
+    // Preflight passes; the handler then fails on the missing wallet before
+    // issuing any POST — proving the gate is passed, not that the tool ran.
+    await expect(
+      dispatchTool("mindvault_register", { name: "n", email: "e@example.com" }),
+    ).rejects.toThrow("No wallet in profile");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips the preflight entirely for dry-run publish", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => mockResponse(sampleResources));
+
+    const result = await dispatchTool("mindvault_publish", {
+      title: "t",
+      price: "5.00",
+      externalUrl: "https://example.com/x",
+      dryRun: true,
+    });
+    expect(JSON.parse(result).mode).toBe("dry-run");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+// ── half-completed sponsored-account creation (#839) ────────────────────────
+
+describe("setupWallet – half-completed sponsored creation", () => {
+  const sponsored = Keypair.random();
+  const other = Keypair.random();
+
+  beforeEach(() => {
+    // Earlier suites stub @stellar/stellar-sdk with vi.doMock, which
+    // restoreAllMocks does not undo. Key derivation must be the real thing here.
+    vi.doUnmock("@stellar/stellar-sdk");
+    _resetProfiles();
+  });
+
+  afterEach(() => {
+    _resetProfiles();
+    vi.restoreAllMocks();
+  });
+
+  it("persists a wallet whose secret derives the address it was given", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      mockResponse({ publicKey: sponsored.publicKey(), secretKey: sponsored.secret() }),
+    );
+
+    const out = await dispatchTool("mindvault_setup_wallet", {});
+    expect(out).toContain("Wallet created.");
+    expect(out).toContain(`Address: ${sponsored.publicKey()}`);
+    expect(out).toContain("persisted");
+  });
+
+  it("refuses a funded address that arrives without its secret key", async () => {
+    // The shape a creation that funds the account and then times out leaves:
+    // the agent would otherwise hold an address it can never sign for.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      mockResponse({ publicKey: sponsored.publicKey() }),
+    );
+
+    await expect(dispatchTool("mindvault_setup_wallet", {})).rejects.toThrow(
+      /no secret key|cannot sign/i,
+    );
+  });
+
+  it("refuses a secret key belonging to a different account", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      mockResponse({ publicKey: sponsored.publicKey(), secretKey: other.secret() }),
+    );
+
+    await expect(dispatchTool("mindvault_setup_wallet", {})).rejects.toThrow(/belongs to/i);
+  });
+
+  it("explains that nothing was persisted and a funded account may be orphaned", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      mockResponse({ publicKey: sponsored.publicKey(), secretKey: "" }),
+    );
+
+    try {
+      await dispatchTool("mindvault_setup_wallet", {});
+      throw new Error("expected setup_wallet to reject");
+    } catch (err: any) {
+      expect(err.message).toContain("Nothing was persisted");
+      expect(err.message).toContain("orphaned");
+    }
+  });
+
+  it("leaves no wallet behind when the response is rejected", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      mockResponse({ publicKey: sponsored.publicKey(), secretKey: other.secret() }),
+    );
+
+    await expect(dispatchTool("mindvault_setup_wallet", {})).rejects.toThrow();
+    // No wallet was stored, so the next tool must report the wallet as missing
+    // rather than reporting a balance for an address this agent cannot use.
+    await expect(walletInfo()).rejects.toThrow(/mindvault_setup_wallet/);
+  });
+
+  it("warns in wallet_info when the stored secret does not own the address", async () => {
+    _setAgentWallet({ publicKey: sponsored.publicKey(), secretKey: other.secret() });
+    vi.spyOn(globalThis, "fetch").mockImplementation(() =>
+      Promise.resolve(
+        mockResponse({
+          subentry_count: 1,
+          balances: [
+            { asset_type: "native", balance: "10.0000000" },
+            { asset_type: "credit_alphanum4", asset_code: "USDC", balance: "25.0" },
+          ],
+        }),
+      ),
+    );
+
+    const out = await walletInfo();
+    expect(out).toContain("USDC Balance: 25.0");
+    expect(out).toContain("Keystore:");
+    expect(out).toContain("NOT spendable");
+  });
+
+  it("does not warn when the stored keypair is consistent", async () => {
+    _setAgentWallet({ publicKey: sponsored.publicKey(), secretKey: sponsored.secret() });
+    vi.spyOn(globalThis, "fetch").mockImplementation(() =>
+      Promise.resolve(
+        mockResponse({
+          subentry_count: 1,
+          balances: [{ asset_type: "native", balance: "10.0000000" }],
+        }),
+      ),
+    );
+
+    expect(await walletInfo()).not.toContain("NOT spendable");
+  });
+});
+
+// ── state-mutating calls are serialized (#550) ──────────────────────────────
+
+describe("state-mutating calls are serialized (#550)", () => {
+  // setupWallet verifies that the secret the service returns derives the
+  // address it returns (#839), so these fixtures are real keypairs rather than
+  // placeholder strings.
+  const sponsored = Keypair.random();
+  const SPONSORED_PUBLIC = sponsored.publicKey();
+  const SPONSORED_SECRET = sponsored.secret();
+
+  beforeEach(() => {
+    vi.doUnmock("@stellar/stellar-sdk");
+    _resetProfiles();
+  });
+
+  afterEach(() => {
+    _resetProfiles();
+    vi.restoreAllMocks();
+  });
+
+  it("persists the results of two concurrent mutating calls", async () => {
+    // Each setupWallet call read-modify-writes the module-level profile state
+    // across an `await` boundary (the sponsored-account POST). Serialized under
+    // the state mutex, neither may clobber the other's saveState(), so both
+    // profiles must survive.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      mockResponse({ publicKey: SPONSORED_PUBLIC, secretKey: SPONSORED_SECRET }),
+    );
+
+    const [alice, bob] = await Promise.all([
+      dispatchTool("mindvault_setup_wallet", { profile: "alice" }),
+      dispatchTool("mindvault_setup_wallet", { profile: "bob" }),
+    ]);
+
+    expect(alice).toContain("Wallet created.");
+    expect(bob).toContain("Wallet created.");
+    expect(alice).toContain(`Address: ${SPONSORED_PUBLIC}`);
+    expect(bob).toContain(`Address: ${SPONSORED_PUBLIC}`);
+
+    const list = listProfiles();
+    expect(list).toContain(`alice — ${SPONSORED_PUBLIC}`);
+    expect(list).toContain(`bob — ${SPONSORED_PUBLIC}`);
+  });
+
+  it("keeps a serialized mutating call from losing an earlier profile", async () => {
+    // Interleave a quick synchronous mutating call with a slow async one. Both
+    // go through the same lock, so the slow wallet setup cannot run its
+    // read-modify-write while use_profile is mid-flight and drop its profile.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      mockResponse({ publicKey: SPONSORED_PUBLIC, secretKey: SPONSORED_SECRET }),
+    );
+
+    const [profile, wallet] = await Promise.all([
+      dispatchTool("mindvault_use_profile", { name: "buyer" }),
+      dispatchTool("mindvault_setup_wallet", { profile: "bob" }),
+    ]);
+
+    expect(profile).toContain("Active profile: buyer");
+    expect(wallet).toContain(`Address: ${SPONSORED_PUBLIC}`);
+
+    const list = listProfiles();
+    expect(list).toContain("buyer");
+    expect(list).toContain(`bob — ${SPONSORED_PUBLIC}`);
+  });
+});
+
+// ── offline catalog cache fallback (#556) ────────────────────────────────────
+
+describe("offline catalog cache fallback (#556)", () => {
+  beforeEach(() => {
+    _clearCatalogCache();
+    _resetProfiles();
+  });
+
+  afterEach(() => {
+    _clearCatalogCache();
+    _resetProfiles();
+    vi.restoreAllMocks();
+  });
+
+  const catalogItem = {
+    id: "c1",
+    title: "Cached One",
+    price: "3",
+    description: "A cached resource",
+    accessUrl: "https://example.com/c1",
+  };
+
+  it("browse serves the cached snapshot with an age label when the API is unreachable", async () => {
+    recordCatalogSnapshot([catalogItem]);
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("ECONNREFUSED: Connection refused"));
+
+    const out = await browse();
+    expect(out).toContain("[c1] Cached One");
+    expect(out).toContain("Offline catalog snapshot served");
+    expect(out).toContain("cached");
+  });
+
+  it("search applies filters to the cached snapshot and labels it when offline", async () => {
+    recordCatalogSnapshot([catalogItem]);
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("ECONNREFUSED"));
+
+    const out = await search("Cached");
+    expect(out).toContain("[c1] Cached One");
+    expect(out).toContain("Offline catalog snapshot served");
+
+    const empty = await search("no-match-whatsoever");
+    expect(empty).toContain("No resources match");
+  });
+
+  it("preview serves the cached meta with an age label when unreachable", async () => {
+    recordPreviewSnapshot("res-9", {
+      id: "res-9",
+      title: "Cached Preview",
+      price: "4",
+      description: "D",
+      resourceType: "article",
+      verificationStatus: "verified",
+      accessUrl: "https://example.com/9",
+    });
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("ECONNREFUSED"));
+
+    const parsed = JSON.parse(await preview("res-9"));
+    expect(parsed.title).toBe("Cached Preview");
+    expect(parsed.offlineCache).toContain("Offline catalog snapshot served");
+  });
+
+  it("serves the snapshot for a gateway error the retry layer could not ride out", async () => {
+    // 502/503/504 mean the catalog could not answer — exactly what the offline
+    // snapshot is for. The label names the status rather than claiming the API
+    // was unreachable (#837).
+    recordCatalogSnapshot([catalogItem]);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      mockResponse({ error: "bad gateway" }, false, 502),
+    );
+
+    const out = await browse();
+    expect(out).toContain("[c1] Cached One");
+    expect(out).toContain("Offline catalog snapshot served");
+    expect(out).toContain("HTTP 502");
+    expect(out).not.toContain("unreachable");
+  });
+
+  it("serves the snapshot when the catalog is rate limited", async () => {
+    recordCatalogSnapshot([catalogItem]);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      mockResponse({ error: "slow down" }, false, 429),
+    );
+
+    const out = await browse();
+    expect(out).toContain("[c1] Cached One");
+    expect(out).toContain("HTTP 429");
+  });
+
+  it("surfaces a client error instead of hiding it behind the cache", async () => {
+    // A 400 is the catalog answering about this request. Serving a snapshot
+    // would tell the agent the API is unreachable and leave it repeating an
+    // invalid call against data that can never reflect it (#837).
+    recordCatalogSnapshot([catalogItem]);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      mockResponse({ error: "minPrice must be numeric" }, false, 400),
+    );
+
+    await expect(browse()).rejects.toThrow(/minPrice must be numeric/);
+  });
+
+  it("surfaces an auth error rather than serving the cache", async () => {
+    recordCatalogSnapshot([catalogItem]);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      mockResponse({ error: "forbidden" }, false, 403),
+    );
+
+    await expect(search("Cached")).rejects.toThrow(/forbidden/);
+  });
+
+  it("surfaces a 404 on preview instead of returning another resource's snapshot", async () => {
+    recordPreviewSnapshot("res-9", { id: "res-9", title: "Cached Preview", price: "4" });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      mockResponse({ error: "not found" }, false, 404),
+    );
+
+    await expect(preview("res-9")).rejects.toThrow(/not found/);
+  });
+
+  it("serves the cached preview when the catalog answers 503", async () => {
+    recordPreviewSnapshot("res-9", {
+      id: "res-9",
+      title: "Cached Preview",
+      price: "4",
+      description: "D",
+      resourceType: "article",
+      verificationStatus: "verified",
+      accessUrl: "https://example.com/9",
+    });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      mockResponse({ error: "unavailable" }, false, 503),
+    );
+
+    const parsed = JSON.parse(await preview("res-9"));
+    expect(parsed.title).toBe("Cached Preview");
+    expect(parsed.offlineCache).toContain("HTTP 503");
+  });
+
+  it("rethrows the deterministic reachability error when there is no cache", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("ECONNREFUSED: Connection refused"));
+    await expect(browse()).rejects.toThrow();
+    await expect(preview("res-9")).rejects.toThrow();
+  });
+
+  it("a mutating tool never falls back to the cached catalog", async () => {
+    // Prime the cache as if a successful read had happened earlier.
+    recordCatalogSnapshot([catalogItem]);
+    _setAgentWallet(testWallet);
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("ECONNREFUSED"));
+
+    // register must surface the network failure — not silently serve stale data.
+    await expect(
+      dispatchTool("mindvault_register", { name: "N", email: "e@example.com" }),
+    ).rejects.toThrow();
+  });
+});
+
+// ── disputeResource (#869) ──────────────────────────────────────────────────
+
+describe("disputeResource", () => {
+  beforeEach(() => {
+    _resetProfiles();
+  });
+
+  it("throws when no wallet is set up", async () => {
+    await expect(disputeResource("res-001", "flag", "Spam")).rejects.toThrow("No wallet");
+  });
+
+  it("succeeds (flag) in mock mode when wallet is present", async () => {
+    _setAgentWallet({
+      publicKey: "GA6HCMBLTZS5VYYBCATRBRZ3BZJMAFUDKYYF6AH6MVCMGWMRDNSWJPIH",
+      secretKey: "SD1234567890123456789012345678901234567890123456789012345",
+    });
+    process.env.MINDVAULT_MOCK = "1";
+    try {
+      const res = await disputeResource("res-001", "flag", "Duplicate listing");
+      const parsed = JSON.parse(res);
+      expect(parsed.status).toBe("success");
+      expect(parsed.resourceId).toBe("res-001");
+      expect(parsed.action).toBe("flag");
+      expect(parsed.reason).toBe("Duplicate listing");
+      expect(parsed.txHash).toMatch(/MOCK_TX_DISPUTE_FLAG/);
+    } finally {
+      delete process.env.MINDVAULT_MOCK;
+    }
+  });
+
+  it("succeeds (unflag) in mock mode when wallet is present", async () => {
+    _setAgentWallet({
+      publicKey: "GA6HCMBLTZS5VYYBCATRBRZ3BZJMAFUDKYYF6AH6MVCMGWMRDNSWJPIH",
+      secretKey: "SD1234567890123456789012345678901234567890123456789012345",
+    });
+    process.env.MINDVAULT_MOCK = "1";
+    try {
+      const res = await disputeResource("res-001", "unflag", "Issue resolved");
+      const parsed = JSON.parse(res);
+      expect(parsed.status).toBe("success");
+      expect(parsed.action).toBe("unflag");
+      expect(parsed.txHash).toMatch(/MOCK_TX_DISPUTE_UNFLAG/);
+    } finally {
+      delete process.env.MINDVAULT_MOCK;
+    }
+  });
+
+  it("dispatches through dispatchTool with valid arguments", async () => {
+    _setAgentWallet({
+      publicKey: "GA6HCMBLTZS5VYYBCATRBRZ3BZJMAFUDKYYF6AH6MVCMGWMRDNSWJPIH",
+      secretKey: "SD1234567890123456789012345678901234567890123456789012345",
+    });
+    process.env.MINDVAULT_MOCK = "1";
+    try {
+      const res = await dispatchTool("mindvault_dispute", {
+        resourceId: "res-001",
+        action: "flag",
+        reason: "Test flag",
+      });
+      expect(res).toContain("success");
+      expect(res).toContain("flag");
+    } finally {
+      delete process.env.MINDVAULT_MOCK;
+    }
+  });
+
+  it("rejects an invalid action value", async () => {
+    _setAgentWallet({
+      publicKey: "GA6HCMBLTZS5VYYBCATRBRZ3BZJMAFUDKYYF6AH6MVCMGWMRDNSWJPIH",
+      secretKey: "SD1234567890123456789012345678901234567890123456789012345",
+    });
+    process.env.MINDVAULT_MOCK = "1";
+    try {
+      await expect(
+        dispatchTool("mindvault_dispute", {
+          resourceId: "res-001",
+          action: "delete",
+          reason: "bad",
+        }),
+      ).rejects.toThrow();
+    } finally {
+      delete process.env.MINDVAULT_MOCK;
+    }
+  });
+
+  it("rejects a missing reason", async () => {
+    _setAgentWallet({
+      publicKey: "GA6HCMBLTZS5VYYBCATRBRZ3BZJMAFUDKYYF6AH6MVCMGWMRDNSWJPIH",
+      secretKey: "SD1234567890123456789012345678901234567890123456789012345",
+    });
+    process.env.MINDVAULT_MOCK = "1";
+    try {
+      await expect(
+        dispatchTool("mindvault_dispute", { resourceId: "res-001", action: "flag" }),
+      ).rejects.toThrow();
     } finally {
       delete process.env.MINDVAULT_MOCK;
     }

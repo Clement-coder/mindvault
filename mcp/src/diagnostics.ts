@@ -19,6 +19,10 @@ import {
   resolveStellarNetwork,
   validateNetworkConfig,
 } from "@mindvault/registry-client";
+import {
+  isExplicitMainnetDenial,
+  unsafeMainnetAllow,
+} from "./mainnetGuardrails.js";
 
 export type DiagnosticSeverity = "error" | "warning";
 
@@ -102,19 +106,31 @@ export function collectStartupDiagnostics(
 
   // Reuse the shared network-consistency checks (NETWORK, RPC, Horizon, USDC,
   // registry cross-network) so the MCP server and other consumers agree.
+  const sorobanRpcUrl = env.SOROBAN_RPC_URL ?? preset.sorobanRpcUrl;
+  const horizonUrl = env.HORIZON_URL ?? preset.horizonUrl;
   const networkIssues = validateNetworkConfig({
     stellarNetwork,
     x402Network: normalizeX402Network(env.NETWORK ?? preset.x402Network),
-    sorobanRpcUrl: env.SOROBAN_RPC_URL ?? preset.sorobanRpcUrl,
-    horizonUrl: env.HORIZON_URL ?? preset.horizonUrl,
+    // Let the URL validation below report malformed overrides directly instead
+    // of also producing a misleading network-mismatch diagnostic.
+    sorobanRpcUrl: isHttpUrl(sorobanRpcUrl) ? sorobanRpcUrl : preset.sorobanRpcUrl,
+    horizonUrl: isHttpUrl(horizonUrl) ? horizonUrl : preset.horizonUrl,
     usdcSacContractId: env.USDC_CONTRACT_ID ?? preset.usdcSacContractId,
     registryContractId:
       env.VAULT_REGISTRY_CONTRACT_ID ?? preset.defaultRegistryContractId ?? undefined,
   });
   for (const issue of networkIssues) {
+    // A mismatch between NETWORK (x402 payment network) and STELLAR_NETWORK
+    // (Soroban/Horizon target) is a warning: the server can still start, but
+    // payments will likely be rejected by the x402 facilitator because the
+    // signed auth entries will reference the wrong network. All other
+    // cross-network issues (wrong RPC endpoint, wrong USDC contract, wrong
+    // registry contract ID) are blocking errors because they will cause
+    // every Soroban call to fail immediately.
+    const severity: DiagnosticSeverity = issue.field === "NETWORK" ? "warning" : "error";
     diagnostics.push({
       variable: issue.field,
-      severity: "error",
+      severity,
       message: redactSecrets(issue.message),
     });
   }
@@ -133,7 +149,12 @@ export function collectStartupDiagnostics(
   }
 
   // URL-shaped variables must be absolute http(s) URLs when set.
-  for (const variable of ["MINDVAULT_URL", "SPONSORED_ACCOUNT_URL"] as const) {
+  for (const variable of [
+    "MINDVAULT_URL",
+    "SPONSORED_ACCOUNT_URL",
+    "HORIZON_URL",
+    "SOROBAN_RPC_URL",
+  ] as const) {
     const value = env[variable];
     if (typeof value === "string" && value.trim() && !isHttpUrl(value)) {
       diagnostics.push({
@@ -158,6 +179,31 @@ export function collectStartupDiagnostics(
       severity: "warning",
       message: `Unrecognized value ${JSON.stringify(metrics)}; metrics stay disabled.`,
       expected: "1/true/yes/on to enable, or leave unset",
+    });
+  }
+
+  // MINDVAULT_ALLOW_MAINNET (#606) — the mainnet guardrail parses this value
+  // fail-safe: only 1/true/yes widen the mutation policy, everything else
+  // keeps per-call confirmation. A set value that unlocks nothing is therefore
+  // harmless but almost certainly unintended — a bare "$MINDVAULT_ALLOW_MAINNET"
+  // template placeholder left unexpanded, `on`/`enabled` from another config
+  // dialect, or a plain typo. Silently doing nothing is the confusing kind of
+  // safe; say so at startup. Explicit denials (0/false/no/off) re-affirm the
+  // default on purpose and stay quiet. A warning, not an error: the fallback
+  // is exactly the safe default, so there is nothing to fix before starting.
+  const allowMainnet = env.MINDVAULT_ALLOW_MAINNET;
+  if (
+    typeof allowMainnet === "string" &&
+    allowMainnet.trim() !== "" &&
+    !unsafeMainnetAllow(allowMainnet) &&
+    !isExplicitMainnetDenial(allowMainnet)
+  ) {
+    diagnostics.push({
+      variable: "MINDVAULT_ALLOW_MAINNET",
+      severity: "warning",
+      message: `Value ${JSON.stringify(allowMainnet)} does not unlock mainnet mutations; per-call confirmMainnet remains required.`,
+      expected:
+        "unset for per-call confirmation, 1/true/yes to allow gated tools without confirmMainnet, or 0/false/no/off to deny explicitly",
     });
   }
 

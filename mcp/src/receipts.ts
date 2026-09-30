@@ -26,6 +26,7 @@
 import { type ExplorerNetwork } from "@mindvault/registry-client";
 import { explorerTxUrl, resolveExplorerNetwork } from "./stellarExplorer.js";
 import { listPurchases, type PurchaseReceipt } from "./purchaseHistory.js";
+import { sumUsdc, trimUsdc } from "./usdcAmount.js";
 
 /** Schema identifier carried by every export, so consumers can version-check. */
 export const RECEIPT_EXPORT_SCHEMA = "mindvault.receipt-export/v1";
@@ -49,7 +50,7 @@ export const RECEIPT_CSV_COLUMNS = [
   "explorerUrl",
 ] as const;
 
-export type ReceiptExportFormat = "json" | "csv";
+export type ReceiptExportFormat = "json" | "csv" | "ndjson";
 
 /** One purchase, normalized for export. Absent values are explicit nulls. */
 export interface ExportedReceipt {
@@ -74,6 +75,7 @@ export interface ReceiptExportFilters {
   since: string | null;
   until: string | null;
   limit: number | null;
+  groupBy: ReceiptExportGrouping | null;
 }
 
 export interface ReceiptExport {
@@ -87,8 +89,12 @@ export interface ReceiptExport {
   totalAmount: string;
   currency: typeof RECEIPT_CURRENCY;
   receipts: ExportedReceipt[];
+  /** Per-month totals, newest month first, when groupBy is "month". */
+  monthlySummaries?: MonthlyReceiptSummary[];
   /** RFC 4180 document of the same rows — present only when format is "csv". */
   csv?: string;
+  /** Newline-Delimited JSON document of the same rows — present only when format is "ndjson". */
+  ndjson?: string;
 }
 
 export class ReceiptExportError extends Error {
@@ -109,6 +115,7 @@ export interface ReceiptExportOptions {
   /** Inclusive upper bound on `purchasedAt`. */
   until?: string;
   limit?: number;
+  groupBy?: ReceiptExportGrouping;
 }
 
 function optionalTrimmed(args: Record<string, unknown>, field: string): string | undefined {
@@ -148,8 +155,8 @@ export function normalizeReceiptExportOptions(
 
   let format: ReceiptExportFormat = "json";
   if (raw.format !== undefined && raw.format !== null && raw.format !== "") {
-    if (raw.format !== "json" && raw.format !== "csv") {
-      throw new ReceiptExportError('Invalid format: must be "json" or "csv".');
+    if (raw.format !== "json" && raw.format !== "csv" && raw.format !== "ndjson") {
+      throw new ReceiptExportError('Invalid format: must be "json", "csv", or "ndjson".');
     }
     format = raw.format;
   }
@@ -173,6 +180,13 @@ export function normalizeReceiptExportOptions(
 
   const resourceId = optionalTrimmed(raw, "resourceId");
   const network = optionalTrimmed(raw, "network");
+  let groupBy: ReceiptExportGrouping | undefined;
+  if (raw.groupBy !== undefined && raw.groupBy !== null && raw.groupBy !== "") {
+    if (raw.groupBy !== "month") {
+      throw new ReceiptExportError('Invalid groupBy: must be "month".');
+    }
+    groupBy = raw.groupBy;
+  }
 
   return {
     format,
@@ -181,6 +195,7 @@ export function normalizeReceiptExportOptions(
     ...(since ? { since } : {}),
     ...(until ? { until } : {}),
     ...(limit !== undefined ? { limit } : {}),
+    ...(groupBy ? { groupBy } : {}),
   };
 }
 
@@ -214,33 +229,37 @@ export function toExportedReceipt(
  * recorded before the price was known) contribute nothing.
  */
 export function sumAmounts(receipts: ExportedReceipt[]): string {
-  const SCALE = 10_000_000n; // 7 decimal places, Stellar's stroop precision
-  let total = 0n;
-  for (const r of receipts) {
-    const match = /^(\d+)(?:\.(\d{1,7})\d*)?$/.exec(r.amount.trim());
-    if (!match) continue;
-    const fraction = (match[2] ?? "").padEnd(7, "0");
-    total += BigInt(match[1]) * SCALE + BigInt(fraction);
-  }
-  if (total === 0n) return "0";
-  const whole = total / SCALE;
-  const fraction = (total % SCALE).toString().padStart(7, "0").replace(/0+$/, "");
-  return fraction ? `${whole}.${fraction}` : `${whole}`;
+  const total = sumUsdc(receipts.map((r) => r.amount));
+  return trimUsdc(total) || "0";
 }
 
 /** Quote one CSV field per RFC 4180 (double the quotes, wrap when needed). */
-function csvField(value: string | null): string {
+function csvField(value: string | null, forceQuote = false): string {
   const text = value ?? "";
-  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  return forceQuote || /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
 /** Render export rows as an RFC 4180 CSV document with a header row. */
 export function receiptsToCsv(receipts: ExportedReceipt[]): string {
   const lines = [RECEIPT_CSV_COLUMNS.join(",")];
   for (const receipt of receipts) {
-    lines.push(RECEIPT_CSV_COLUMNS.map((column) => csvField(receipt[column])).join(","));
+    lines.push(
+      RECEIPT_CSV_COLUMNS.map((column) => csvField(receipt[column], column === "currency")).join(","),
+    );
   }
   return lines.join("\r\n");
+}
+
+/**
+ * Render export rows as an NDJSON document (Newline-Delimited JSON).
+ *
+ * Each row is a self-contained JSON object on its own line, making the format
+ * easy to stream, grep, or feed line-by-line into another process. An empty
+ * export produces an empty string (no newline), consistent with how tools like
+ * `jq --raw-input` handle an empty NDJSON file.
+ */
+export function receiptsToNdjson(receipts: ExportedReceipt[]): string {
+  return receipts.map((receipt) => JSON.stringify(receipt)).join("\n");
 }
 
 /** Apply the date range and row cap to receipts already sorted newest-first. */
@@ -281,12 +300,15 @@ export function buildReceiptExport(
       since: options.since ?? null,
       until: options.until ?? null,
       limit: options.limit ?? null,
+      groupBy: options.groupBy ?? null,
     },
     count: rows.length,
     totalAmount: sumAmounts(rows),
     currency: RECEIPT_CURRENCY,
     receipts: rows,
+    ...(options.groupBy === "month" ? { monthlySummaries: groupReceiptsByMonth(rows) } : {}),
     ...(options.format === "csv" ? { csv: receiptsToCsv(rows) } : {}),
+    ...(options.format === "ndjson" ? { ndjson: receiptsToNdjson(rows) } : {}),
   };
 }
 
@@ -307,6 +329,19 @@ export function exportReceiptsTool(args?: Record<string, unknown>): string {
   return JSON.stringify(buildReceiptExport(stored, options), null, 2);
 }
 
+export function exportReceiptsToolWithTimeout(
+  args: Record<string, unknown> | undefined,
+  timeoutMs: number,
+): string {
+  if (timeoutMs <= 0) return exportReceiptsTool(args);
+  const started = Date.now();
+  const result = exportReceiptsTool(args);
+  if (Date.now() - started > timeoutMs) {
+    throw new Error(`Request timed out after ${timeoutMs}ms (http). Configure mindvault_export_receipts in MINDVAULT_TOOL_TIMEOUTS.`);
+  }
+  return result;
+}
+
 /**
  * JSON Schema for the export envelope, advertised as the tool's `outputSchema`.
  *
@@ -319,7 +354,7 @@ export const RECEIPT_EXPORT_OUTPUT_SCHEMA = {
   properties: {
     schema: { type: "string", const: RECEIPT_EXPORT_SCHEMA },
     generatedAt: { type: "string", description: "ISO-8601 instant the export was produced." },
-    format: { type: "string", enum: ["json", "csv"] },
+    format: { type: "string", enum: ["json", "csv", "ndjson"] },
     filters: {
       type: "object",
       description: "The filters this export was produced with; null where unset.",
@@ -329,8 +364,9 @@ export const RECEIPT_EXPORT_OUTPUT_SCHEMA = {
         since: { type: ["string", "null"] },
         until: { type: ["string", "null"] },
         limit: { type: ["integer", "null"] },
+        groupBy: { type: ["string", "null"], enum: ["month", null] },
       },
-      required: ["resourceId", "network", "since", "until", "limit"],
+      required: ["resourceId", "network", "since", "until", "limit", "groupBy"],
     },
     count: { type: "integer", description: "Number of exported receipts." },
     totalAmount: {
@@ -366,9 +402,28 @@ export const RECEIPT_EXPORT_OUTPUT_SCHEMA = {
         ],
       },
     },
+    monthlySummaries: {
+      type: "array",
+      description: 'UTC monthly totals, present only when groupBy is "month".',
+      items: {
+        type: "object",
+        properties: {
+          month: { type: "string", pattern: "^[0-9]{4}-[0-9]{2}$" },
+          count: { type: "integer" },
+          totalAmount: { type: "string" },
+          currency: { type: "string", const: RECEIPT_CURRENCY },
+        },
+        required: ["month", "count", "totalAmount", "currency"],
+      },
+    },
     csv: {
       type: "string",
       description: 'RFC 4180 document of the same rows. Present only when format is "csv".',
+    },
+    ndjson: {
+      type: "string",
+      description:
+        'Newline-Delimited JSON document of the same rows. Present only when format is "ndjson".',
     },
   },
   required: [

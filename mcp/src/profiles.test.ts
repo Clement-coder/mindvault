@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import {
   DEFAULT_PROFILE,
   STATE_VERSION,
+  exportAllProfiles,
+  exportProfile,
   isValidProfileName,
   isValidWallet,
   migrateState,
@@ -38,13 +40,13 @@ describe("isValidProfileName", () => {
 describe("normalizeProfiles", () => {
   it("keeps valid wallet/apiKey fields and drops junk", () => {
     const out = normalizeProfiles({
-      testnet: { wallet, apiKey: "key-1", extra: "ignored" },
+      testnet: { wallet, apiKey: "key-1", network: "testnet", extra: "ignored" },
       empty: {},
       "bad name": { wallet },
       broken: { wallet: { publicKey: "GABC" } },
     });
     expect(out).toEqual({
-      testnet: { wallet, apiKey: "key-1" },
+      testnet: { wallet, apiKey: "key-1", network: "testnet" },
       empty: {},
       broken: {},
     });
@@ -112,5 +114,113 @@ describe("migrateState", () => {
         profiles: {},
       });
     }
+  });
+});
+
+describe("migrateState rollback (#601)", () => {
+  const legacy = {
+    wallet,
+    apiKey: "legacy-key",
+    extraField: "kept-out-of-state-but-preserved",
+  };
+
+  it("returns the raw legacy input as the rollback source when migrated", () => {
+    const { state, migrated, legacy: rollback } = migrateState(legacy);
+    expect(migrated).toBe(true);
+    expect(rollback).toBeDefined();
+    expect(rollback).toEqual(legacy);
+    expect(state.profiles[DEFAULT_PROFILE]).toEqual({ wallet, apiKey: "legacy-key" });
+  });
+
+  it("rolls back by feeding the preserved legacy straight back into the store", () => {
+    const first = migrateState(legacy);
+    // The rollback step: re-persisting `legacy` restores the exact original
+    // object, and migrating it a second time reproduces the identical state.
+    const second = migrateState(first.legacy);
+    expect(second.migrated).toBe(true);
+    expect(second.legacy).toEqual(legacy);
+    expect(second.state).toEqual(first.state);
+  });
+
+  it("does not attach a rollback source when nothing was migrated", () => {
+    const current = {
+      version: STATE_VERSION,
+      activeProfile: "publisher",
+      profiles: { publisher: { wallet, apiKey: "pk" } },
+    };
+    const { migrated, legacy: rollback } = migrateState(current);
+    expect(migrated).toBe(false);
+    expect(rollback).toBeUndefined();
+  });
+
+  it("is re-entrant: migrating the migrated state is a stable no-op", () => {
+    const first = migrateState(legacy);
+    expect(first.migrated).toBe(true);
+    const again = migrateState(first.state);
+    expect(again.migrated).toBe(false);
+    expect(again.state).toEqual(first.state);
+    // The profiles object is not re-folded into a nested default profile.
+    expect(again.state.profiles[DEFAULT_PROFILE]).toEqual(first.state.profiles[DEFAULT_PROFILE]);
+  });
+});
+
+describe("exportProfile", () => {
+  it("exports a profile with secrets redacted", () => {
+    const profile = {
+      wallet: { publicKey: "GABC123", secretKey: "SSECRETKEY123" },
+      apiKey: "sk_live_abc123",
+    };
+    const exported = exportProfile("testnet", profile);
+    expect(exported).toEqual({
+      name: "testnet",
+      address: "GABC123",
+      registered: true,
+    });
+  });
+
+  it("handles a profile with no wallet", () => {
+    const exported = exportProfile("empty", {});
+    expect(exported).toEqual({
+      name: "empty",
+      address: null,
+      registered: false,
+    });
+  });
+
+  it("never exposes secretKey in the exported object", () => {
+    const profile = {
+      wallet: { publicKey: "GABC123", secretKey: "SSECRETKEY123" },
+      apiKey: "sk_live_abc123",
+    };
+    const exported = exportProfile("testnet", profile);
+    const json = JSON.stringify(exported);
+    expect(json).not.toContain("SSECRETKEY123");
+    expect(json).not.toContain("sk_live_abc123");
+  });
+});
+
+describe("exportAllProfiles", () => {
+  it("exports all profiles sorted by name", () => {
+    const state = {
+      version: STATE_VERSION,
+      activeProfile: "beta",
+      profiles: {
+        beta: { wallet: { publicKey: "GBETA", secretKey: "SBETA" }, apiKey: "key-beta" },
+        alpha: { wallet: { publicKey: "GALPHA", secretKey: "SALPHA" } },
+      },
+    };
+    const exported = exportAllProfiles(state);
+    expect(exported.map((p) => p.name)).toEqual(["alpha", "beta"]);
+    expect(exported[0]).toEqual({ name: "alpha", address: "GALPHA", registered: false });
+    expect(exported[1]).toEqual({ name: "beta", address: "GBETA", registered: true });
+  });
+
+  it("returns an empty array for empty profiles", () => {
+    const state = {
+      version: STATE_VERSION,
+      activeProfile: DEFAULT_PROFILE,
+      profiles: {},
+    };
+    expect(exportAllProfiles(state)).toEqual([]);
   });
 });

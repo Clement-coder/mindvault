@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { PROMPT_DEFINITIONS, getPrompt } from "./prompts.js";
+import { validatePromptArgs } from "./prompts.js";
 
 describe("prompts", () => {
   describe("PROMPT_DEFINITIONS", () => {
@@ -21,6 +22,23 @@ describe("prompts", () => {
       const buy = PROMPT_DEFINITIONS.find((p) => p.name === "buy")!;
       const required = buy.arguments.filter((a) => a.required).map((a) => a.name);
       expect(required).toContain("resourceId");
+    });
+  });
+
+  describe("validatePromptArgs", () => {
+    it("accepts valid publish args", () => {
+      const errors = validatePromptArgs("publish", {
+        title: "My Tutorial",
+        price: "5.00",
+        externalUrl: "https://example.com",
+      });
+      expect(errors).toHaveLength(0);
+    });
+
+    it("rejects missing required args", () => {
+      const errors = validatePromptArgs("publish", { title: "T", price: "1" });
+      expect(errors.length).toBeGreaterThan(0);
+      expect(errors[0]).toContain("externalUrl");
     });
   });
 

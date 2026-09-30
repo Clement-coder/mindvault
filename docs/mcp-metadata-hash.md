@@ -78,6 +78,7 @@ chars), optionally prefixed with "sha256:"/"sha512:" (or "-"); case-insensitive.
 | Tool                          | Argument                          | Notes                                                                                            |
 | ----------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------ |
 | `mindvault_check_consistency` | `expectedMetadataHash` (optional) | Compared against the `contentHash` anchored on-chain                                             |
+| `mindvault_preview_metadata_hash` | `resourceId`                  | Reports the anchored digest (or why there is none) without a comparison — see below              |
 | `mindvault_tx_status`         | `txHash`                          | A Stellar transaction hash is a sha256 digest; normalized to bare lowercase hex for the RPC call |
 
 ### Verifying an anchor
@@ -121,6 +122,32 @@ the anchor, without a comparison.
 A malformed `expectedMetadataHash` is rejected before any lookup happens —
 comparing against a digest that is not in the fixed format could only produce a
 misleading "mismatch".
+
+### Previewing an anchor before buying
+
+`mindvault_preview_metadata_hash` reads the same on-chain pointer and reports
+the digest (or the deterministic reason there is none) without comparing it
+against anything:
+
+```json
+{
+  "resourceId": "swcn98besxpp6t1u8e77fqz3",
+  "pointer": { "source": "on-chain", "present": true },
+  "report": {
+    "present": true,
+    "valid": true,
+    "canonical": "sha256:9f86d081…",
+    "algorithm": "sha256",
+    "reason": null
+  }
+}
+```
+
+Use it to fetch the anchor before you have the content, then pass the same
+digest as `expectedMetadataHash` to `mindvault_check_consistency` once you do.
+An unregistered resource id is an error (the resource must exist on-chain for
+there to be a pointer); a registered resource whose pointer is a bare URI or
+malformed JSON is a successful report with `present: false` / `valid: false`.
 
 ---
 

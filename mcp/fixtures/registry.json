@@ -1,0 +1,29 @@
+{
+  "_meta": {
+    "generatedBy": "scripts/generate-fixtures.ts",
+    "description": "Snapshot of MOCK_REGISTRY_RESOURCES — the deterministic on-chain list the in-process mock serves for registry_list tool calls."
+  },
+  "source": "on-chain (mock)",
+  "start": 0,
+  "limit": 2,
+  "count": 2,
+  "resources": [
+    {
+      "id": "mock-1",
+      "creator": "GMOCKCREATOR1",
+      "price": "1.5000000 USDC",
+      "metadata": "Intro to Stellar",
+      "listed": true,
+      "tags": []
+    },
+    {
+      "id": "mock-2",
+      "creator": "GMOCKCREATOR2",
+      "price": "0.5000000 USDC",
+      "metadata": "x402 Cheat Sheet",
+      "listed": true,
+      "tags": []
+    }
+  ],
+  "contract": "MOCK_CONTRACT_ID"
+}

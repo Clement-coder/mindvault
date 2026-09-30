@@ -21,8 +21,15 @@ process.env.USERPROFILE = resetHome;
 
 const STATE_FILE = join(resetHome, ".mindvault", "state.json");
 
-const { resetState, listProfiles, useProfile, _resetProfiles, _setAgentWallet, _setAgentApiKey } =
-  await import("./index.js");
+const {
+  resetState,
+  backupState,
+  listProfiles,
+  useProfile,
+  _resetProfiles,
+  _setAgentWallet,
+  _setAgentApiKey,
+} = await import("./index.js");
 
 const testWallet = {
   publicKey: "GTESTPUBLICKEY000000000000000000000000000000000000000000",
@@ -78,6 +85,19 @@ describe("mindvault_reset — unconfirmed", () => {
   it("never leaks the wallet secret key into the warning", () => {
     expect(resetState(false)).not.toContain(testWallet.secretKey);
     expect(resetState(true)).not.toContain(testWallet.secretKey);
+  });
+});
+
+describe("mindvault_backup_state — confirmation", () => {
+  beforeEach(() => seedPersistedProfile());
+
+  it("previews without exporting and writes an encrypted file only after confirmation", () => {
+    expect(backupState("correct-horse")).toContain("Backup NOT performed");
+    const result = backupState("correct-horse", true);
+    expect(result).toContain("Encrypted state backup written");
+    const path = result.match(/File: (.+)/)?.[1];
+    expect(path).toBeTruthy();
+    expect(existsSync(path!)).toBe(true);
   });
 });
 

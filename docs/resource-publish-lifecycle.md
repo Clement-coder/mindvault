@@ -281,12 +281,14 @@ For MCP contributors:
 
 - `mindvault_publish` is a convenience wrapper around create -> verify -> best-effort register
 - `mindvault_publish_status` polls `verificationStatus` (`pending` | `verified` | `rejected` | `skipped`) and on-chain sync fields (`onchainStatus`, `onchainTxHash`); pass `wait: true` to poll until verification settles
+- a `wait: true` call streams one MCP `notifications/progress` update per poll when the client supplies a progress token — see [mcp-progress-notifications.md](mcp-progress-notifications.md)
 - `mindvault_register_onchain` retries on-chain registration when the publish-time register step fails
 - if registration fails, contributors should expect a resource that may be verified and listed but still blocked at purchase time by the current paywall behavior
 
 Related docs:
 
 - [creator-signed-registration-flow.md](creator-signed-registration-flow.md)
+- [mcp-progress-notifications.md](mcp-progress-notifications.md)
 - [mcp-quickstart.md](mcp-quickstart.md)
 - [x402-payment-troubleshooting.md](x402-payment-troubleshooting.md)
 - [reconciliation.md](reconciliation.md)

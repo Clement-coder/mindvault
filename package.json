@@ -19,8 +19,9 @@
     "contract:test": "cargo test --manifest-path contract/Cargo.toml",
     "contract:bindings": "node scripts/generate-bindings.mjs",
     "docs:links": "node scripts/check-doc-links.mjs",
-    "lint": "pnpm exec eslint \"server/src/**/*.{ts,tsx}\" \"web/src/**/*.{ts,tsx}\" \"packages/**/*.{ts,tsx}\" \"mcp/src/**/*.{ts,tsx}\"",
+    "lint": "pnpm exec eslint \"server/src/**/*.{ts,tsx}\" \"web/src/**/*.{ts,tsx}\" \"packages/**/*.{ts,tsx}\" \"mcp/src/**/*.{ts,tsx}\" \"tests/**/*.{ts,tsx}\"",
     "format:check": "pnpm exec prettier --check \"server/**/*.{ts,tsx,js,json,md}\" \"web/**/*.{ts,tsx,js,json,md}\" \"packages/**/*.{ts,tsx,js,json,md}\" \"mcp/**/*.{ts,tsx,js,json,md}\"",
+    "test:catalog-parity": "mcp/node_modules/.bin/vitest run tests/catalog-filter-parity.test.ts",
     "test": "pnpm run build:registry-client && pnpm --filter @mindvault/registry-client test && pnpm --filter @mindvault/server test && pnpm --filter @mindvault/web test && pnpm --filter @mindvault/mcp test",
     "prepare": "husky"
   },
@@ -84,6 +85,9 @@
       "undici": "^7.29.0",
       "fast-uri": "^3.1.5",
       "ip-address": "^10.3.1"
-    }
+    },
+    "ignoredBuiltDependencies": [
+      "esbuild"
+    ]
   }
 }

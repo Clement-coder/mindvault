@@ -25,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: "20"
           cache: "pnpm"
@@ -41,6 +41,11 @@ jobs:
       # Catches an install that compiles and packs but cannot boot or serve —
       # the unit suites never start the process, so nothing else would.
       - run: pnpm --filter @mindvault/mcp build
+      # The tool reference and summary are generated from mcp/src/tools.ts; a
+      # tool change without a regenerate leaves docs that describe the wrong
+      # surface. Fails when either committed file differs from what the
+      # generator writes (after the same prettier pass the commit hook runs).
+      - run: pnpm --filter @mindvault/mcp check-tool-docs
       - run: pnpm --filter @mindvault/mcp smoke:install
       - run: pnpm test
 
@@ -50,10 +55,10 @@ jobs:
     needs: node-ci
     steps:
       - uses: actions/checkout@v7
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
-          profile: minimal
+          components: rustfmt, clippy
       - uses: actions/cache@v6
         with:
           path: |

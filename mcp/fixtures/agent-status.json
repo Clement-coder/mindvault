@@ -1,0 +1,11 @@
+{
+  "_meta": {
+    "generatedBy": "scripts/generate-fixtures.ts",
+    "description": "Snapshot of the mock GET /agent/status response."
+  },
+  "agent": {
+    "pricePerVerification": "0.01",
+    "totalEarnings": "0",
+    "verifications": 0
+  }
+}

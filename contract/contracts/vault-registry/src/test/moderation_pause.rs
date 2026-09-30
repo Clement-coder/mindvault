@@ -247,7 +247,7 @@ fn pause_blocks_set_verification_status() {
     client.add_verifier(&verifier);
     client.set_paused(&admin, &true);
     let res =
-        client.try_set_verification_status(&id, &verifier, &VerificationStatus::Verified);
+        client.try_set_verification_status(&id, &verifier, &VerificationStatus::Verified, &None::<String>);
     assert_eq!(res, Err(Ok(Error::ContractPaused)));
     assert_eq!(client.get(&id).verified, VerificationStatus::Pending);
 }

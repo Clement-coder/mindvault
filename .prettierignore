@@ -17,3 +17,7 @@ packages/registry-client/src/generated/**
 # Generated Soroban bindings — do not hand-format
  main
 packages/registry-client/src/generated/
+
+# Hand-aligned method/event tables that contract tests parse; not prettier-formatted on
+# main and outside the CI prettier globs, so the commit hook must not reflow them.
+contract/README.md
