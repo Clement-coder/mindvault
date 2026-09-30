@@ -1042,6 +1042,11 @@ impl VaultRegistry {
         Self::ensure_mutable(&resource)?;
         let previous_owner = resource.creator.clone();
         resource.creator = pending_owner.clone();
+        
+        // Clear dispute flag on ownership transfer - disputes are tied to the
+        // previous owner's actions and should not transfer to the new owner
+        resource.dispute_flag = DisputeFlag::NoFlag;
+        
         Self::save(&env, &mut resource);
         Self::move_creator_index(&env, &previous_owner, &pending_owner, &id);
 
