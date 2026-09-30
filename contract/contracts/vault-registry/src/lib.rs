@@ -1,11 +1,11 @@
 #![no_std]
 //! MindVault on-chain vault registry.
 //!
-//! Records each vault resource on Stellar: its creator, price (in USDC
-//! stroops, 7 decimals), and a metadata pointer (e.g. an IPFS URI or content
-//! hash). Payment itself still flows through x402 + the USDC SAC off this
-//! contract — this registry is the transparent, on-chain source of truth for
-//! *what* exists, *who* owns it, and *what it costs*.
+//! Records each vault resource on Stellar: its creator, price (in USDC base
+//! units, 7 decimals — see [`USDC_DECIMALS`]), and a metadata pointer. Payment
+//! itself still flows through x402 + the USDC SAC off this contract — this
+//! registry is the transparent, on-chain source of truth for *what* exists,
+//! *who* owns it, and *what it costs*.
 //!
 //! Only the recorded creator can mutate a resource (enforced via
 //! `require_auth`). Ownership can be transferred.
@@ -35,7 +35,13 @@ pub const MAX_ATTESTATION_HASH_LEN: u32 = 64;
 /// fixed-size digest of arbitrary off-chain content.
 pub const MAX_FLAG_REASON_HASH_LEN: u32 = 64;
 const MAX_TAGS: u32 = 8;
-/// Maximum price in USDC stroops (6 decimals). Represents 1 trillion USDC.
+/// Decimal places in Stellar USDC, so 1 USDC is `10^7` base units. A USDC base
+/// unit is *not* a "stroop" (a stroop is `10^-5` XLM — a 100x difference).
+pub const USDC_DECIMALS: u32 = 7;
+/// Base units in 1 USDC, i.e. `10^USDC_DECIMALS`.
+pub const USDC_BASE_UNITS_PER_USDC: i128 = 10_000_000;
+/// Maximum price in USDC base units (`USDC_DECIMALS` = 7), i.e. `10^18` units
+/// = **100 billion USDC**, not 1 trillion (which would need 6 decimals).
 pub const MAX_PRICE: i128 = 1_000_000_000_000_000_000;
 const MAX_TAG_LEN: u32 = 32;
 /// Maximum byte length of a resource id (1–`MAX_RESOURCE_ID_LEN` ASCII
@@ -198,6 +204,9 @@ pub const METHOD_SCHEMA: &[(&str, &str)] = &[
     ("attempt_anchor_purchase_receipt", "verifier"),
     ("override_purchase_receipt_anchor", "verifier"),
     ("get_purchase_receipt", "—"),
+    ("record_anchor_failure", "settler"),
+    ("get_anchor_failure", "—"),
+    ("retry_anchor_purchase_receipt", "settler"),
     // ── TTL ───────────────────────────────────────────────────────────────
     ("extend_resource_ttl", "creator"),
 ];
@@ -471,6 +480,7 @@ pub struct VerifierRotation {
 pub struct Resource {
     pub id: String,
     pub creator: Address,
+    /// Listed price in USDC base units ([`USDC_DECIMALS`] = 7).
     pub price: i128,
     pub metadata: String,
     /// Backwards-compatible projection of `state == ResourceState::Listed`.
@@ -614,6 +624,9 @@ pub enum DataKey {
     Settler(Address),
     /// Immutable purchase receipt anchor for `(resource_id, buyer)`.
     PurchaseReceipt(String, Address),
+    /// Durable anchor-failure record, readable by the buyer. Cleared by any
+    /// successful anchor.
+    AnchorFailure(String, Address),
     /// Secondary index mapping a normalized tag to ordered resource ids.
     TagIndex(String),
     /// Registry-level fee and royalty configuration.
@@ -761,8 +774,8 @@ pub struct PaymentReceipt {
     pub resource_id: String,
     /// Stellar address of the party that made the payment.
     pub payer: Address,
-    /// Payment amount in USDC stroops (must be `> 0`, matches the resource's
-    /// on-chain price at settlement time).
+    /// Payment amount in USDC base units, the same unit as
+    /// [`Resource::price`]; `record_payment` requires exact equality. `> 0`.
     pub amount: i128,
     /// Current lifecycle state of this receipt.
     pub state: PaymentState,
@@ -784,11 +797,11 @@ pub struct PurchaseReceiptAnchor {
     pub ledger: u32,
 }
 
-/// Why an `attempt_anchor_purchase_receipt` call could not write an anchor.
+/// Why an anchor attempt could not write an anchor.
 ///
-/// The discriminants are stable — do not renumber existing variants. Each
-/// maps 1:1 to the `Error` that `anchor_purchase_receipt` would have returned
-/// for the same input, so a consumer can treat the two paths interchangeably.
+/// Discriminants are stable — do not renumber existing variants. The first
+/// three map 1:1 to the `Error` `anchor_purchase_receipt` returns; the last
+/// three are reachable only via the settler entry points.
 #[contracttype]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum AnchorFailureReason {
@@ -800,23 +813,37 @@ pub enum AnchorFailureReason {
     /// An anchor already exists for `(resource_id, buyer)`
     /// (`Error::DuplicateReceipt`).
     DuplicateReceipt = 2,
+    /// The verifier role needed to anchor was revoked or never held
+    /// (`Error::NotVerifier`). Settler-only.
+    VerifierUnavailable = 3,
+    /// No payment receipt exists for the pair (`Error::NotFound`), so there is
+    /// no `tx_hash` to anchor against. `retry_anchor_purchase_receipt` only.
+    NoPaymentRecorded = 4,
+    /// `receipt_hash` is not the recorded receipt's `tx_hash`
+    /// (`Error::InvalidTxHash`). `retry_anchor_purchase_receipt` only.
+    ReceiptHashMismatch = 5,
 }
 
 impl AnchorFailureReason {
-    /// The error `anchor_purchase_receipt` returns for this reason.
+    /// The error `anchor_purchase_receipt` returns for this reason. The three
+    /// settler-only reasons are not producible through that path; the mapping
+    /// exists so a caller can still turn a recorded reason back into a
+    /// `Result`-shaped outcome when it replays the attempt as a verifier.
     pub fn as_error(self) -> Error {
         match self {
             AnchorFailureReason::ResourceNotFound => Error::NotFound,
             AnchorFailureReason::InvalidReceiptHash => Error::InvalidTxHash,
             AnchorFailureReason::DuplicateReceipt => Error::DuplicateReceipt,
+            AnchorFailureReason::VerifierUnavailable => Error::NotVerifier,
+            AnchorFailureReason::NoPaymentRecorded => Error::NotFound,
+            AnchorFailureReason::ReceiptHashMismatch => Error::InvalidTxHash,
         }
     }
 }
 
-/// Structured payload emitted by `attempt_anchor_purchase_receipt` when an
-/// anchor is rejected. Carries everything the caller supplied plus the reason
-/// and the ledger it was rejected at, so a monitor can reconstruct the failed
-/// attempt without the caller's own logs.
+/// Payload of the `anchrfail` event, also stored durably by
+/// [`record_anchor_failure`]. Carries the caller's inputs plus the reason and
+/// ledger, so a buyer can reconstruct the attempt from [`get_anchor_failure`].
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct AnchorFailure {
@@ -911,7 +938,7 @@ pub struct VaultRegistry;
 
 #[contractimpl]
 impl VaultRegistry {
-    /// Register a new resource. Price is in USDC stroops (6 decimals).
+    /// Register a new resource. Price is in USDC base units (7 decimals).
     /// Rejects `price <= 0` (`InvalidPrice`) or `price > MAX_PRICE` (`PriceExceedsMax`).
     /// Requires the creator's authorization.
     ///
@@ -2850,16 +2877,7 @@ impl VaultRegistry {
         Self::validate_resource_id(&resource_id)?;
 
         if let Some(reason) = Self::anchor_blocker(&env, &resource_id, &buyer, &receipt_hash) {
-            let failure = AnchorFailure {
-                resource_id: resource_id.clone(),
-                buyer,
-                receipt_hash,
-                reason,
-                ledger: env.ledger().sequence(),
-            };
-            env.events()
-                .publish((symbol_short!("anchrfail"), resource_id), failure);
-            return Ok(false);
+            return Self::report_anchor_failure(&env, resource_id, buyer, receipt_hash, reason);
         }
 
         Self::write_anchor(&env, resource_id, buyer, receipt_hash);
@@ -2909,6 +2927,193 @@ impl VaultRegistry {
             .ok_or(Error::NotFound)?;
         Self::bump_persistent(&env, &key);
         Ok(anchor)
+    }
+
+    /// Durably record that `(resource_id, buyer)` could not be anchored, so the
+    /// buyer can query it with [`get_anchor_failure`}. Only a settler may call
+    /// this; see `contract/README.md` for why the settler, and not the revoked
+    /// verifier, is the only actor that can report this (#781). Widening
+    /// *reporting* to a trusted role does not weaken the invariant that a
+    /// roleless address cannot write to the log.
+    ///
+    /// Last-write-wins. If an anchor already exists the record is cleared and
+    /// `Ok(())` returned, so `get_anchor_failure` can never disagree with
+    /// `get_purchase_receipt`. Emits `anchrfail` with `reason`
+    /// [`AnchorFailureReason::VerifierUnavailable`].
+    /// Errors `NotSettler`, `ContractPaused`, `InvalidResourceId`, `NotFound`
+    /// (no such resource), or `InvalidTxHash` (empty or over-long hash).
+    pub fn record_anchor_failure(
+        env: Env,
+        settler: Address,
+        resource_id: String,
+        buyer: Address,
+        receipt_hash: String,
+    ) -> Result<(), Error> {
+        settler.require_auth();
+        if !Self::is_settler(env.clone(), settler) {
+            return Err(Error::NotSettler);
+        }
+        Self::require_not_paused(&env)?;
+        Self::validate_resource_id(&resource_id)?;
+
+        let failure_key = DataKey::AnchorFailure(resource_id.clone(), buyer.clone());
+        let anchor_key = DataKey::PurchaseReceipt(resource_id.clone(), buyer.clone());
+
+        // Already anchored: the failure this record would describe has been
+        // resolved, so retire the record instead of writing a stale one.
+        if env.storage().persistent().has(&anchor_key) {
+            if env.storage().persistent().has(&failure_key) {
+                env.storage().persistent().remove(&failure_key);
+            }
+            return Ok(());
+        }
+
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Resource(resource_id.clone()))
+        {
+            return Err(Error::NotFound);
+        }
+        if receipt_hash.is_empty() || receipt_hash.len() > MAX_TX_HASH_LEN {
+            return Err(Error::InvalidTxHash);
+        }
+
+        let failure = AnchorFailure {
+            resource_id: resource_id.clone(),
+            buyer,
+            receipt_hash,
+            reason: AnchorFailureReason::VerifierUnavailable,
+            ledger: env.ledger().sequence(),
+        };
+        env.storage().persistent().set(&failure_key, &failure);
+        Self::bump_persistent(&env, &failure_key);
+        env.events()
+            .publish((symbol_short!("anchrfail"), resource_id), failure);
+        Ok(())
+    }
+
+    /// Read the anchor-failure record for `(resource_id, buyer)`. Open to
+    /// anyone, since a buyer must be able to find their own failure without a
+    /// role. Errors `NotFound` when there is no outstanding failure.
+    pub fn get_anchor_failure(
+        env: Env,
+        resource_id: String,
+        buyer: Address,
+    ) -> Result<AnchorFailure, Error> {
+        Self::validate_resource_id(&resource_id)?;
+        let key = DataKey::AnchorFailure(resource_id, buyer);
+        let failure = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(Error::NotFound)?;
+        Self::bump_persistent(&env, &key);
+        Ok(failure)
+    }
+
+    /// Settle-time retry hook: write the anchor for `(resource_id, buyer)` as
+    /// the settler, with no verifier involved. Returns `true` on success.
+    ///
+    /// The authority granted is strictly *narrower* than the verifier path:
+    /// `receipt_hash` must equal the `tx_hash` of the payment already recorded
+    /// for the pair, so this can neither anchor a hash no payment backs nor
+    /// invent a payment (#781).
+    ///
+    /// Data problems are reported as in
+    /// [`attempt_anchor_purchase_receipt`]: `Ok(false)` plus an `anchrfail`
+    /// event and a record, so a settlement loop can call this on every payment
+    /// without reverting. The same hash is an idempotent `Ok(true)`; a different
+    /// hash reports [`AnchorFailureReason::DuplicateReceipt`].
+    ///
+    /// Errors `NotSettler`, `ContractPaused`, or `InvalidResourceId`; every
+    /// other problem is reported as `Ok(false)`.
+    pub fn retry_anchor_purchase_receipt(
+        env: Env,
+        settler: Address,
+        resource_id: String,
+        buyer: Address,
+        receipt_hash: String,
+    ) -> Result<bool, Error> {
+        settler.require_auth();
+        if !Self::is_settler(env.clone(), settler) {
+            return Err(Error::NotSettler);
+        }
+        Self::require_not_paused(&env)?;
+        Self::validate_resource_id(&resource_id)?;
+
+        // Resolve the payment this anchor must correspond to.
+        let receipt_id: String = match env
+            .storage()
+            .persistent()
+            .get(&DataKey::PaymentIndex(resource_id.clone(), buyer.clone()))
+        {
+            Some(id) => id,
+            None => {
+                return Self::report_anchor_failure(
+                    &env,
+                    resource_id,
+                    buyer,
+                    receipt_hash,
+                    AnchorFailureReason::NoPaymentRecorded,
+                );
+            }
+        };
+        let receipt: PaymentReceipt = match env
+            .storage()
+            .persistent()
+            .get(&DataKey::PaymentReceipt(receipt_id))
+        {
+            Some(receipt) => receipt,
+            None => {
+                return Self::report_anchor_failure(
+                    &env,
+                    resource_id,
+                    buyer,
+                    receipt_hash,
+                    AnchorFailureReason::NoPaymentRecorded,
+                );
+            }
+        };
+
+        if receipt_hash.is_empty() || receipt_hash.len() > MAX_TX_HASH_LEN {
+            return Self::report_anchor_failure(
+                &env,
+                resource_id,
+                buyer,
+                receipt_hash,
+                AnchorFailureReason::InvalidReceiptHash,
+            );
+        }
+        if receipt_hash != receipt.tx_hash {
+            return Self::report_anchor_failure(
+                &env,
+                resource_id,
+                buyer,
+                receipt_hash,
+                AnchorFailureReason::ReceiptHashMismatch,
+            );
+        }
+
+        let anchor_key = DataKey::PurchaseReceipt(resource_id.clone(), buyer.clone());
+        let existing: Option<PurchaseReceiptAnchor> = env.storage().persistent().get(&anchor_key);
+        if let Some(existing) = existing {
+            // Already anchored. Same hash is the desired end state, so a blind
+            // retry loop converges; a different hash is a real conflict.
+            if existing.receipt_hash == receipt_hash {
+                return Ok(true);
+            }
+            return Self::report_anchor_failure(
+                &env,
+                resource_id,
+                buyer,
+                receipt_hash,
+                AnchorFailureReason::DuplicateReceipt,
+            );
+        }
+
+        Self::write_anchor(&env, resource_id, buyer, receipt_hash);
+        Ok(true)
     }
 
     /// Fetch a creator's marketplace terms hash. Errors with `NotFound` if it does not exist.
@@ -3149,11 +3354,12 @@ impl VaultRegistry {
         }
         // Per-field bounds on `royalty_bps` say nothing about the split a given
         // price actually produces, so a price that is individually legal can
-        // still mint a royalty of zero stroops (price below the basis-point
+        // still mint a royalty of zero base units (price below the basis-point
         // quantum) or one that consumes the entire sale amount. Requiring the
-        // active `royalty_bps` to be strictly below the price in stroops keeps
-        // both degenerate cases out of the ledger. No fee config set means no
-        // royalty is owed, so the check is a no-op until one is configured.
+        // active `royalty_bps` to be strictly below the price in USDC base
+        // units keeps both degenerate cases out of the ledger. No fee config
+        // set means no royalty is owed, so the check is a no-op until one is
+        // configured.
         let royalty_bps: i128 = env
             .storage()
             .instance()
@@ -3754,18 +3960,52 @@ impl VaultRegistry {
         None
     }
 
+    /// Persist an [`AnchorFailure`] for `(resource_id, buyer)` and emit
+    /// `anchrfail`, returning `Ok(false)` so callers can `return` it directly.
+    /// Overwrites any earlier record: the newest reason describes the current
+    /// attempt, and a pair cannot be both anchored and failing. The record is
+    /// the durable half — the event alone is lost if the caller batches.
+    fn report_anchor_failure(
+        env: &Env,
+        resource_id: String,
+        buyer: Address,
+        receipt_hash: String,
+        reason: AnchorFailureReason,
+    ) -> Result<bool, Error> {
+        let key = DataKey::AnchorFailure(resource_id.clone(), buyer.clone());
+        let failure = AnchorFailure {
+            resource_id: resource_id.clone(),
+            buyer,
+            receipt_hash,
+            reason,
+            ledger: env.ledger().sequence(),
+        };
+        env.storage().persistent().set(&key, &failure);
+        Self::bump_persistent(env, &key);
+        env.events()
+            .publish((symbol_short!("anchrfail"), resource_id), failure);
+        Ok(false)
+    }
+
     /// Persist an anchor that `anchor_blocker` has already cleared and emit
     /// the `anchor` event.
     fn write_anchor(env: &Env, resource_id: String, buyer: Address, receipt_hash: String) {
         let key = DataKey::PurchaseReceipt(resource_id.clone(), buyer.clone());
         let anchor = PurchaseReceiptAnchor {
             resource_id: resource_id.clone(),
-            buyer,
+            buyer: buyer.clone(),
             receipt_hash,
             ledger: env.ledger().sequence(),
         };
         env.storage().persistent().set(&key, &anchor);
         Self::bump_persistent(env, &key);
+        // An anchor existing means the pair is no longer failing. Clearing here
+        // keeps `get_anchor_failure` and `get_purchase_receipt` from ever
+        // disagreeing, whichever of the three write paths produced the anchor.
+        let failure_key = DataKey::AnchorFailure(resource_id.clone(), buyer);
+        if env.storage().persistent().has(&failure_key) {
+            env.storage().persistent().remove(&failure_key);
+        }
         env.events()
             .publish((symbol_short!("anchor"), resource_id), anchor);
     }

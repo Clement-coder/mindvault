@@ -9119,7 +9119,7 @@ fn storage_key_variant(env: &Env, key: &DataKey) -> Symbol {
 /// Every `DataKey` variant, with the name and arity it must keep across
 /// upgrades. Adding a variant means adding a row here — the exhaustive match in
 /// `storage_key_migration_covers_every_variant` will not compile until you do.
-fn storage_key_wire_contract(env: &Env) -> [(DataKey, &'static str, u32); 31] {
+fn storage_key_wire_contract(env: &Env) -> [(DataKey, &'static str, u32); 32] {
     let id = String::from_str(env, "migkey");
     let who = Address::generate(env);
     [
@@ -9147,6 +9147,11 @@ fn storage_key_wire_contract(env: &Env) -> [(DataKey, &'static str, u32); 31] {
         (
             DataKey::PurchaseReceipt(id.clone(), who.clone()),
             "PurchaseReceipt",
+            3,
+        ),
+        (
+            DataKey::AnchorFailure(id.clone(), who.clone()),
+            "AnchorFailure",
             3,
         ),
         (DataKey::TagIndex(id.clone()), "TagIndex", 2),
@@ -9211,7 +9216,7 @@ fn storage_key_migration_covers_every_variant() {
     let contract = storage_key_wire_contract(&env);
     assert_eq!(
         contract.len(),
-        31,
+        32,
         "storage_key_wire_contract must list every DataKey variant"
     );
 
@@ -9231,6 +9236,7 @@ fn storage_key_migration_covers_every_variant() {
             DataKey::PaymentReceipt(_) => "PaymentReceipt",
             DataKey::PaymentIndex(_, _) => "PaymentIndex",
             DataKey::PurchaseReceipt(_, _) => "PurchaseReceipt",
+            DataKey::AnchorFailure(_, _) => "AnchorFailure",
             DataKey::TagIndex(_) => "TagIndex",
             DataKey::FeeConfig => "FeeConfig",
             DataKey::Moderator(_) => "Moderator",
@@ -10724,6 +10730,388 @@ fn tag_popularity_counter_saturates_at_u32_max() {
     let top = client.top_tags(&1u32);
     assert_eq!(top.get(0).unwrap().tag, String::from_str(&env, "maxed"));
     assert_eq!(top.get(0).unwrap().count, u32::MAX);
+}
+
+// ── #780: the USDC unit is base units, 7 decimals ───────────────────────────
+//
+// #780: the docs called the unit "stroops" in some places and "6 decimals" in
+// others while every converter in the repo used 1e7. A stroop is 1e-5 XLM, so
+// the name invited a 100x error, and the "(6 decimals)" claim invited a 10x
+// one. These tests pin the scheme in code so the prose cannot drift from it.
+
+#[test]
+fn usdc_base_units_are_consistent_with_max_price() {
+    // The two constants must agree, or the documented divisor is a lie.
+    assert_eq!(
+        USDC_BASE_UNITS_PER_USDC,
+        10i128.pow(USDC_DECIMALS),
+        "USDC_BASE_UNITS_PER_USDC must be 10^USDC_DECIMALS"
+    );
+    assert_eq!(USDC_DECIMALS, 7, "Stellar USDC has 7 decimal places");
+
+    // MAX_PRICE is 10^18 base units. At 7 decimals that is 100 billion USDC.
+    // The old docs claimed "1 trillion", which is only true at 6 decimals --
+    // a 10x overstatement of the ceiling.
+    assert_eq!(MAX_PRICE, 1_000_000_000_000_000_000i128);
+    assert_eq!(
+        MAX_PRICE / USDC_BASE_UNITS_PER_USDC,
+        100_000_000_000i128,
+        "MAX_PRICE must be 100 billion USDC at 7 decimals, not 1 trillion"
+    );
+    assert_eq!(
+        MAX_PRICE % USDC_BASE_UNITS_PER_USDC,
+        0,
+        "MAX_PRICE must be a whole number of USDC"
+    );
+}
+
+#[test]
+fn record_payment_compares_amount_and_price_in_base_units() {
+    let (env, creator, _admin, settler, client) = setup_with_settler();
+    let id = String::from_str(&env, "usdcunits");
+    // Exactly 1 USDC, in base units.
+    let one_usdc = USDC_BASE_UNITS_PER_USDC;
+    client.register(
+        &creator,
+        &id,
+        &one_usdc,
+        &String::from_str(&env, "ipfs://u"),
+        &empty_tags(&env),
+    );
+
+    // The matching base-unit amount is accepted...
+    client.record_payment(
+        &settler,
+        &String::from_str(&env, "u-ok"),
+        &id,
+        &creator,
+        &one_usdc,
+        &String::from_str(&env, "0xtxbase"),
+    );
+    let receipt = client.get_payment(&String::from_str(&env, "u-ok"));
+    assert_eq!(receipt.amount, one_usdc);
+    // `amount` and `price` are the same unit, so the receipt matches the
+    // resource's listed price exactly.
+    let resource: Resource = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Resource(id.clone()))
+            .unwrap()
+    });
+    assert_eq!(receipt.amount, resource.price);
+
+    // ...and a 6-decimal reading of the same 1 USDC price is rejected rather
+    // than silently recorded as a tenth of the price. This is the conversion
+    // the old docs invited.
+    assert_eq!(
+        client.try_record_payment(
+            &settler,
+            &String::from_str(&env, "u-6dp"),
+            &id,
+            &creator,
+            &1_000_000i128,
+            &String::from_str(&env, "0xtxsix")
+        ),
+        Err(Ok(Error::PaymentAmountMismatch)),
+        "a 6-decimal amount must not satisfy a 7-decimal price"
+    );
+}
+
+#[test]
+fn readme_does_not_reintroduce_a_stroop_or_six_decimal_usdc() {
+    // The prose is where #780 actually lived, so guard it. `1 trillion USDC`
+    // for MAX_PRICE is only true at 6 decimals; at the real 7 it is 100
+    // billion. "stroops" invites scaling by 10^5 (XLM), a 100x error.
+    for (name, body) in [
+        (
+            "contracts/vault-registry/README.md",
+            vault_registry_readme(),
+        ),
+        (
+            "contract/README.md",
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md"))
+                .expect("contract/README.md must be readable from the vault-registry crate"),
+        ),
+    ] {
+        assert!(
+            !body.contains("1 trillion USDC"),
+            "{name} must not claim MAX_PRICE is 1 trillion USDC; at 7 decimals it is 100 billion"
+        );
+        assert!(
+            !body.contains("(6 decimals)"),
+            "{name} must not describe USDC as 6 decimals"
+        );
+        assert!(
+            body.contains("100 billion USDC") || !body.contains("MAX_PRICE"),
+            "{name} documents MAX_PRICE and must state its 7-decimal value"
+        );
+    }
+}
+
+// ── #781: surface and recover from a failed anchor ───────────────────────────
+//
+// The anchor step is verifier-gated, so the moment a buyer most needs to know
+// about it -- the verifier's role being revoked mid-transaction -- is the one
+// moment the verifier cannot report: `anchor_purchase_receipt` reverts, and
+// `attempt_anchor_purchase_receipt` reverts with it because it checks
+// authorization before converting anything into an event. `record_anchor_failure`
+// (queryable) and `retry_anchor_purchase_receipt` (settle-time) close that gap.
+
+/// Helper: admin + settler + verifier, a resource, and a recorded payment whose
+/// `tx_hash` is `tx`. This is the state a purchase is in when anchoring fails.
+/// Returns `(env, buyer, settler, verifier, id, tx, client)`, where `buyer` is
+/// also the resource creator.
+fn setup_anchor_retry<'a>(
+    id: &str,
+    tx: &str,
+) -> (
+    Env,
+    Address,
+    Address,
+    Address,
+    String,
+    String,
+    VaultRegistryClient<'a>,
+) {
+    let (env, creator, _admin, settler, client) = setup_with_settler();
+    let verifier = Address::generate(&env);
+    client.add_verifier(&verifier);
+    let id = register_default(&env, &creator, &client, id);
+    let tx = String::from_str(&env, tx);
+    client.record_payment(
+        &settler,
+        &String::from_str(&env, "arcpt1"),
+        &id,
+        &creator,
+        &100i128,
+        &tx,
+    );
+    (env, creator, settler, verifier, id, tx, client)
+}
+
+#[test]
+fn revoked_verifier_failure_becomes_a_record_the_buyer_can_query() {
+    let (env, creator, _admin, settler, client) = setup_with_settler();
+    let id = register_default(&env, &creator, &client, "ancrev1");
+    let buyer = Address::generate(&env);
+    let tx = String::from_str(&env, "0xtxrevoked");
+    client.record_payment(
+        &settler,
+        &String::from_str(&env, "rcptrev"),
+        &id,
+        &buyer,
+        &100i128,
+        &tx,
+    );
+
+    // The verifier was revoked before it could anchor. Both verifier entry
+    // points revert, so the buyer has no anchor and no trace.
+    let gone = Address::generate(&env);
+    client.add_verifier(&gone);
+    client.remove_verifier(&gone);
+    assert_eq!(
+        client.try_anchor_purchase_receipt(&gone, &id, &buyer, &tx),
+        Err(Ok(Error::NotVerifier))
+    );
+    assert!(client.try_get_purchase_receipt(&id, &buyer).is_err());
+
+    // The settler records the failure on the buyer's behalf.
+    client.record_anchor_failure(&settler, &id, &buyer, &tx);
+    let failure = client.get_anchor_failure(&id, &buyer);
+    assert_eq!(failure.reason, AnchorFailureReason::VerifierUnavailable);
+    assert_eq!(failure.resource_id, id);
+    assert_eq!(failure.buyer, buyer);
+    assert_eq!(failure.receipt_hash, tx);
+    assert_eq!(failure.ledger, env.ledger().sequence());
+}
+
+#[test]
+fn record_anchor_failure_is_cleared_by_a_later_successful_anchor() {
+    let (_env, buyer, settler, verifier, id, tx, client) = setup_anchor_retry("anclr01", "0xtxclr");
+    client.record_anchor_failure(&settler, &id, &buyer, &tx);
+    assert!(client.try_get_anchor_failure(&id, &buyer).is_ok());
+
+    // A verifier anchors afterwards; the record must not outlive the problem.
+    client.anchor_purchase_receipt(&verifier, &id, &buyer, &tx);
+    assert!(client.try_get_anchor_failure(&id, &buyer).is_err());
+    assert!(client.try_get_purchase_receipt(&id, &buyer).is_ok());
+}
+
+#[test]
+fn record_anchor_failure_is_last_write_wins() {
+    let (env, buyer, settler, _verifier, id, _tx, client) =
+        setup_anchor_retry("anlww01", "0xtxlww");
+    let first = String::from_str(&env, "first-hash");
+    let second = String::from_str(&env, "second-hash");
+
+    client.record_anchor_failure(&settler, &id, &buyer, &first);
+    assert_eq!(client.get_anchor_failure(&id, &buyer).receipt_hash, first);
+    client.record_anchor_failure(&settler, &id, &buyer, &second);
+    assert_eq!(client.get_anchor_failure(&id, &buyer).receipt_hash, second);
+}
+
+#[test]
+fn record_anchor_failure_is_a_noop_when_the_pair_is_already_anchored() {
+    let (_env, buyer, settler, verifier, id, tx, client) = setup_anchor_retry("ananc01", "0xtxanc");
+    client.anchor_purchase_receipt(&verifier, &id, &buyer, &tx);
+    // Anchor already exists, so recording a failure would contradict
+    // `get_purchase_receipt`. It must clear instead.
+    client.record_anchor_failure(&settler, &id, &buyer, &tx);
+    assert!(client.try_get_anchor_failure(&id, &buyer).is_err());
+    assert_eq!(client.get_purchase_receipt(&id, &buyer).receipt_hash, tx);
+}
+
+#[test]
+fn record_anchor_failure_validates_resource_and_hash() {
+    let (env, creator, _admin, settler, client) = setup_with_settler();
+    let id = register_default(&env, &creator, &client, "anval01");
+    let buyer = Address::generate(&env);
+
+    assert_eq!(
+        client.try_record_anchor_failure(
+            &settler,
+            &String::from_str(&env, "anvalmissing"),
+            &buyer,
+            &String::from_str(&env, "h")
+        ),
+        Err(Ok(Error::NotFound))
+    );
+    assert_eq!(
+        client.try_record_anchor_failure(&settler, &id, &buyer, &String::from_str(&env, "")),
+        Err(Ok(Error::InvalidTxHash))
+    );
+    assert_eq!(
+        client.try_record_anchor_failure(
+            &settler,
+            &id,
+            &buyer,
+            &String::from_str(&env, &"x".repeat(129))
+        ),
+        Err(Ok(Error::InvalidTxHash))
+    );
+}
+
+#[test]
+fn record_anchor_failure_requires_the_settler_role() {
+    let (env, creator, _admin, settler, client) = setup_with_settler();
+    let id = register_default(&env, &creator, &client, "anrol01");
+    let buyer = Address::generate(&env);
+    let stranger = Address::generate(&env);
+
+    assert_eq!(
+        client.try_record_anchor_failure(&stranger, &id, &buyer, &String::from_str(&env, "h")),
+        Err(Ok(Error::NotSettler))
+    );
+    // A revoked settler loses the ability too.
+    client.remove_settler(&settler);
+    assert_eq!(
+        client.try_record_anchor_failure(&settler, &id, &buyer, &String::from_str(&env, "h")),
+        Err(Ok(Error::NotSettler))
+    );
+}
+
+#[test]
+fn retry_anchor_purchase_receipt_writes_the_anchor_without_a_verifier() {
+    let (_env, buyer, settler, _verifier, id, tx, client) =
+        setup_anchor_retry("antry01", "0xtxtry1");
+
+    // No verifier holds the role, and the failure was recorded.
+    client.record_anchor_failure(&settler, &id, &buyer, &tx);
+    assert!(client.try_get_anchor_failure(&id, &buyer).is_ok());
+
+    // The settler finishes the job.
+    assert!(client.retry_anchor_purchase_receipt(&settler, &id, &buyer, &tx));
+    let anchor = client.get_purchase_receipt(&id, &buyer);
+    assert_eq!(anchor.receipt_hash, tx);
+    assert_eq!(anchor.resource_id, id);
+    assert_eq!(anchor.buyer, buyer);
+    // Success clears the failure record.
+    assert!(client.try_get_anchor_failure(&id, &buyer).is_err());
+}
+
+#[test]
+fn retry_anchor_requires_the_hash_of_the_recorded_payment() {
+    let (env, buyer, settler, _verifier, id, _tx, client) =
+        setup_anchor_retry("anmism1", "0xtxmism");
+    let wrong = String::from_str(&env, "some-other-hash");
+
+    // The authority the retry grants is bounded: it can only anchor the hash
+    // of a payment already on the ledger.
+    assert!(!client.retry_anchor_purchase_receipt(&settler, &id, &buyer, &wrong));
+    let failure = client.get_anchor_failure(&id, &buyer);
+    assert_eq!(failure.reason, AnchorFailureReason::ReceiptHashMismatch);
+    assert_eq!(failure.receipt_hash, wrong);
+    // And no anchor was written.
+    assert!(client.try_get_purchase_receipt(&id, &buyer).is_err());
+}
+
+#[test]
+fn retry_anchor_reports_when_no_payment_is_recorded() {
+    let (env, creator, _admin, settler, client) = setup_with_settler();
+    let id = register_default(&env, &creator, &client, "annopay");
+    let buyer = Address::generate(&env);
+    let tx = String::from_str(&env, "0xtxnopay");
+
+    assert!(!client.retry_anchor_purchase_receipt(&settler, &id, &buyer, &tx));
+    let failure = client.get_anchor_failure(&id, &buyer);
+    assert_eq!(failure.reason, AnchorFailureReason::NoPaymentRecorded);
+    assert!(client.try_get_purchase_receipt(&id, &buyer).is_err());
+}
+
+#[test]
+fn retry_anchor_is_idempotent_for_the_same_hash() {
+    let (_env, buyer, settler, _verifier, id, tx, client) =
+        setup_anchor_retry("anidem1", "0xtxidem");
+    assert!(client.retry_anchor_purchase_receipt(&settler, &id, &buyer, &tx));
+    // A blind retry loop must converge, not conflict with itself.
+    assert!(client.retry_anchor_purchase_receipt(&settler, &id, &buyer, &tx));
+    assert_eq!(client.get_purchase_receipt(&id, &buyer).receipt_hash, tx);
+}
+
+#[test]
+fn retry_anchor_will_not_change_an_existing_anchor() {
+    let (env, buyer, settler, verifier, id, tx, client) = setup_anchor_retry("andup01", "0xtxdup1");
+    // A verifier already anchored a different hash; that anchor is canonical.
+    let other = String::from_str(&env, "verifier-chosen-hash");
+    client.anchor_purchase_receipt(&verifier, &id, &buyer, &other);
+
+    assert!(!client.retry_anchor_purchase_receipt(&settler, &id, &buyer, &tx));
+    let failure = client.get_anchor_failure(&id, &buyer);
+    assert_eq!(failure.reason, AnchorFailureReason::DuplicateReceipt);
+    assert_eq!(
+        client.get_purchase_receipt(&id, &buyer).receipt_hash,
+        other,
+        "the original anchor must survive the refused retry"
+    );
+}
+
+#[test]
+fn retry_anchor_reports_an_unusable_receipt_hash() {
+    let (env, buyer, settler, _verifier, id, _tx, client) =
+        setup_anchor_retry("anbadh1", "0xtxbadh");
+    assert!(!client.retry_anchor_purchase_receipt(
+        &settler,
+        &id,
+        &buyer,
+        &String::from_str(&env, "")
+    ));
+    assert_eq!(
+        client.get_anchor_failure(&id, &buyer).reason,
+        AnchorFailureReason::InvalidReceiptHash
+    );
+}
+
+#[test]
+fn retry_anchor_requires_the_settler_role() {
+    let (env, buyer, _settler, _verifier, id, tx, client) =
+        setup_anchor_retry("anrol02", "0xtxrol1");
+    let stranger = Address::generate(&env);
+
+    assert_eq!(
+        client.try_retry_anchor_purchase_receipt(&stranger, &id, &buyer, &tx),
+        Err(Ok(Error::NotSettler))
+    );
+    assert!(client.try_get_purchase_receipt(&id, &buyer).is_err());
 }
 
 include!("test/lifecycle_events.rs");

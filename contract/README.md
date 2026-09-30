@@ -17,11 +17,11 @@ reads the canonical resource entry here.
 
 | Function                                                               | Auth                  | Args                                                                                                                                                                                                                                                                   | Returns                   | Description                                                                                                                                                                                                                                       |
 | ---------------------------------------------------------------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --- |
-| `register(creator, id, price, metadata, tags)`                         | `creator`             | `creator: Address` — the resource owner; `id: String` — unique cuid2 (1–24 bytes); `price: i128` — USDC stroops (`> 0`, `<= MAX_PRICE`); `metadata: String` — pointer (max 512 bytes, non-empty, supported prefix); `tags: Vec<String>` — discovery labels (0–8 items) | `Result<(), Error>`       | Register a new resource. Resources are listed by default.                                                                                                                                                                                         |
+| `register(creator, id, price, metadata, tags)`                         | `creator`             | `creator: Address` — the resource owner; `id: String` — unique cuid2 (1–24 bytes); `price: i128` — USDC base units, 7 decimals (`> 0`, `<= MAX_PRICE`); `metadata: String` — pointer (max 512 bytes, non-empty, supported prefix); `tags: Vec<String>` — discovery labels (0–8 items) | `Result<(), Error>`       | Register a new resource. Resources are listed by default.                                                                                                                                                                                         |
 | `register_with_hash(creator, id, price, metadata, tags, content_hash)` | `creator`             | `creator: Address`; `id: String`; `price: i128`; `metadata: String`; `tags: Vec<String>`; `content_hash: Option<String>` — optional content hash (max 128 bytes)                                                                                                       | `Result<(), Error>`       | Register a new resource with an optional immutable content hash.                                                                                                                                                                                  |
 | `register_with_memo(creator, id, price, metadata, tags, content_hash, memo_hash)` | `creator`             | `creator: Address`; `id: String`; `price: i128`; `metadata: String`; `tags: Vec<String>`; `content_hash: Option<String>`; `memo_hash: Option<BytesN<32>>`                                                                                                              | `Result<(), Error>`       | Register a new resource with an optional content hash and an optional 32-byte memo hash (for example the `MEMO_HASH` of the announcing transaction). The memo hash is written once and has no setter; read it with `get_memo_hash`. Emits `register`, then `regmemo` when a memo hash was given. |
 | `register_batch(creator, items)`                                       | `creator`             | `creator: Address`; `items: Vec<BatchRegisterItem>`; max 10 items, each `{ id, price, metadata, tags, content_hash }`                                                                                                                                                  | `Result<BatchRegisterResult, Error>` | Register up to 10 resources in one transaction under one creator. Errors `BatchTooLarge` above the cap; otherwise continues past per-item failures and reports the `succeeded` ids and the `failed` `(index, error_code)` pairs.                  |
-| `set_price(id, new_price)`                                             | `creator`             | `id: String`; `new_price: i128` — USDC stroops (`> 0`, `<= MAX_PRICE`)                                                                                                                                                                                                 | `Result<(), Error>`       | Update the resource price.                                                                                                                                                                                                                        |     |
+| `set_price(id, new_price)`                                             | `creator`             | `id: String`; `new_price: i128` — USDC base units, 7 decimals (`> 0`, `<= MAX_PRICE`)                                                                                                                                                                                                 | `Result<(), Error>`       | Update the resource price.                                                                                                                                                                                                                        |     |
 | `set_price_many(creator, updates)`                                     | `creator`             | `creator: Address`; `updates: Vec<BatchPriceUpdate>` — max 10 owned resources                                                                                                                                                                                          | `Result<(), Error>`       | Atomically update multiple prices after one creator authorization. Invalid input leaves all prices unchanged. Emits `setprice` for each changed resource.                                                                                       |
 | `update_metadata(id, metadata)`                                        | `creator`             | `id: String`; `metadata: String` — new pointer (max 512 bytes, non-empty, supported prefix)                                                                                                                                                                            | `Result<(), Error>`       | Update the metadata pointer.                                                                                                                                                                                                                      |
 | `set_tags(id, tags)`                                                   | `creator`             | `id: String`; `tags: Vec<String>` — replacement discovery labels (0–8 unique normalized items)                                                                                                                                                                         | `Result<(), Error>`       | Replace a resource's discovery tags. Does not touch `metadata`.                                                                                                                                                                                   |
@@ -63,7 +63,7 @@ reads the canonical resource entry here.
 pub struct Resource {
     pub id: String,        // unique resource ID (1-24 lowercase letters/digits), matches server resource ID
     pub creator: Address,  // current owner's Stellar address
-    pub price: i128,       // price in USDC stroops (7 decimals)
+    pub price: i128,       // price in USDC base units (7 decimals)
     pub metadata: String,  // pointer (supported URI or content-hash form), max 512 bytes, non-empty
     pub listed: bool,      // compatibility projection: true exactly when state is Listed
     pub state: ResourceState, // explicit lifecycle state
@@ -215,7 +215,7 @@ See [`docs/adr-fee-config.md`](../docs/adr-fee-config.md) for the full design ra
 
 | Function                                                                     | Auth                                                     | Args                                                                                                                                                                                                                                                 | Returns                                | Description                                                                                                                                                                                                                                                                                              |
 | ---------------------------------------------------------------------------- | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --- |
-| `register(creator, id, price, metadata, tags)`                               | `creator`                                                | `creator: Address`; `id: String` — unique cuid2 (1-24 lowercase letters/digits); `price: i128` — USDC stroops, `0 < price <= MAX_PRICE`; `metadata: String` — non-empty pointer (max 512 bytes); `tags: Vec<String>` — max 8 tags, each max 32 bytes | `Result<(), Error>`                    | Register a new resource. Resources are listed by default, start `Pending` verification, and start unfrozen. Reserved IDs (`admin`, `null`, `registry`, `api`, `index`, `root`, `system`, case-insensitive) are rejected.                                                                                 |
+| `register(creator, id, price, metadata, tags)`                               | `creator`                                                | `creator: Address`; `id: String` — unique cuid2 (1-24 lowercase letters/digits); `price: i128` — USDC base units (7 decimals), `0 < price <= MAX_PRICE`; `metadata: String` — non-empty pointer (max 512 bytes); `tags: Vec<String>` — max 8 tags, each max 32 bytes | `Result<(), Error>`                    | Register a new resource. Resources are listed by default, start `Pending` verification, and start unfrozen. Reserved IDs (`admin`, `null`, `registry`, `api`, `index`, `root`, `system`, case-insensitive) are rejected.                                                                                 |
 | `register_with_hash(creator, id, price, metadata, tags, content_hash)`       | `creator`                                                | `creator: Address`; `id: String`; `price: i128`; `metadata: String`; `tags: Vec<String>`; `content_hash: Option<String>` — max 128 bytes                                                                                                             | `Result<(), Error>`                    | Register a new resource with an optional immutable content hash.                                                                                                                                                                                                                                         |
 | `register_with_memo(creator, id, price, metadata, tags, content_hash, memo_hash)` | `creator`                                                | `creator: Address`; `id: String`; `price: i128`; `metadata: String`; `tags: Vec<String>`; `content_hash: Option<String>`; `memo_hash: Option<BytesN<32>>`                                                                                            | `Result<(), Error>`                    | Register a new resource with an optional content hash and an optional 32-byte memo hash (for example the `MEMO_HASH` of the announcing transaction). The memo hash is written once and has no setter; read it with `get_memo_hash`. Emits `register`, then `regmemo` when a memo hash was given.         |
 | `register_batch(creator, items)`                                             | `creator`                                                | `creator: Address`; `items: Vec<BatchRegisterItem>`; max 10 items, each `{ id, price, metadata, tags, content_hash }`                                                                                                                                | `Result<BatchRegisterResult, Error>`   | Register up to 10 resources in one transaction under one creator. Errors `BatchTooLarge` above the cap; otherwise continues past per-item failures and reports the `succeeded` ids and the `failed` `(index, error_code)` pairs.                                                                         |
@@ -297,6 +297,9 @@ See [`docs/adr-fee-config.md`](../docs/adr-fee-config.md) for the full design ra
 | `attempt_anchor_purchase_receipt(service, resource_id, buyer, receipt_hash)` | `verifier`                                               | `service: Address`; `resource_id: String`; `buyer: Address`; `receipt_hash: String`                                                                                                                                                                  | `Result<bool, Error>`                  | Same anchor, but a rejected attempt emits `anchrfail` and returns `false` instead of reverting. Authorization failures still revert.                                                                                                                                                                     |
 | `override_purchase_receipt_anchor(service, resource_id, buyer, new_receipt_hash)` | `verifier`                                               | `service: Address`; `resource_id: String`; `buyer: Address`; `new_receipt_hash: String`                                                                                                                                                              | `Result<(), Error>`                    | Override an existing purchase receipt anchor. Errors `NotFound` if it does not exist. Emits `anchor`.                                                                                                                                                                                                  |
 | `get_purchase_receipt(resource_id, buyer)`                                   | —                                                        | `resource_id: String`; `buyer: Address`                                                                                                                                                                                                              | `Result<PurchaseReceiptAnchor, Error>` | Fetch a purchase receipt anchor. Errors `NotFound` if absent.                                                                                                                                                                                                                                            |
+| `record_anchor_failure(settler, resource_id, buyer, receipt_hash)`               | `settler`                                                | `settler: Address`; `resource_id: String`; `buyer: Address`; `receipt_hash: String`                                                                                                                                                                  | `Result<(), Error>`                    | Durably record that a pair could not be anchored (reason `VerifierUnavailable`) so the buyer can query it with `get_anchor_failure`. Cleared by any later successful anchor. Emits `anchrfail`.                                                                                               |
+| `get_anchor_failure(resource_id, buyer)`                                        | —                                                        | `resource_id: String`; `buyer: Address`                                                                                                                                                                                                              | `Result<AnchorFailure, Error>`          | Read the recorded anchor failure for a pair. Errors `NotFound` when there is no outstanding failure.                                                                                                                                                                                                          |
+| `retry_anchor_purchase_receipt(settler, resource_id, buyer, receipt_hash)`      | `settler`                                                | `settler: Address`; `resource_id: String`; `buyer: Address`; `receipt_hash: String`                                                                                                                                                                  | `Result<bool, Error>`                  | Settle-time anchor retry that needs no verifier. `receipt_hash` must equal the `tx_hash` of the payment recorded for the pair, so it cannot anchor a hash no payment backs. Same hash is an idempotent `true`; a differing hash or a missing payment reports `anchrfail` and returns `false`.         |
 | `extend_resource_ttl(creator, resource_id)`                                  | `creator`                                                | `creator: Address`; `resource_id: String`                                                                                                                                                                                                            | `Result<(), Error>`                    | Refresh a resource's persistent storage TTL. Emits `ttlext`.                                                                                                                                                                                                                                             |
 | `add_settler(settler)`                                                       | `admin`                                                  | `settler: Address`                                                                                                                                                                                                                                   | `Result<(), Error>`                    | Grant the settler role. Emits `addsettlr`.                                                                                                                                                                                                                                                               |
 | `remove_settler(settler)`                                                    | `admin`                                                  | `settler: Address`                                                                                                                                                                                                                                   | `Result<(), Error>`                    | Revoke the settler role. Emits `rmsettlr`.                                                                                                                                                                                                                                                               |
@@ -755,6 +758,89 @@ pub struct AnchorFailure {
 }
 ```
 
+### Surviving a revoked verifier (#781)
+
+The section above leaves one hole. `attempt_anchor_purchase_receipt` reports
+_data_ failures, but it calls `require_anchor_authority` **first**, so it
+reverts on an authorization failure exactly like the strict variant. That is
+deliberate — a roleless address must not be able to write to the event log — but
+it means the one failure a buyer most needs to know about is the one failure
+nothing can report:
+
+- The buyer's payment is recorded and settled.
+- The verifier's role is revoked (rotation, compromise, offboarding) before the
+  anchor is written.
+- `anchor_purchase_receipt` reverts `NotVerifier`. So does
+  `attempt_anchor_purchase_receipt`. Both roll back, so no event survives either.
+- There is no anchor, no event, and previously **no way to ask**. The buyer
+  cannot distinguish "still pending" from "will never happen", and the only
+  actor who knows is the admin who just revoked the role.
+
+Two settler-authorized entry points close this. Neither widens who may *anchor*
+without constraint, and neither lets a roleless address reach storage or the log.
+
+#### `record_anchor_failure` — make the failure queryable
+
+Persists an `AnchorFailure` under `(resource_id, buyer)` with reason
+`VerifierUnavailable`, which the buyer reads with `get_anchor_failure`. It also
+emits `anchrfail`, so an indexer sees the durable record and the existing
+event-only path through the same topic and payload.
+
+Recording is last-write-wins, and it is **self-clearing**: writing any anchor for
+the pair removes the record (`write_anchor` does it, so all three write paths
+benefit). The record can therefore only move from "unresolved" to "resolved", and
+`get_anchor_failure` can never contradict `get_purchase_receipt`. Calling it on
+an already-anchored pair is a no-op that returns `Ok(())`.
+
+`get_anchor_failure` is deliberately **unauthenticated**. A buyer has to be able
+to discover their own failure without holding a role; `get_purchase_receipt` is
+already open the same way.
+
+#### `retry_anchor_purchase_receipt` — make the failure recoverable
+
+A record tells the buyer something is wrong; this lets the settlement path fix
+it. The settler already writes the payment receipt and drives `settle_payment`,
+so it is still operational when a verifier rotation has not.
+
+The authority it grants is strictly **narrower** than the verifier's:
+
+| Constraint                    | Verifier path | Settler retry                            |
+| ----------------------------- | ------------- | ---------------------------------------- |
+| `receipt_hash` must be backed | anything      | the recorded receipt's own `tx_hash`     |
+| Payment receipt must exist    | no            | yes                                      |
+| Can overwrite an anchor       | yes, via `override_purchase_receipt_anchor` | no — reported `DuplicateReceipt` |
+
+So the settler cannot introduce a receipt hash that no payment backs, and cannot
+invent a payment to justify one. If anything is wrong it reports rather than
+writes, matching `attempt_anchor_purchase_receipt`: `Ok(false)` plus an
+`anchrfail` event and a durable record, so a settlement loop can call it on every
+payment without a revert on bad input. Only authorization, pause, and
+`resource_id` format problems revert.
+
+Re-anchoring the **same** hash is an idempotent `Ok(true)`, so a blind retry loop
+converges. A **different** hash is reported `DuplicateReceipt`: changing a
+canonical anchor stays verifier-only.
+
+The three settler-only reasons map onto the existing error space, so
+`AnchorFailureReason::as_error` still round-trips — no new error codes, which
+matters because `Error` is already at the protocol's 50-case cap (see
+[Error codes](#error-codes)):
+
+| `AnchorFailureReason` | `as_error()`  | Reachable from                          |
+| --------------------- | -------------- | --------------------------------------- |
+| `ResourceNotFound`    | `NotFound`     | either path                            |
+| `InvalidReceiptHash`  | `InvalidTxHash`| either path                            |
+| `DuplicateReceipt`    | `DuplicateReceipt` | either path                        |
+| `VerifierUnavailable` | `NotVerifier`  | `record_anchor_failure` only            |
+| `NoPaymentRecorded`   | `NotFound`     | `retry_anchor_purchase_receipt` only    |
+| `ReceiptHashMismatch` | `InvalidTxHash`| `retry_anchor_purchase_receipt` only    |
+
+**Known limitation.** Neither entry point makes a *revoked* verifier's work
+retroactively verifiable, and `override_purchase_receipt_anchor` still reverts
+for a roleless caller — so a genuinely wrong anchor written by a since-revoked
+verifier still needs a currently-granted verifier (or the admin) to correct.
+This fixes the un-anchored case, not the mis-anchored one.
+
 ### Retry-safe payment recording
 
 `record_payment` keys each receipt by its caller-assigned `receipt_id` and
@@ -826,7 +912,7 @@ separate config lookup. It always succeeds; there is no error case.
 | `MAX_METADATA_POINTER_LEN` | `512`                        | Maximum length of the metadata pointer in bytes.      |
 | `MAX_TERMS_HASH_LEN`       | `64`                         | Maximum length of the creator terms hash in bytes.    |
 | `MAX_TX_HASH_LEN`          | `128`                        | Maximum length of a payment receipt tx hash in bytes. |
-| `MAX_PRICE`                | `1_000_000_000_000_000_000`  | Maximum price in USDC stroops (1 trillion USDC).      |
+| `MAX_PRICE`                | `1_000_000_000_000_000_000`  | Maximum price in USDC base units (100 billion USDC).   |
 | `LIST_PAGE_CAP`            | `20`                         | Maximum items returned per page by all `list*` calls. |
 | `RESOURCE_SCHEMA_VERSION`  | `2`                          | Current `Resource` schema version (tags added in v2). |
 | `REGISTRY_NAME`            | `"mindvault-vault-registry"` | Stable name returned by `registry_info()`.            |
@@ -854,7 +940,7 @@ must require an explicit deployment guard.
 | `MAX_METADATA_POINTER_LEN` | `512`                        | Maximum length of the metadata pointer, in bytes.                                                                                            |
 | `MAX_TERMS_HASH_LEN`       | `64`                         | Maximum length of the creator terms hash, in bytes.                                                                                          |
 | `MAX_TX_HASH_LEN`          | `128`                        | Maximum length of a payment receipt tx hash, in bytes.                                                                                       |
-| `MAX_PRICE`                | `10^18`                      | Maximum price, in USDC stroops.                                                                                                              |
+| `MAX_PRICE`                | `10^18`                      | Maximum price, in USDC base units (7 decimals).                                                                                               |
 | `LIST_PAGE_CAP`            | `20`                         | Maximum items returned per page by all `list*` calls.                                                                                        |
 | `RESOURCE_SCHEMA_VERSION`  | `2`                          | Current `Resource` schema version (tags added in v2).                                                                                        |
 | `REGISTRY_NAME`            | `"mindvault-vault-registry"` | Stable name returned by `registry_info()`.                                                                                                   |
@@ -862,14 +948,17 @@ must require an explicit deployment guard.
 | -------------------------- | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | `MAX_METADATA_POINTER_LEN` | `512`                        | Maximum length of the metadata pointer in bytes.                                                                                             |
 | `MAX_TERMS_HASH_LEN`       | `64`                         | Maximum length of the creator terms hash in bytes.                                                                                           |
-| `MAX_PRICE`                | `1_000_000_000_000_000_000`  | Maximum price in USDC stroops (1 trillion USDC).                                                                                             |
+| `MAX_PRICE`                | `1_000_000_000_000_000_000`  | Maximum price in USDC base units (100 billion USDC).                                                                                          |
 | `RESOURCE_SCHEMA_VERSION`  | `6`                          | Current `Resource` schema version (`metadata_frozen_at` added in v6).                                                                        |
 | `REGISTRY_NAME`            | `"mindvault-vault-registry"` | Stable name returned by `registry_info()`.                                                                                                   |
 | `MAX_FEE_BPS`              | `5_000`                      | Maximum fee in basis points (50 %). Neither `platform_fee_bps` nor `royalty_bps` may exceed this individually, and their sum may not either. |
-| `FEE_BPS_DENOM`            | `10_000`                     | Basis-point denominator. `amount * fee_bps / FEE_BPS_DENOM` converts a fee to a USDC stroop amount.                                          |
+| `FEE_BPS_DENOM`            | `10_000`                     | Basis-point denominator. `amount * fee_bps / FEE_BPS_DENOM` converts a fee to a USDC base-unit amount.                                          |
 | `MAX_FEE_DESTINATION_BPS`  | `10_000`                     | Maximum share of the platform fee routed to a burn or charity destination.                                                                         |
 
-`price` is an `i128` in **USDC stroops** (7 decimal places).
+`price` is an `i128` in **USDC base units** (7 decimal places, so
+`10_000_000` base units = 1 USDC). A USDC base unit is *not* a stroop: a
+stroop is 10^-5 XLM, so scaling by 10^5 would be a 100x error. The canonical
+conversion factor is `USDC_BASE_UNITS_PER_USDC`.
 Examples: `1_000_000` = 0.10 USDC, `10_000_000` = 1.00 USDC, `500_000` = 0.05 USDC.
 
 ### WASM size budget
