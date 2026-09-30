@@ -31,7 +31,13 @@ import {
 import { dryRunPublish, dryRunBuy } from "../dryRun.js";
 import { safeErrorMessage } from "../redaction.js";
 import { recordPurchase } from "../purchaseHistory.js";
-import { mockSetListed, mockSetPrice, mockTransferOwnership, mockUpdateMetadata, mockPublishBatch } from "../mock.js";
+import {
+  mockSetListed,
+  mockSetPrice,
+  mockTransferOwnership,
+  mockUpdateMetadata,
+  mockPublishBatch,
+} from "../mock.js";
 
 /**
  * Decimal USDC as on-chain stroops, throwing on an amount the shared converter

@@ -129,8 +129,16 @@ describe("stateBackup", () => {
   it("rejects a backup bound to another network before writing", () => {
     const blob = exportState(PASS);
     let wrote = false;
-    expect(() => restoreState(blob, PASS, () => { wrote = true; }, { expectedNetwork: "stellar:pubnet" }))
-      .toThrow(/belongs to network/);
+    expect(() =>
+      restoreState(
+        blob,
+        PASS,
+        () => {
+          wrote = true;
+        },
+        { expectedNetwork: "stellar:pubnet" },
+      ),
+    ).toThrow(/belongs to network/);
     expect(wrote).toBe(false);
   });
 

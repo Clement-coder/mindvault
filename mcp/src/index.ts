@@ -2228,13 +2228,7 @@ export async function buy(
     }
     assertAutoPaymentWithinCeiling({ price: meta.data.price, maxAutoPayUsdc });
     return JSON.stringify(
-      dryRunBuy(
-        resourceId,
-        NETWORK,
-        BASE_URL,
-        !!activeProfile().wallet,
-        String(meta.data.price),
-      ),
+      dryRunBuy(resourceId, NETWORK, BASE_URL, !!activeProfile().wallet, String(meta.data.price)),
       null,
       2,
     );

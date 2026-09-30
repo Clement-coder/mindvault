@@ -671,9 +671,7 @@ export async function pendingTransfer(resourceId: string): Promise<string> {
           // Address can be account or contract; for owner it is always account.
           if (addr.switch().value === xdr.ScAddressType.scAddressTypeAccount().value) {
             const { StrKey } = await import("@stellar/stellar-sdk");
-            proposedNewOwner = StrKey.encodeEd25519PublicKey(
-              addr.accountId().ed25519(),
-            );
+            proposedNewOwner = StrKey.encodeEd25519PublicKey(addr.accountId().ed25519());
           } else {
             // Contract address — encode as C... strkey
             const { StrKey } = await import("@stellar/stellar-sdk");

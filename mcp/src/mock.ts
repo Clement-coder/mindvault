@@ -430,10 +430,7 @@ export function mockCancelTransfer(resourceId: string): string {
 export function mockPendingTransfer(resourceId: string): string {
   // Deterministic mock: derive a stable proposed-owner address from the resource id.
   const mockProposedOwner = Keypair.fromRawEd25519Seed(
-    Buffer.from(
-      `mock-proposed-owner-${resourceId}`.padEnd(32, "\0").slice(0, 32),
-      "utf8",
-    ),
+    Buffer.from(`mock-proposed-owner-${resourceId}`.padEnd(32, "\0").slice(0, 32), "utf8"),
   ).publicKey();
 
   return JSON.stringify(

@@ -68,11 +68,17 @@ export function assertTransactionFeeWithinCeiling(input: {
   feeStroops: string | number | bigint;
   env?: NodeJS.ProcessEnv;
 }): void {
-  const raw = input.env?.MINDVAULT_MAX_AUTO_FEE_STROOPS ?? process.env.MINDVAULT_MAX_AUTO_FEE_STROOPS ?? DEFAULT_MAX_AUTO_FEE_STROOPS;
-  if (!/^\d+$/.test(raw)) throw new Error("MINDVAULT_MAX_AUTO_FEE_STROOPS must be a non-negative integer.");
+  const raw =
+    input.env?.MINDVAULT_MAX_AUTO_FEE_STROOPS ??
+    process.env.MINDVAULT_MAX_AUTO_FEE_STROOPS ??
+    DEFAULT_MAX_AUTO_FEE_STROOPS;
+  if (!/^\d+$/.test(raw))
+    throw new Error("MINDVAULT_MAX_AUTO_FEE_STROOPS must be a non-negative integer.");
   const fee = BigInt(String(input.feeStroops));
   const ceiling = BigInt(raw);
   if (fee > ceiling) {
-    throw new Error(`On-chain mutation fee ${fee} stroops exceeds the automatic fee ceiling of ${ceiling} stroops.`);
+    throw new Error(
+      `On-chain mutation fee ${fee} stroops exceeds the automatic fee ceiling of ${ceiling} stroops.`,
+    );
   }
 }

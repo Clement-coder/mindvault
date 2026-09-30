@@ -244,7 +244,9 @@ export function receiptsToCsv(receipts: ExportedReceipt[]): string {
   const lines = [RECEIPT_CSV_COLUMNS.join(",")];
   for (const receipt of receipts) {
     lines.push(
-      RECEIPT_CSV_COLUMNS.map((column) => csvField(receipt[column], column === "currency")).join(","),
+      RECEIPT_CSV_COLUMNS.map((column) => csvField(receipt[column], column === "currency")).join(
+        ",",
+      ),
     );
   }
   return lines.join("\r\n");
@@ -337,7 +339,9 @@ export function exportReceiptsToolWithTimeout(
   const started = Date.now();
   const result = exportReceiptsTool(args);
   if (Date.now() - started > timeoutMs) {
-    throw new Error(`Request timed out after ${timeoutMs}ms (http). Configure mindvault_export_receipts in MINDVAULT_TOOL_TIMEOUTS.`);
+    throw new Error(
+      `Request timed out after ${timeoutMs}ms (http). Configure mindvault_export_receipts in MINDVAULT_TOOL_TIMEOUTS.`,
+    );
   }
   return result;
 }
