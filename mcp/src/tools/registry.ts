@@ -675,7 +675,7 @@ export async function pendingTransfer(resourceId: string): Promise<string> {
           } else {
             // Contract address — encode as C... strkey
             const { StrKey } = await import("@stellar/stellar-sdk");
-            proposedNewOwner = StrKey.encodeContract(addr.contractId());
+            proposedNewOwner = StrKey.encodeContract(Buffer.from(addr.contractId()));
           }
         }
       }

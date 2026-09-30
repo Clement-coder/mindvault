@@ -37,6 +37,8 @@ import {
   mockTransferOwnership,
   mockUpdateMetadata,
   mockPublishBatch,
+  mockAcceptTransfer,
+  mockCancelTransfer,
 } from "../mock.js";
 
 /**
@@ -910,7 +912,7 @@ export async function publishBatch(
       price: usdcToStroops(item.price),
       metadata: resource.accessUrl ?? item.externalUrl,
       tags: [],
-      content_hash: null,
+      content_hash: undefined,
     });
     results.push({
       index,
