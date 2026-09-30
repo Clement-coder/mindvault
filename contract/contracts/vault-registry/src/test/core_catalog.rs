@@ -1592,6 +1592,8 @@ fn admin_transfer_nominate_then_accept() {
     assert_eq!(client.pending_admin(), Some(new_admin.clone()));
 
     // Accept admin nomination
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + ADMIN_NOMINATION_MIN_GAP);
     client.accept_admin(&new_admin);
     assert_eq!(client.admin(), Some(new_admin));
     assert_eq!(client.pending_admin(), None);
@@ -1606,6 +1608,10 @@ fn accept_admin_rejects_wrong_caller() {
 
     client.nominate_new_admin(&admin);
     client.nominate_new_admin(&pending);
+
+    // Advance past the gap so the wrong-caller check fires, not the too-soon check.
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + ADMIN_NOMINATION_MIN_GAP);
 
     assert_eq!(
         client.try_accept_admin(&wrong),

@@ -9,6 +9,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { homedir } from "os";
+import { explorerTxUrl, resolveExplorerNetwork } from "./stellarExplorer.js";
+import type { ExplorerNetwork } from "@mindvault/registry-client";
 
 export const PURCHASE_HISTORY_VERSION = 1 as const;
 
@@ -272,6 +274,7 @@ export function purchaseProfiles(): string[] {
 export function formatPurchaseHistory(
   receipts: PurchaseReceipt[],
   filter: PurchaseHistoryFilter = {},
+  explorerNetwork: ExplorerNetwork = resolveExplorerNetwork(),
 ): string {
   if (receipts.length === 0) {
     // Naming the profile that was searched turns "no results" into something
@@ -292,7 +295,15 @@ export function formatPurchaseHistory(
     {
       count: receipts.length,
       ...(filter.profile ? { profile: filter.profile } : {}),
-      purchases: receipts,
+      purchases: receipts.map((r) => ({
+        ...r,
+        // Convenience field: the Stellar Expert explorer URL for the settlement
+        // transaction. Consumers no longer need to join txHash with
+        // mindvault_tx_status externally — the link is pre-resolved and always
+        // null when no hash was recorded (e.g. buy completed before hash was
+        // available). Use mindvault_tx_status to check live settlement status.
+        explorerUrl: explorerTxUrl(r.txHash, explorerNetwork),
+      })),
     },
     null,
     2,
@@ -304,7 +315,6 @@ export function purchaseHistoryTool(args?: Record<string, unknown>): string {
   const filter = normalizePurchaseHistoryFilter(args);
   return formatPurchaseHistory(listPurchases(filter), filter);
 }
-
 /** Test helper: wipe the configured purchases file content. */
 export function _clearPurchases(): void {
   persist(emptyStore());

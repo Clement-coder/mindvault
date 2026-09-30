@@ -336,7 +336,35 @@ export const PURCHASE_HISTORY_OUTPUT_SCHEMA = {
   type: "object",
   properties: {
     count: { type: "integer" },
-    purchases: { type: "array" },
+    purchases: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          resourceId: { type: "string" },
+          amount: { type: "string" },
+          network: { type: "string" },
+          txHash: { type: ["string", "null"] },
+          timestamp: { type: "string" },
+          receiptRef: { type: ["string", "null"] },
+          title: { type: "string" },
+          profile: { type: "string" },
+          // Pre-resolved Stellar Expert URL for the settlement transaction.
+          // Null when txHash was not recorded. Pass txHash to mindvault_tx_status
+          // to check live on-chain settlement status.
+          explorerUrl: { type: ["string", "null"] },
+        },
+        required: [
+          "resourceId",
+          "amount",
+          "network",
+          "txHash",
+          "timestamp",
+          "receiptRef",
+          "explorerUrl",
+        ],
+      },
+    },
     message: { type: "string" },
   },
   required: ["count", "purchases"],

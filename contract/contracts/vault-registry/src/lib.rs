@@ -21,6 +21,16 @@ use soroban_sdk::{
 // write so an actively-managed resource is never archived out from under us.
 const DAY_IN_LEDGERS: u32 = 17280;
 const ADMIN_NOMINATION_DURATION: u32 = 7 * DAY_IN_LEDGERS;
+/// Minimum ledger gap between `nominate_new_admin` and `accept_admin`.
+///
+/// A single compromised admin could otherwise batch nominate + accept in one
+/// transaction, defeating the two-step rotation entirely. Requiring the
+/// acceptance ledger to be strictly greater than the nomination ledger by at
+/// least this many ledgers (~1 day) means nominate and accept must land in
+/// separate transactions at least one day apart, giving operators and monitors
+/// time to detect and respond to an unauthorized nomination before it takes
+/// effect.
+pub const ADMIN_NOMINATION_MIN_GAP: u32 = DAY_IN_LEDGERS;
 const BUMP_AMOUNT: u32 = 30 * DAY_IN_LEDGERS;
 const LIFETIME_THRESHOLD: u32 = BUMP_AMOUNT - DAY_IN_LEDGERS;
 /// Max length for metadata pointers (IPFS URI, content hash, compact JSON anchor).
@@ -64,6 +74,14 @@ pub const MAX_FEE_BPS: u32 = 5_000;
 /// Denominator for converting basis-point values to a fraction (1/10 000).
 pub const FEE_BPS_DENOM: u32 = 10_000;
 pub const MAX_FEE_DESTINATION_BPS: u32 = FEE_BPS_DENOM;
+/// Minimum creator share in basis points (50 % = 5 000 bp).
+///
+/// `validate_price` enforces that the price in stroops strictly exceeds the
+/// combined `platform_fee_bps + royalty_bps` so that the creator always
+/// receives a positive, non-zero remainder on every sale.  Together with
+/// `MAX_FEE_BPS` capping the sum of fees at 50 %, this guarantees the creator
+/// can never receive less than 50 % of any sale price.
+pub const MIN_CREATOR_SHARE_BPS: u32 = FEE_BPS_DENOM - MAX_FEE_BPS; // 5_000
 
 /// Stable registry name returned by [`VaultRegistry::registry_info`].
 pub const REGISTRY_NAME: &str = "mindvault-vault-registry";
@@ -212,7 +230,7 @@ pub const METHOD_SCHEMA: &[(&str, &str)] = &[
 pub const ERROR_SCHEMA: &[(u32, &str, &str)] = &[
     (1, "AlreadyRegistered", "A resource with the given `id` or the target verifier already exists."),
     (2, "NotFound", "No resource (or terms hash, receipt, or old verifier) matches the given key."),
-    (3, "InvalidPrice", "Price is `<= 0`, exceeds `MAX_PRICE`, or is not strictly greater than the active `royalty_bps`."),
+    (3, "InvalidPrice", "Price is `<= 0`, exceeds `MAX_PRICE`, or is not strictly greater than the combined active `platform_fee_bps + royalty_bps` (creator-share invariant)."),
     (4, "MetadataTooLong", "Metadata pointer exceeds `MAX_METADATA_POINTER_LEN` (512 bytes)."),
     (5, "InvalidTag", "Tag validation failed (too many tags, empty tag, tag exceeds 32 bytes, or duplicate normalized tag)."),
     (6, "Unauthorized", "Caller authentication check failed or unauthorized."),
@@ -259,7 +277,7 @@ pub const ERROR_SCHEMA: &[(u32, &str, &str)] = &[
     (47, "PaymentAmountMismatch", "Payment receipt amount does not match the resource's current price."),
     (48, "DuplicateTxHash", "A payment receipt is already stored for the supplied settlement transaction hash (`tx_hash`)."),
     (49, "FeeConfigNotSet", "`set_fee_recipient` or `set_fee_destination` was called before any fee config was set via `set_fee_config`."),
-    (50, "AdminNominationExpired", "The pending admin nomination is missing or has expired."),
+    (50, "AdminNominationExpired", "The pending admin nomination is missing, has expired, or `accept_admin` was called before `ADMIN_NOMINATION_MIN_GAP` ledgers elapsed since `nominate_new_admin`."),
 ];
 
 /// Canonical list of every event topic this contract emits, paired with a
@@ -632,6 +650,10 @@ pub enum DataKey {
     AttestationHash(String),
     /// Ledger sequence at which the pending admin nomination expires.
     PendingAdminExpiry,
+    /// Ledger sequence at which the pending admin nomination was created.
+    /// Used to enforce `ADMIN_NOMINATION_MIN_GAP` in `accept_admin` so that
+    /// nominate and accept cannot be batched into a single transaction.
+    PendingAdminNominatedAt,
     TagCount(String),
     TopTags,
     /// Number of `creator`'s resources currently in the `Listed` state. Kept
@@ -833,8 +855,9 @@ pub struct AnchorFailure {
 pub enum Error {
     AlreadyRegistered = 1,
     NotFound = 2,
-    /// A price is `<= 0`, exceeds `MAX_PRICE`, or is too small to support the
-    /// active `royalty_bps` (see `validate_price`).
+    /// A price is `<= 0`, exceeds `MAX_PRICE`, or is not strictly greater than
+    /// the combined active `platform_fee_bps + royalty_bps`
+    /// (creator-share invariant — see `validate_price`).
     InvalidPrice = 3,
     MetadataTooLong = 4,
     InvalidTag = 5,
@@ -902,7 +925,9 @@ pub enum Error {
     DuplicateTxHash = 48,
     /// `set_fee_recipient` or `set_fee_destination` was called before any fee config was set via `set_fee_config`.
     FeeConfigNotSet = 49,
-    /// The pending admin nomination is missing or has expired.
+    /// The pending admin nomination is missing, has expired, or was called too
+    /// soon after `nominate_new_admin` (before `ADMIN_NOMINATION_MIN_GAP`
+    /// ledgers have elapsed).
     AdminNominationExpired = 50,
 }
 
@@ -2189,6 +2214,9 @@ impl VaultRegistry {
                 env.storage()
                     .instance()
                     .remove(&DataKey::PendingAdminExpiry);
+                env.storage()
+                    .instance()
+                    .remove(&DataKey::PendingAdminNominatedAt);
             }
         }
         if env.storage().instance().has(&DataKey::PendingAdmin) {
@@ -2198,10 +2226,11 @@ impl VaultRegistry {
         env.storage()
             .instance()
             .set(&DataKey::PendingAdmin, &new_admin);
-        let expiry = env
-            .ledger()
-            .sequence()
-            .saturating_add(ADMIN_NOMINATION_DURATION);
+        let nominated_at = env.ledger().sequence();
+        let expiry = nominated_at.saturating_add(ADMIN_NOMINATION_DURATION);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdminNominatedAt, &nominated_at);
         env.storage()
             .instance()
             .set(&DataKey::PendingAdminExpiry, &expiry);
@@ -2230,6 +2259,22 @@ impl VaultRegistry {
             env.storage()
                 .instance()
                 .remove(&DataKey::PendingAdminExpiry);
+            env.storage()
+                .instance()
+                .remove(&DataKey::PendingAdminNominatedAt);
+            return Err(Error::AdminNominationExpired);
+        }
+
+        // Enforce the mandatory ledger gap: accept_admin must be called at
+        // least ADMIN_NOMINATION_MIN_GAP ledgers after nominate_new_admin so
+        // that the two steps cannot be batched into a single transaction by a
+        // compromised admin.
+        let nominated_at: u32 = env
+            .storage()
+            .instance()
+            .get::<DataKey, u32>(&DataKey::PendingAdminNominatedAt)
+            .unwrap_or(0);
+        if env.ledger().sequence() < nominated_at.saturating_add(ADMIN_NOMINATION_MIN_GAP) {
             return Err(Error::AdminNominationExpired);
         }
 
@@ -2242,6 +2287,9 @@ impl VaultRegistry {
         env.storage()
             .instance()
             .remove(&DataKey::PendingAdminExpiry);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingAdminNominatedAt);
         env.storage().instance().set(&DataKey::Admin, &new_admin);
         Self::bump_instance(&env);
         env.events()
@@ -2426,6 +2474,10 @@ impl VaultRegistry {
     /// [`MAX_FEE_BPS`]. Violating either bound errors `FeeBpsTooHigh` (for an
     /// individual field out of range) or `TotalFeeTooHigh` (for a valid
     /// individual pair whose sum exceeds the ceiling).
+    ///
+    /// Together with the price-validation rule (`price > platform_fee_bps +
+    /// royalty_bps`), this guarantees the creator always receives a positive
+    /// remainder of at least [`MIN_CREATOR_SHARE_BPS`] (50 %) on every sale.
     ///
     /// Stores the config under the singleton [`DataKey::FeeConfig`] instance
     /// entry and emits a `setfee` event carrying the old config (or `None` on
@@ -3147,20 +3199,22 @@ impl VaultRegistry {
         if price > MAX_PRICE {
             return Err(Error::PriceExceedsMax);
         }
-        // Per-field bounds on `royalty_bps` say nothing about the split a given
-        // price actually produces, so a price that is individually legal can
-        // still mint a royalty of zero stroops (price below the basis-point
-        // quantum) or one that consumes the entire sale amount. Requiring the
-        // active `royalty_bps` to be strictly below the price in stroops keeps
-        // both degenerate cases out of the ledger. No fee config set means no
-        // royalty is owed, so the check is a no-op until one is configured.
-        let royalty_bps: i128 = env
+        // Enforce the minimum creator-share invariant: the price in stroops must
+        // strictly exceed the *combined* fee take (platform_fee_bps +
+        // royalty_bps) so the creator always receives a positive remainder.
+        //
+        // Checking only royalty_bps (the old rule) was insufficient: a
+        // platform_fee_bps > 0 stacked on top of royalty_bps could consume the
+        // entire remaining amount, leaving the creator with zero even when
+        // royalty_bps alone was below the price.  No fee config set means no
+        // fees are owed, so the check is a no-op until one is configured.
+        let combined_fee_bps: i128 = env
             .storage()
             .instance()
             .get::<DataKey, FeeConfig>(&DataKey::FeeConfig)
-            .map(|config| i128::from(config.royalty_bps))
+            .map(|config| i128::from(config.platform_fee_bps + config.royalty_bps))
             .unwrap_or(0);
-        if royalty_bps >= price {
+        if combined_fee_bps >= price {
             return Err(Error::InvalidPrice);
         }
         Ok(())
