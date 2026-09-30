@@ -179,6 +179,7 @@ pub const METHOD_SCHEMA: &[(&str, &str)] = &[
     // ── Terms hashes ──────────────────────────────────────────────────────
     ("set_terms_hash", "creator"),
     ("get_terms_hash", "—"),
+    ("set_registry_terms_hash", "admin"),
     // ── Fees ──────────────────────────────────────────────────────────────
     ("set_fee_config", "admin"),
     ("get_fee_config", "—"),
@@ -292,6 +293,7 @@ pub const EVENT_SCHEMA: &[(&str, &str)] = &[
     ("cancel", "owner: Address"),
     ("setlisted", "(old_listed: bool, new_listed: bool)"),
     ("setterms", "terms_hash: String"),
+    ("setregt", "terms_hash: String"),
     ("setadmin", "new_admin: Address"),
     ("nomadmin", "new_admin: Address"),
     ("accadmin", "new_admin: Address"),
@@ -648,6 +650,11 @@ pub enum DataKey {
     /// Moderator who last called `flag_resource`, `unflag_resource`, or
     /// `set_flag_reason_hash` for a resource. Read back by `flag_details`.
     FlagModerator(String),
+    /// Registry-wide canonical terms hash set by the admin. When a creator has
+    /// not stored their own `CreatorTerms` entry, `get_terms_hash` falls back
+    /// to this value so off-chain callers always have a single authoritative
+    /// read path to the vault's listing terms.
+    RegistryTerms,
 }
 
 /// Event data emitted when a resource's metadata pointer is updated.
@@ -2604,6 +2611,30 @@ impl VaultRegistry {
         Ok(())
     }
 
+    /// Store the registry-wide canonical terms hash. Only the admin may call
+    /// this. When a creator has not stored their own terms, `get_terms_hash`
+    /// returns this value as the authoritative vault listing terms.
+    pub fn set_registry_terms_hash(
+        env: Env,
+        terms_hash: String,
+    ) -> Result<(), Error> {
+        Self::require_current_admin(&env)?.require_auth();
+        Self::require_not_paused(&env)?;
+        Self::validate_bounded_string(
+            &terms_hash,
+            0,
+            MAX_TERMS_HASH_LEN,
+            Error::TermsHashTooLong,
+            Error::TermsHashTooLong,
+        )?;
+        let key = DataKey::RegistryTerms;
+        env.storage().persistent().set(&key, &terms_hash);
+        Self::bump_persistent(&env, &key);
+        env.events()
+            .publish((symbol_short!("setregt"),), terms_hash);
+        Ok(())
+    }
+
     // ─── Settler role management ─────────────────────────────────────────────
 
     /// Grant the settler role to `settler`, authorizing `record_payment` and
@@ -2915,12 +2946,21 @@ impl VaultRegistry {
     /// Bumps the entry's TTL on a successful read.
     pub fn get_terms_hash(env: Env, creator: Address) -> Result<String, Error> {
         let key = DataKey::CreatorTerms(creator);
+        if let Some(hash) = env.storage().persistent().get::<DataKey, String>(&key) {
+            Self::bump_persistent(&env, &key);
+            return Ok(hash);
+        }
+        // Fall back to the registry-wide canonical terms set by the admin.
+        // This gives off-chain callers a single authoritative read path: a
+        // creator-specific entry takes precedence; if absent, the vault's
+        // listing terms are returned instead of an unconditional NotFound.
+        let reg_key = DataKey::RegistryTerms;
         let hash = env
             .storage()
             .persistent()
-            .get(&key)
+            .get(&reg_key)
             .ok_or(Error::NotFound)?;
-        Self::bump_persistent(&env, &key);
+        Self::bump_persistent(&env, &reg_key);
         Ok(hash)
     }
 

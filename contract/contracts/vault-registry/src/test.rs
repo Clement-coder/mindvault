@@ -4056,6 +4056,46 @@ fn set_terms_hash_accepts_max_length() {
     assert_eq!(client.get_terms_hash(&creator), terms);
 }
 
+// ─── Registry-level terms fallback (#772) ─────────────────────────────────
+
+#[test]
+fn get_terms_hash_falls_back_to_registry_terms() {
+    // When a creator has no per-creator terms, get_terms_hash must return the
+    // registry-wide terms set by the admin rather than NotFound.
+    let (env, creator, admin, client) = setup_with_admin();
+
+    let registry_terms = String::from_str(&env, "ipfs://QmRegistryTerms");
+    client.set_registry_terms_hash(&admin, &registry_terms);
+
+    // Creator has no per-creator entry — should get the registry terms.
+    assert_eq!(client.get_terms_hash(&creator), registry_terms);
+}
+
+#[test]
+fn creator_terms_take_precedence_over_registry_terms() {
+    // A creator-specific entry shadows the registry-wide fallback.
+    let (env, creator, admin, client) = setup_with_admin();
+
+    let registry_terms = String::from_str(&env, "ipfs://QmRegistryTerms");
+    client.set_registry_terms_hash(&admin, &registry_terms);
+
+    let creator_terms = String::from_str(&env, "ipfs://QmCreatorTerms");
+    client.set_terms_hash(&creator, &creator_terms);
+
+    assert_eq!(client.get_terms_hash(&creator), creator_terms);
+}
+
+#[test]
+fn get_terms_hash_still_fails_when_neither_exists() {
+    // When neither creator terms nor registry terms are set, NotFound is
+    // returned — behaviour is unchanged from before the fallback was added.
+    let (_env, creator, client) = setup();
+    assert_eq!(
+        client.try_get_terms_hash(&creator),
+        Err(Ok(Error::NotFound))
+    );
+}
+
 // Admin bootstrap/uninitialized-state behavior is covered by
 // `admin_transfer_nominate_then_accept` (bootstrap via the first
 // `nominate_new_admin` call) — see the two-step admin model above.
