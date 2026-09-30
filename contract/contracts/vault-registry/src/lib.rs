@@ -225,6 +225,10 @@ pub const ERROR_SCHEMA: &[(u32, &str, &str)] = &[
     (43, "InvalidPaymentTransition", "The requested payment receipt state transition is not allowed (e.g. settling an already-settled receipt)."),
     (44, "InvalidReceiptId", "`receipt_id` is empty or exceeds `MAX_RECEIPT_ID_LEN` (64 bytes)."),
     (45, "ContentHashTooLong", "`content_hash` exceeds `MAX_CONTENT_HASH_LEN` (128 bytes)."),
+    (46, "AttestationHashTooLong", "`attestation_hash` exceeds `MAX_ATTESTATION_HASH_LEN` (64 bytes)."),
+    (47, "PaymentAmountMismatch", "Payment receipt amount does not match the resource's current price."),
+    (48, "ResourceTombstoned", "The resource is tombstoned and has no outgoing lifecycle transitions."),
+    (49, "AttestationRequired", "An attestation hash is required when changing verification status from Verified or Rejected."),
 ];
 
 /// Canonical list of every event topic this contract emits, paired with a
@@ -740,6 +744,10 @@ pub enum Error {
     AttestationHashTooLong = 46,
     /// Payment receipt amount does not match the resource's current price.
     PaymentAmountMismatch = 47,
+    /// The resource is tombstoned and has no outgoing lifecycle transitions.
+    ResourceTombstoned = 48,
+    /// An attestation hash is required when changing verification status from Verified or Rejected.
+    AttestationRequired = 49,
 }
 
 #[contract]
@@ -907,6 +915,16 @@ impl VaultRegistry {
         );
         if !allowed {
             return Err(Error::InvalidVerificationTransition);
+        }
+
+        // Require attestation hash when changing from Verified or Rejected
+        // (transitions that would overwrite existing attestation state)
+        if matches!(
+            old_status,
+            VerificationStatus::Verified | VerificationStatus::Rejected
+        ) && attestation_hash.is_none()
+        {
+            return Err(Error::AttestationRequired);
         }
 
         if let Some(hash) = &attestation_hash {
