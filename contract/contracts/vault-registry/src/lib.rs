@@ -1143,6 +1143,12 @@ impl VaultRegistry {
         Self::validate_resource_id(&id)?;
         Self::require_current_admin(&env, &admin)?;
         let mut resource = Self::load(&env, &id)?;
+        
+        // Check if resource is already disputed to prevent re-opening
+        if resource.state == ResourceState::Disputed {
+            return Err(Error::InvalidLifecycleTransition);
+        }
+        
         if !matches!(
             resource.state,
             ResourceState::Listed | ResourceState::Delisted | ResourceState::Frozen
