@@ -1029,7 +1029,27 @@ impl VaultRegistry {
                     succeeded.push_back(item.id.clone());
                 }
                 Err(e) => {
-                    // Record the failure index and error code
+                    // System-level errors that indicate a contract-wide
+                    // invariant violation must abort the entire batch, not be
+                    // silently recorded as a per-item failure.  These errors
+                    // can never be legitimately per-item:
+                    //
+                    // - ContractPaused: the registry was paused between the
+                    //   batch-level `require_not_paused` guard and this
+                    //   iteration (impossible in a single transaction, but the
+                    //   contract must stay correct if that ever changes).
+                    //   Treating it as a per-item failure diverges from the
+                    //   single-register path, which always aborts on pause.
+                    //
+                    // - CountOverflow: the global resource counter saturated
+                    //   u32::MAX.  Continuing after this would write indexes
+                    //   without updating the counter, corrupting registry state.
+                    if matches!(e, Error::ContractPaused | Error::CountOverflow) {
+                        return Err(e);
+                    }
+                    // All other errors are per-resource validation failures
+                    // (e.g. duplicate id, invalid price, invalid metadata) and
+                    // should be recorded so the batch can partially succeed.
                     failed.push_back((i, e as u32));
                 }
             }
