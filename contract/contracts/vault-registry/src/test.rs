@@ -9277,7 +9277,11 @@ fn storage_key_wire_contract(env: &Env) -> [(DataKey, &'static str, u32); 32] {
         (DataKey::PaymentTxHash(id.clone()), "PaymentTxHash", 2),
         (DataKey::AttestationHash(id.clone()), "AttestationHash", 2),
         (DataKey::PendingAdminExpiry, "PendingAdminExpiry", 1),
-        (DataKey::PendingAdminNominatedAt, "PendingAdminNominatedAt", 1),
+        (
+            DataKey::PendingAdminNominatedAt,
+            "PendingAdminNominatedAt",
+            1,
+        ),
         (DataKey::TagCount(id.clone()), "TagCount", 2),
         (DataKey::TopTags, "TopTags", 1),
         (
