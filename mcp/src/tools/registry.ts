@@ -24,7 +24,7 @@ import type { CatalogFilters } from "../catalogFilters.js";
 import { mapRegistryError, mapTransportError, mcpError, throwHttpError } from "../errorMapping.js";
 import { fetchWithTimeout } from "../httpTimeout.js";
 import { withRetry } from "../retry.js";
-import { parseMetadataHash } from "../metadataHash.js";
+import { parseMetadataHash, describeMetadataPointerHash } from "../metadataHash.js";
 import { mainnetAllowedFromEnv, formatMainnetDiagnostics } from "../mainnetGuardrails.js";
 import { mockRegistryCount, mockRegistryList, mockRegistryLookup } from "../mock.js";
 import { type AgentWallet } from "../profiles.js";
@@ -675,7 +675,9 @@ export async function pendingTransfer(resourceId: string): Promise<string> {
           } else {
             // Contract address — encode as C... strkey
             const { StrKey } = await import("@stellar/stellar-sdk");
-            proposedNewOwner = StrKey.encodeContract(Buffer.from(addr.contractId()));
+            proposedNewOwner = StrKey.encodeContract(
+              Buffer.from(addr.contractId() as unknown as Uint8Array),
+            );
           }
         }
       }
@@ -721,4 +723,46 @@ export async function pendingTransfer(resourceId: string): Promise<string> {
     null,
     2,
   );
+}
+
+/** Batch catalog lookup — resolve multiple resource ids in one call. */
+export async function batchCatalogLookupOutcome(
+  resourceIds: string[],
+  refetch?: boolean,
+): Promise<string> {
+  const ids = [...new Set(resourceIds)];
+  const results: Record<string, unknown>[] = [];
+  let found = 0;
+  let missing = 0;
+  for (const id of ids) {
+    try {
+      const res = await jsonFetch(`${BASE_URL}/resources/${id}/meta`);
+      if (res.ok) {
+        results.push({ id, found: true, ...res.data });
+        found++;
+      } else {
+        results.push({ id, found: false });
+        missing++;
+      }
+    } catch {
+      results.push({ id, found: false });
+      missing++;
+    }
+  }
+  return JSON.stringify({ requested: ids.length, found, missing, items: results }, null, 2);
+}
+
+/** Preview the metadata hash for a resource. */
+export async function previewMetadataHashOutcome(resourceId: string): Promise<string> {
+  const res = await jsonFetch(`${BASE_URL}/resources/${resourceId}/meta`);
+  if (!res.ok) {
+    return JSON.stringify(
+      { resourceId, pointer: null, report: null, message: "Resource not found." },
+      null,
+      2,
+    );
+  }
+  const pointer: string | null = typeof res.data?.metadata === "string" ? res.data.metadata : null;
+  const report = pointer ? describeMetadataPointerHash(pointer) : null;
+  return JSON.stringify({ resourceId, pointer, report }, null, 2);
 }

@@ -52,6 +52,18 @@ export const RECEIPT_CSV_COLUMNS = [
 
 export type ReceiptExportFormat = "json" | "csv" | "ndjson";
 
+/** Grouping dimension for receipt summaries. */
+export type ReceiptExportGrouping = "month";
+
+/** Per-month receipt summary used when groupBy is "month". */
+export interface MonthlyReceiptSummary {
+  /** UTC month in YYYY-MM format. */
+  month: string;
+  count: number;
+  totalAmount: string;
+  currency: typeof RECEIPT_CURRENCY;
+}
+
 /** One purchase, normalized for export. Absent values are explicit nulls. */
 export interface ExportedReceipt {
   resourceId: string;
@@ -273,6 +285,25 @@ function applyBounds(
   if (options.since) rows = rows.filter((r) => r.purchasedAt >= options.since!);
   if (options.until) rows = rows.filter((r) => r.purchasedAt <= options.until!);
   return options.limit !== undefined ? rows.slice(0, options.limit) : rows;
+}
+
+/** Group exported receipts by UTC calendar month, newest month first. */
+export function groupReceiptsByMonth(receipts: ExportedReceipt[]): MonthlyReceiptSummary[] {
+  const byMonth = new Map<string, ExportedReceipt[]>();
+  for (const r of receipts) {
+    const month = r.purchasedAt.slice(0, 7); // "YYYY-MM"
+    const bucket = byMonth.get(month) ?? [];
+    bucket.push(r);
+    byMonth.set(month, bucket);
+  }
+  return [...byMonth.entries()]
+    .sort(([a], [b]) => (a < b ? 1 : a > b ? -1 : 0))
+    .map(([month, rows]) => ({
+      month,
+      count: rows.length,
+      totalAmount: sumAmounts(rows),
+      currency: RECEIPT_CURRENCY,
+    }));
 }
 
 /**
