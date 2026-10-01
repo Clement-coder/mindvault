@@ -32,6 +32,7 @@ import {
   normalizeTimeoutMs,
   normalizeWaitFlag,
   pollPublishStatus,
+  publishStatusFromResponses,
   type PublishProgressReporter,
   type PublishStatusFetch,
 } from "../publishStatus.js";
@@ -200,33 +201,7 @@ export async function walletInfo(): Promise<string> {
 async function fetchPublishStatusData(resourceId: string): Promise<PublishStatusFetch> {
   const metaRes = await jsonFetch(`${BASE_URL}/resources/${resourceId}/meta`);
   const verRes = await jsonFetch(`${BASE_URL}/resources/${resourceId}/verification`);
-
-  if (metaRes.status === 404 && verRes.status === 404) {
-    throw new Error(
-      `Resource "${resourceId}" not found. Confirm the id from mindvault_publish or mindvault_browse.`,
-    );
-  }
-
-  if (!metaRes.ok && metaRes.status !== 404) {
-    throw new Error(
-      `Publish status meta failed [${metaRes.status}]: ${JSON.stringify(metaRes.data)}`,
-    );
-  }
-  if (!verRes.ok && verRes.status !== 404) {
-    throw new Error(
-      `Publish status verification failed [${verRes.status}]: ${JSON.stringify(verRes.data)}`,
-    );
-  }
-  if (!metaRes.ok && !verRes.ok) {
-    throw new Error(
-      `Resource "${resourceId}" not found. Confirm the id from mindvault_publish or mindvault_browse.`,
-    );
-  }
-
-  return {
-    meta: metaRes.ok ? metaRes.data : null,
-    verification: verRes.ok ? verRes.data : null,
-  };
+  return publishStatusFromResponses(resourceId, metaRes, verRes);
 }
 
 function sleepMs(ms: number): Promise<void> {

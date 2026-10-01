@@ -9123,6 +9123,7 @@ fn storage_key_variant(env: &Env, key: &DataKey) -> Symbol {
 /// upgrades. Adding a variant means adding a row here — the exhaustive match in
 /// `storage_key_migration_covers_every_variant` will not compile until you do.
 fn storage_key_wire_contract(env: &Env) -> [(DataKey, &'static str, u32); 37] {
+fn storage_key_wire_contract(env: &Env) -> [(DataKey, &'static str, u32); 31] {
     let id = String::from_str(env, "migkey");
     let who = Address::generate(env);
     [
@@ -9164,6 +9165,8 @@ fn storage_key_wire_contract(env: &Env) -> [(DataKey, &'static str, u32); 37] {
         (DataKey::PaymentTxHash(id.clone()), "PaymentTxHash", 2),
         (DataKey::AttestationHash(id.clone()), "AttestationHash", 2),
         (DataKey::PendingAdminExpiry, "PendingAdminExpiry", 1),
+        (DataKey::TagCount(id.clone()), "TagCount", 2),
+        (DataKey::TopTags, "TopTags", 1),
         (
             DataKey::CreatorListedCount(who.clone()),
             "CreatorListedCount",
@@ -9179,6 +9182,7 @@ fn storage_key_wire_contract(env: &Env) -> [(DataKey, &'static str, u32); 37] {
         (DataKey::PaymentRecipient(id.clone()), "PaymentRecipient", 2),
         (DataKey::TopTags, "TopTags", 1),
         (DataKey::TagCount(id), "TagCount", 2),
+        (DataKey::FlagModerator(id), "FlagModerator", 2),
     ]
 }
 
@@ -9221,6 +9225,7 @@ fn storage_key_migration_covers_every_variant() {
     assert_eq!(
         contract.len(),
         37,
+        31,
         "storage_key_wire_contract must list every DataKey variant"
     );
 
@@ -9252,6 +9257,8 @@ fn storage_key_migration_covers_every_variant() {
             DataKey::PaymentTxHash(_) => "PaymentTxHash",
             DataKey::AttestationHash(_) => "AttestationHash",
             DataKey::PendingAdminExpiry => "PendingAdminExpiry",
+            DataKey::TagCount(_) => "TagCount",
+            DataKey::TopTags => "TopTags",
             DataKey::CreatorListedCount(_) => "CreatorListedCount",
             DataKey::MemoHash(_) => "MemoHash",
             DataKey::FeeDestination => "FeeDestination",
@@ -9263,6 +9270,7 @@ fn storage_key_migration_covers_every_variant() {
             DataKey::PaymentRecipient(_) => "PaymentRecipient",
             DataKey::TopTags => "TopTags",
             DataKey::TagCount(_) => "TagCount",
+            DataKey::FlagModerator(_) => "FlagModerator",
         };
         assert_eq!(
             matched, *name,
@@ -10752,3 +10760,5 @@ include!("test/auth_fixtures.rs");
 include!("test/tombstone_read.rs");
 include!("test/creator_listed_count.rs");
 include!("test/memo_hash.rs");
+include!("test/flag_details.rs");
+include!("test/payment_idempotency.rs");

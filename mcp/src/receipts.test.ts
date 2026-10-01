@@ -161,7 +161,7 @@ describe("receiptsToCsv", () => {
       "resourceId,title,amount,currency,network,purchasedAt,txHash,receiptRef,explorerUrl",
     );
     expect(row.split(",")[0]).toBe("res-001");
-    expect(row.split(",")[3]).toBe("USDC");
+    expect(row.split(",")[3]).toBe('"USDC"');
   });
 
   it("quotes fields containing commas, quotes, or newlines (RFC 4180)", () => {

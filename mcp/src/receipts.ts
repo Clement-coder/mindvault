@@ -234,16 +234,18 @@ export function sumAmounts(receipts: ExportedReceipt[]): string {
 }
 
 /** Quote one CSV field per RFC 4180 (double the quotes, wrap when needed). */
-function csvField(value: string | null): string {
+function csvField(value: string | null, forceQuote = false): string {
   const text = value ?? "";
-  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  return forceQuote || /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
 /** Render export rows as an RFC 4180 CSV document with a header row. */
 export function receiptsToCsv(receipts: ExportedReceipt[]): string {
   const lines = [RECEIPT_CSV_COLUMNS.join(",")];
   for (const receipt of receipts) {
-    lines.push(RECEIPT_CSV_COLUMNS.map((column) => csvField(receipt[column])).join(","));
+    lines.push(
+      RECEIPT_CSV_COLUMNS.map((column) => csvField(receipt[column], column === "currency")).join(","),
+    );
   }
   return lines.join("\r\n");
 }

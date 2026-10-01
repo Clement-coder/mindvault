@@ -178,6 +178,8 @@ pub const METHOD_SCHEMA: &[(&str, &str)] = &[
     ("unflag_resource", "moderator"),
     ("set_flag_reason_hash", "moderator"),
     ("get_flag_reason_hash", "—"),
+    ("is_flagged", "—"),
+    ("flag_details", "—"),
     // ── Terms hashes ──────────────────────────────────────────────────────
     ("set_terms_hash", "creator"),
     ("get_terms_hash", "—"),
@@ -192,6 +194,7 @@ pub const METHOD_SCHEMA: &[(&str, &str)] = &[
     ("repair_tag_index", "admin"),
     // ── Payment receipts ──────────────────────────────────────────────────
     ("record_payment", "settler + payer"),
+    ("record_payment_idempotent", "settler + payer"),
     ("settle_payment", "settler"),
     ("get_payment", "—"),
     ("get_payment_receipt", "—"),
@@ -459,6 +462,18 @@ pub struct FlagEvent {
     pub reason: FlagReason,
 }
 
+/// A resource's moderation state in one read, returned by `flag_details`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct FlagDetails {
+    /// Active dispute flag, or `DisputeFlag::NoFlag`.
+    pub dispute_flag: DisputeFlag,
+    /// Hash set via `set_flag_reason_hash`, if any.
+    pub reason_hash: Option<String>,
+    /// Moderator whose flag, unflag, or reason hash write came last, if any.
+    pub last_moderator: Option<Address>,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct VerifierRotation {
@@ -633,6 +648,8 @@ pub enum DataKey {
     AttestationHash(String),
     /// Ledger sequence at which the pending admin nomination expires.
     PendingAdminExpiry,
+    TagCount(String),
+    TopTags,
     /// Number of `creator`'s resources currently in the `Listed` state. Kept
     /// in step with `ListedCount` on every listed-state transition and moved
     /// between owners on transfer, so it is the per-creator view of
@@ -660,6 +677,9 @@ pub enum DataKey {
     PaymentRecipient(String),
     TopTags,
     TagCount(String),
+    /// Moderator who last called `flag_resource`, `unflag_resource`, or
+    /// `set_flag_reason_hash` for a resource. Read back by `flag_details`.
+    FlagModerator(String),
 }
 
 /// Event data emitted when a resource's metadata pointer is updated.
@@ -2708,7 +2728,8 @@ impl VaultRegistry {
     /// address currently holding the settler role may call this.
     ///
     /// - `receipt_id` must be unique (max 64 bytes, non-empty); duplicate ids
-    ///   error `ReceiptAlreadyExists`.
+    ///   error `ReceiptAlreadyExists`. Use `record_payment_idempotent` for a
+    ///   retry-safe variant that returns the stored receipt instead.
     /// - `resource_id` must refer to an existing registered resource
     ///   (`NotFound` otherwise).
     /// - `amount` must be `> 0` (`InvalidPaymentAmount` otherwise).
@@ -2729,41 +2750,12 @@ impl VaultRegistry {
         amount: i128,
         tx_hash: String,
     ) -> Result<(), Error> {
-        settler.require_auth();
-        if !Self::is_settler(env.clone(), settler.clone()) {
-            return Err(Error::NotSettler);
-        }
-
-        Self::validate_receipt_id(&receipt_id)?;
-        payer.require_auth();
-        Self::require_not_paused(&env)?;
-        Self::validate_resource_id(&resource_id)?;
-        Self::validate_payment_amount(amount)?;
-        Self::validate_tx_hash(&tx_hash)?;
-
-        // The referenced resource must exist.
-        let resource = Self::load(&env, &resource_id)?;
-
-        // Consistency guard: payment amount must match the resource's current price.
-        if amount != resource.price {
-            return Err(Error::PaymentAmountMismatch);
-        }
-
-        let receipt_key = DataKey::PaymentReceipt(receipt_id.clone());
-        if env.storage().persistent().has(&receipt_key) {
-            return Err(Error::ReceiptAlreadyExists);
-        }
-        // A single Stellar transaction must settle at most one receipt: the
-        // tx hash is the ground truth the facilitator records against, so two
-        // receipts with the same tx_hash would double-count one payment.
-        let tx_hash_key = DataKey::PaymentTxHash(tx_hash.clone());
-        if env.storage().persistent().has(&tx_hash_key) {
-            return Err(Error::DuplicateTxHash);
-        }
-        let receipt = PaymentReceipt {
-            receipt_id: receipt_id.clone(),
-            resource_id: resource_id.clone(),
-            payer: payer.clone(),
+        Self::check_payment_args(
+            &env,
+            &settler,
+            &receipt_id,
+            &resource_id,
+            &payer,
             amount,
             state: PaymentState::Escrowed,
             tx_hash,
@@ -2792,7 +2784,52 @@ impl VaultRegistry {
 
         env.events()
             .publish((symbol_short!("payment"), receipt_id), receipt);
+            &tx_hash,
+        )?;
+        Self::write_payment(&env, receipt_id, resource_id, payer, amount, tx_hash)?;
         Ok(())
+    }
+
+    /// Retry-safe `record_payment`: same auth, validation, and pause rules,
+    /// but returns the stored receipt. If `receipt_id` is already recorded
+    /// with the same `resource_id`, `payer`, `amount`, and `tx_hash`, that
+    /// receipt is returned unchanged, whatever its state, with no write and
+    /// no event. The same id with different arguments still errors
+    /// `ReceiptAlreadyExists`.
+    pub fn record_payment_idempotent(
+        env: Env,
+        settler: Address,
+        receipt_id: String,
+        resource_id: String,
+        payer: Address,
+        amount: i128,
+        tx_hash: String,
+    ) -> Result<PaymentReceipt, Error> {
+        Self::check_payment_args(
+            &env,
+            &settler,
+            &receipt_id,
+            &resource_id,
+            &payer,
+            amount,
+            &tx_hash,
+        )?;
+        let stored: Option<PaymentReceipt> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PaymentReceipt(receipt_id.clone()));
+        match stored {
+            Some(receipt)
+                if receipt.resource_id == resource_id
+                    && receipt.payer == payer
+                    && receipt.amount == amount
+                    && receipt.tx_hash == tx_hash =>
+            {
+                Ok(receipt)
+            }
+            Some(_) => Err(Error::ReceiptAlreadyExists),
+            None => Self::write_payment(&env, receipt_id, resource_id, payer, amount, tx_hash),
+        }
     }
 
     /// Advance a payment receipt from `Escrowed` to `Settled`. Only an
@@ -3164,6 +3201,7 @@ impl VaultRegistry {
         let mut resource = Self::load(&env, &id)?;
         resource.dispute_flag = DisputeFlag::Flagged(reason);
         Self::save(&env, &mut resource);
+        Self::record_flag_moderator(&env, &id, &moderator);
         env.events().publish(
             (symbol_short!("flag"), id.clone()),
             FlagEvent {
@@ -3197,6 +3235,7 @@ impl VaultRegistry {
         let mut resource = Self::load(&env, &id)?;
         resource.dispute_flag = DisputeFlag::NoFlag;
         Self::save(&env, &mut resource);
+        Self::record_flag_moderator(&env, &id, &moderator);
         env.events()
             .publish((symbol_short!("unflag"), id.clone()), id);
         Ok(())
@@ -3250,6 +3289,7 @@ impl VaultRegistry {
         let key = DataKey::FlagReasonHash(id.clone());
         env.storage().persistent().set(&key, &reason_hash);
         Self::bump_persistent(&env, &key);
+        Self::record_flag_moderator(&env, &id, &moderator);
 
         env.events()
             .publish((symbol_short!("flagrsn"), id), (moderator, reason_hash));
@@ -3262,6 +3302,27 @@ impl VaultRegistry {
         Self::validate_resource_id(&id)?;
         let key = DataKey::FlagReasonHash(id);
         env.storage().persistent().get(&key).ok_or(Error::NotFound)
+    }
+
+    /// Whether a resource currently carries a moderator dispute flag.
+    /// Errors with `NotFound` if the resource does not exist.
+    pub fn is_flagged(env: Env, id: String) -> Result<bool, Error> {
+        Self::validate_resource_id(&id)?;
+        Ok(Self::load(&env, &id)?.dispute_flag.is_flagged())
+    }
+
+    /// Dispute flag, reason hash, and last acting moderator for a resource in
+    /// one read. Errors with `NotFound` if the resource does not exist; a
+    /// resource no moderator has touched returns `NoFlag` and two `None`s.
+    pub fn flag_details(env: Env, id: String) -> Result<FlagDetails, Error> {
+        Self::validate_resource_id(&id)?;
+        let resource = Self::load(&env, &id)?;
+        let storage = env.storage().persistent();
+        Ok(FlagDetails {
+            dispute_flag: resource.dispute_flag,
+            reason_hash: storage.get(&DataKey::FlagReasonHash(id.clone())),
+            last_moderator: storage.get(&DataKey::FlagModerator(id)),
+        })
     }
 
     /// Extend the TTL of a resource's persistent storage entry.
@@ -3440,6 +3501,88 @@ impl VaultRegistry {
             return Err(Error::InvalidTxHash);
         }
         Ok(())
+    }
+
+    /// Auth, role, pause, and argument checks shared by `record_payment` and
+    /// `record_payment_idempotent`, in the order `record_payment` applies them.
+    fn check_payment_args(
+        env: &Env,
+        settler: &Address,
+        receipt_id: &String,
+        resource_id: &String,
+        payer: &Address,
+        amount: i128,
+        tx_hash: &String,
+    ) -> Result<(), Error> {
+        settler.require_auth();
+        if !Self::is_settler(env.clone(), settler.clone()) {
+            return Err(Error::NotSettler);
+        }
+
+        Self::validate_receipt_id(receipt_id)?;
+        payer.require_auth();
+        Self::require_not_paused(env)?;
+        Self::validate_resource_id(resource_id)?;
+        Self::validate_payment_amount(amount)?;
+        Self::validate_tx_hash(tx_hash)
+    }
+
+    /// Store a new `Escrowed` receipt with its secondary indexes and emit the
+    /// `payment` event. Callers run `check_payment_args` first.
+    fn write_payment(
+        env: &Env,
+        receipt_id: String,
+        resource_id: String,
+        payer: Address,
+        amount: i128,
+        tx_hash: String,
+    ) -> Result<PaymentReceipt, Error> {
+        // The referenced resource must exist.
+        let resource = Self::load(env, &resource_id)?;
+
+        // Consistency guard: payment amount must match the resource's current price.
+        if amount != resource.price {
+            return Err(Error::PaymentAmountMismatch);
+        }
+
+        let receipt_key = DataKey::PaymentReceipt(receipt_id.clone());
+        if env.storage().persistent().has(&receipt_key) {
+            return Err(Error::ReceiptAlreadyExists);
+        }
+        // A single Stellar transaction must settle at most one receipt: the
+        // tx hash is the ground truth the facilitator records against, so two
+        // receipts with the same tx_hash would double-count one payment.
+        let tx_hash_key = DataKey::PaymentTxHash(tx_hash.clone());
+        if env.storage().persistent().has(&tx_hash_key) {
+            return Err(Error::DuplicateTxHash);
+        }
+        let receipt = PaymentReceipt {
+            receipt_id: receipt_id.clone(),
+            resource_id: resource_id.clone(),
+            payer: payer.clone(),
+            amount,
+            state: PaymentState::Escrowed,
+            tx_hash,
+            recorded_at: env.ledger().sequence(),
+            ledger: env.ledger().sequence(),
+        };
+
+        env.storage().persistent().set(&receipt_key, &receipt);
+        Self::bump_persistent(env, &receipt_key);
+
+        // Secondary indexes: `(resource_id, payer)` -> most recent receipt id
+        // (for `get_payment_receipt`), and `tx_hash` -> receipt id (enforces
+        // one receipt per Stellar settlement transaction).
+        let index_key = DataKey::PaymentIndex(resource_id, payer);
+        env.storage().persistent().set(&index_key, &receipt_id);
+        Self::bump_persistent(env, &index_key);
+
+        env.storage().persistent().set(&tx_hash_key, &receipt_id);
+        Self::bump_persistent(env, &tx_hash_key);
+
+        env.events()
+            .publish((symbol_short!("payment"), receipt_id), receipt.clone());
+        Ok(receipt)
     }
 
     fn validate_resource_id(id: &String) -> Result<(), Error> {
@@ -3719,6 +3862,13 @@ impl VaultRegistry {
             .persistent()
             .get(&DataKey::Resource(id.clone()))
             .ok_or(Error::NotFound)
+    }
+
+    /// Remember `moderator` as the last to act on `id`'s moderation state.
+    fn record_flag_moderator(env: &Env, id: &String, moderator: &Address) {
+        let key = DataKey::FlagModerator(id.clone());
+        env.storage().persistent().set(&key, moderator);
+        Self::bump_persistent(env, &key);
     }
 
     fn save(env: &Env, resource: &mut Resource) {

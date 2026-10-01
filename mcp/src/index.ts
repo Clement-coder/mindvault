@@ -24,7 +24,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { listCatalogResources, readCatalogResource } from "./catalogResources.js";
 import { PROMPT_DEFINITIONS, getPrompt } from "./prompts.js";
-import { createProgressEmitter } from "./progress.js";
+import { createProgressEmitter, scopeProgressToRequest } from "./progress.js";
 import { truncateResponse } from "./truncation.js";
 import { applyPreviewLimits, serializePreview } from "./previewLimits.js";
 import { createEd25519Signer } from "@x402/stellar";
@@ -110,6 +110,7 @@ import {
   normalizeTimeoutMs,
   normalizeWaitFlag,
   pollPublishStatus,
+  publishStatusFromResponses,
   type PublishProgressReporter,
   type PublishStatusFetch,
 } from "./publishStatus.js";
@@ -123,7 +124,10 @@ import {
 } from "./resourceSubscriptionTool.js";
 import { type ApiResponse } from "./apiResponse.js";
 import { safeErrorMessage, safeLog } from "./redaction.js";
-import { assertAutoPaymentWithinCeiling, assertTransactionFeeWithinCeiling } from "./paymentCeiling.js";
+import {
+  assertAutoPaymentWithinCeiling,
+  assertTransactionFeeWithinCeiling,
+} from "./paymentCeiling.js";
 import {
   compareUsdc,
   normalizeUsdcBalance,
@@ -332,8 +336,7 @@ export function _setAgentWallet(w: AgentWallet | null): void {
   if (w) {
     activeProfile().wallet = w;
     bindActiveProfileToNetwork();
-  }
-  else delete activeProfile().wallet;
+  } else delete activeProfile().wallet;
 }
 export function _setAgentApiKey(k: string | null): void {
   if (k) activeProfile().apiKey = k;
@@ -1944,33 +1947,7 @@ export async function preview(resourceId: string): Promise<string> {
 async function fetchPublishStatusData(resourceId: string): Promise<PublishStatusFetch> {
   const metaRes = await jsonFetch(`${BASE_URL}/resources/${resourceId}/meta`);
   const verRes = await jsonFetch(`${BASE_URL}/resources/${resourceId}/verification`);
-
-  if (metaRes.status === 404 && verRes.status === 404) {
-    throw new Error(
-      `Resource "${resourceId}" not found. Confirm the id from mindvault_publish or mindvault_browse.`,
-    );
-  }
-
-  if (!metaRes.ok && metaRes.status !== 404) {
-    throw new Error(
-      `Publish status meta failed [${metaRes.status}]: ${JSON.stringify(metaRes.data)}`,
-    );
-  }
-  if (!verRes.ok && verRes.status !== 404) {
-    throw new Error(
-      `Publish status verification failed [${verRes.status}]: ${JSON.stringify(verRes.data)}`,
-    );
-  }
-  if (!metaRes.ok && !verRes.ok) {
-    throw new Error(
-      `Resource "${resourceId}" not found. Confirm the id from mindvault_publish or mindvault_browse.`,
-    );
-  }
-
-  return {
-    meta: metaRes.ok ? metaRes.data : null,
-    verification: verRes.ok ? verRes.data : null,
-  };
+  return publishStatusFromResponses(resourceId, metaRes, verRes);
 }
 
 function sleepMs(ms: number): Promise<void> {
@@ -2232,8 +2209,32 @@ export async function buy(
   intervalMs?: unknown,
 ): Promise<string> {
   if (dryRun) {
+    const initialDryRun = dryRunBuy(
+      resourceId,
+      NETWORK,
+      BASE_URL,
+      !!activeProfile().wallet,
+      estimatedPrice ?? null,
+    );
+    if (!initialDryRun.validation.resourceId.valid) {
+      return JSON.stringify(initialDryRun, null, 2);
+    }
+
+    const meta = await jsonFetch(`${BASE_URL}/resources/${resourceId}/meta`);
+    if (!meta.ok || meta.data?.price == null) {
+      throw new Error(
+        "Automatic payment blocked because the resource price could not be determined; no x402 payment was submitted.",
+      );
+    }
+    assertAutoPaymentWithinCeiling({ price: meta.data.price, maxAutoPayUsdc });
     return JSON.stringify(
-      dryRunBuy(resourceId, NETWORK, BASE_URL, !!activeProfile().wallet, estimatedPrice ?? null),
+      dryRunBuy(
+        resourceId,
+        NETWORK,
+        BASE_URL,
+        !!activeProfile().wallet,
+        String(meta.data.price),
+      ),
       null,
       2,
     );
@@ -3887,13 +3888,19 @@ async function dispatchToolOutcome(
             throw new Error(`mindvault_publish_batch: items[${i}] must be an object.`);
           }
           if (typeof item.title !== "string" || item.title.trim() === "") {
-            throw new Error(`mindvault_publish_batch: items[${i}].title must be a non-empty string.`);
+            throw new Error(
+              `mindvault_publish_batch: items[${i}].title must be a non-empty string.`,
+            );
           }
           if (typeof item.price !== "string" || item.price.trim() === "") {
-            throw new Error(`mindvault_publish_batch: items[${i}].price must be a non-empty string.`);
+            throw new Error(
+              `mindvault_publish_batch: items[${i}].price must be a non-empty string.`,
+            );
           }
           if (typeof item.externalUrl !== "string" || item.externalUrl.trim() === "") {
-            throw new Error(`mindvault_publish_batch: items[${i}].externalUrl must be a non-empty string.`);
+            throw new Error(
+              `mindvault_publish_batch: items[${i}].externalUrl must be a non-empty string.`,
+            );
           }
           return {
             title: item.title,
@@ -4084,13 +4091,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
   const { name, arguments: args = {} } = request.params;
   const progressToken = request.params._meta?.progressToken;
-  const onProgress =
+  // Settled in `finally`, before the result is returned, so every progress
+  // notification for this call goes out ahead of it and none after (#841).
+  const progress =
     progressToken != null
-      ? createProgressEmitter({ token: progressToken, send: extra.sendNotification })
+      ? scopeProgressToRequest(
+          createProgressEmitter({ token: progressToken, send: extra.sendNotification }),
+        )
       : undefined;
   try {
     const result = await measureTool(metrics, name, () =>
-      dispatchToolOutcome(name, args, onProgress),
+      dispatchToolOutcome(name, args, progress?.emit),
     );
     // Opt-in structured telemetry stream (#891): one OTLP line to stderr per
     // tool call when MINDVAULT_METRICS_EXPORT_CONSOLE is set, so a log
@@ -4106,6 +4117,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       isError: true,
       ...(mapped ? { structuredContent: { troubleshooting: troubleshootingHint(mapped) } } : {}),
     };
+  } finally {
+    await progress?.settle();
   }
 });
 
