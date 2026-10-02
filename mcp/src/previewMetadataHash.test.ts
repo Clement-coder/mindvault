@@ -18,6 +18,8 @@ import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { Errors as RegistryErrors } from "@mindvault/registry-client";
+import type { IntegrationHarness } from "./integrationHarness.js";
 
 // Controllable registry fake: "ok" resolves with `metadata`, "contract"
 // surfaces a registry error (matched against Errors[2] for not-found),
@@ -61,10 +63,7 @@ process.env.USERPROFILE = harnessHome;
 
 const { server } = await import("./index.js");
 const { describeMetadataPointerHash } = await import("./metadataHash.js");
-const { Errors as RegistryErrors } = await import("@mindvault/registry-client");
-const { startIntegrationHarness, type IntegrationHarness } = await import(
-  "./integrationHarness.js"
-);
+const { startIntegrationHarness } = await import("./integrationHarness.js");
 
 const SHA256 = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
 

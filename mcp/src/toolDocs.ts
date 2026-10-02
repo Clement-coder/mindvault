@@ -46,6 +46,8 @@ export function groupOf(name: string): string {
       "mindvault_publish",
       "mindvault_publish_status",
       "mindvault_buy",
+      "mindvault_buy_lease",
+      "mindvault_lease_status",
     ].includes(name)
   )
     return "Publishing & Buying";

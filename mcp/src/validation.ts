@@ -33,6 +33,7 @@ import { REGISTRY_LIST_MAX_LIMIT } from "./registryPagination.js";
 import { RECEIPT_EXPORT_MAX_LIMIT } from "./receipts.js";
 import { DEBUG_BUNDLE_MAX_AUDIT_LINES } from "./debugBundleSchema.js";
 import { TOOL_DEFINITIONS } from "./tools.js";
+import { MAX_SETTLEMENT_TIMEOUT_MS, MIN_SETTLEMENT_INTERVAL_MS } from "./settlement.js";
 
 // ── Spec model ────────────────────────────────────────────────────────────────
 
@@ -318,6 +319,18 @@ export const TOOL_ARGUMENT_SPECS: Record<string, ToolArgumentSpec> = {
     resourceId: RESOURCE_ID,
     confirmMainnet: CONFIRM_MAINNET,
     confirmPaid: CONFIRM_PAID,
+  },
+  mindvault_buy_lease: {
+    resourceId: RESOURCE_ID,
+    tier: { kind: "enum", required: true, values: ["hour", "day", "week"] },
+    dryRun: DRY_RUN,
+    maxAutoPayUsdc: { kind: "string", maxLength: 32 },
+    confirmMainnet: CONFIRM_MAINNET,
+    confirmPaid: CONFIRM_PAID,
+  },
+  mindvault_lease_status: {
+    resourceId: RESOURCE_ID,
+    holder: STELLAR_ADDRESS,
   },
   mindvault_agent_status: {},
   mindvault_registry_info: {},

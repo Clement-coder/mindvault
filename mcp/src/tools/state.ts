@@ -1,4 +1,5 @@
 import { existsSync, unlinkSync } from "fs";
+import { createRegistryClient } from "@mindvault/registry-client";
 import {
   activeProfile,
   applyRestoredState,
@@ -10,6 +11,10 @@ import {
   STATE_FILE,
   activeProfileName,
   NETWORK,
+  REGISTRY_CONTRACT_ID,
+  REGISTRY_NETWORK_PASSPHRASE,
+  SOROBAN_RPC_URL,
+  requireWallet,
 } from "../runtime.js";
 import { DEFAULT_PROFILE, isValidProfileName } from "../profiles.js";
 import {
@@ -18,6 +23,8 @@ import {
   restoreState as restoreStateFromBackup,
 } from "../stateBackup.js";
 import { formatResetPreview, isResetConfirmed } from "../resetGuard.js";
+import { mapRegistryError, mcpError } from "../errorMapping.js";
+import { assertMainnetMutationAllowed } from "../mainnetGuardrails.js";
 
 export function backupState(passphrase: string, confirm: unknown = false): string {
   if (!isResetConfirmed(confirm)) {
@@ -111,4 +118,52 @@ export function checkStatePermissionsTool(): string {
     result.message,
   ].filter((l): l is string => l !== null);
   return lines.join("\n");
+}
+
+/** Get or set a creator's on-chain terms hash. */
+export async function publisherTerms(
+  operation: string,
+  creator?: string,
+  termsHash?: string,
+  confirmMainnet?: boolean,
+): Promise<string> {
+  const wallet = requireWallet();
+  const client = createRegistryClient({
+    contractId: REGISTRY_CONTRACT_ID,
+    networkPassphrase: REGISTRY_NETWORK_PASSPHRASE,
+    rpcUrl: SOROBAN_RPC_URL,
+    publicKey: wallet.publicKey,
+  }) as any;
+
+  if (operation === "get") {
+    const address = creator ?? wallet.publicKey;
+    try {
+      const result = await client.get_terms_hash({ creator: address });
+      const hash: string | null = result?.result ?? null;
+      return JSON.stringify({ creator: address, termsHash: hash, found: hash !== null }, null, 2);
+    } catch (err: any) {
+      throw mcpError(
+        mapRegistryError({ operation: "get_terms_hash", message: String(err), source: "soroban" }),
+      );
+    }
+  }
+
+  if (operation === "set") {
+    if (!termsHash) throw new Error("termsHash is required for set.");
+    assertMainnetMutationAllowed(NETWORK, "mindvault_terms", { confirmMainnet });
+    try {
+      const tx = await client.set_terms_hash(
+        { creator: wallet.publicKey, terms_hash: termsHash },
+        { simulate: false },
+      );
+      await tx.signAndSend();
+      return JSON.stringify({ status: "success", creator: wallet.publicKey, termsHash }, null, 2);
+    } catch (err: any) {
+      throw mcpError(
+        mapRegistryError({ operation: "set_terms_hash", message: String(err), source: "soroban" }),
+      );
+    }
+  }
+
+  throw new Error(`Unknown operation "${operation}". Use "get" or "set".`);
 }

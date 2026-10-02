@@ -16,6 +16,16 @@ import {
   recordPurchase,
 } from "./purchaseHistory.js";
 
+// explorerTxUrl reads HORIZON_URL to build the base explorer URL.
+// Set it to the canonical Stellar Expert base so URL assertions are deterministic.
+const ORIGINAL_HORIZON_URL = process.env.HORIZON_URL;
+beforeEach(() => {
+  process.env.HORIZON_URL = "https://stellar.expert";
+});
+afterEach(() => {
+  if (ORIGINAL_HORIZON_URL === undefined) delete process.env.HORIZON_URL;
+  else process.env.HORIZON_URL = ORIGINAL_HORIZON_URL;
+});
 describe("purchaseHistory", () => {
   let dir: string;
 
@@ -64,7 +74,7 @@ describe("purchaseHistory", () => {
     expect(listed[0].resourceId).toBe("res-b");
     expect(listed[1].resourceId).toBe("res-a");
 
-    const toolOut = JSON.parse(purchaseHistoryTool({}));
+    const toolOut = JSON.parse(formatPurchaseHistory(listPurchases(), {}, "testnet"));
     expect(toolOut.count).toBe(2);
     expect(toolOut.purchases[0].receiptRef).toBe("pay-b");
     expect(toolOut.purchases[0].title).toBe("Dataset B");
@@ -159,5 +169,84 @@ describe("purchaseHistory", () => {
     expect(() => normalizePurchaseHistoryFilter({ query: 7 as unknown as string })).toThrow(
       /Invalid query filter/,
     );
+  });
+
+  it("includes a pre-resolved explorerUrl for each receipt with a txHash", () => {
+    recordPurchase({
+      resourceId: "res-a",
+      amount: "1.00",
+      network: "stellar:testnet",
+      txHash: "abc123",
+      receiptRef: "pay-a",
+      timestamp: "2026-01-01T00:00:00.000Z",
+    });
+
+    const out = JSON.parse(formatPurchaseHistory(listPurchases(), {}, "testnet"));
+    expect(out.purchases[0].explorerUrl).toMatch(/abc123/);
+    expect(out.purchases[0].explorerUrl).toMatch(/^https?:\/\//);
+  });
+
+  it("sets explorerUrl to null when txHash is null", () => {
+    recordPurchase({
+      resourceId: "res-b",
+      amount: "2.00",
+      network: "stellar:testnet",
+      txHash: null,
+      receiptRef: null,
+      timestamp: "2026-01-02T00:00:00.000Z",
+    });
+
+    const out = JSON.parse(formatPurchaseHistory(listPurchases(), {}, "testnet"));
+    expect(out.purchases[0].explorerUrl).toBeNull();
+  });
+
+  it("includes explorerUrl on all receipts when listing multiple", () => {
+    recordPurchase({
+      resourceId: "res-c",
+      amount: "3.00",
+      network: "stellar:testnet",
+      txHash: "hash-c",
+      receiptRef: "pay-c",
+      timestamp: "2026-01-03T00:00:00.000Z",
+    });
+    recordPurchase({
+      resourceId: "res-d",
+      amount: "4.00",
+      network: "stellar:testnet",
+      txHash: null,
+      receiptRef: null,
+      timestamp: "2026-01-04T00:00:00.000Z",
+    });
+
+    const out = JSON.parse(formatPurchaseHistory(listPurchases(), {}, "testnet"));
+    expect(out.count).toBe(2);
+    // newest first: res-d has no hash
+    expect(out.purchases[0].explorerUrl).toBeNull();
+    // res-c has a hash
+    expect(out.purchases[1].explorerUrl).toMatch(/hash-c/);
+  });
+
+  it("formatPurchaseHistory on empty list does not emit explorerUrl rows", () => {
+    const out = JSON.parse(formatPurchaseHistory([]));
+    expect(out.purchases).toEqual([]);
+    expect(out.message).toBeDefined();
+  });
+
+  it("explorerUrl contains the network segment for the injected network", () => {
+    recordPurchase({
+      resourceId: "res-e",
+      amount: "1.00",
+      network: "stellar:pubnet",
+      txHash: "mainhash",
+      receiptRef: null,
+      timestamp: "2026-01-05T00:00:00.000Z",
+    });
+
+    const testnetOut = JSON.parse(formatPurchaseHistory(listPurchases(), {}, "testnet"));
+    expect(testnetOut.purchases[0].explorerUrl).toContain("testnet");
+
+    const mainnetOut = JSON.parse(formatPurchaseHistory(listPurchases(), {}, "public"));
+    expect(mainnetOut.purchases[0].explorerUrl).toContain("public");
+    expect(mainnetOut.purchases[0].explorerUrl).toContain("mainhash");
   });
 });
