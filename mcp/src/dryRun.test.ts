@@ -287,3 +287,113 @@ describe("dryRunOnchain – result structure", () => {
     expect(result.steps).toContain("4. Submit signed transaction via Soroban RPC");
   });
 });
+
+describe("dryRunPublish – live fee and balance (new fields)", () => {
+  const baseUrl = "https://example.com";
+  const network = "stellar:testnet";
+  const input: DryRunPublishInput = {
+    title: "Test Resource",
+    price: "5.00",
+    externalUrl: "https://example.com/data",
+  };
+
+  it("uses DEFAULT_VERIFICATION_FEE when no live fee provided", () => {
+    const result = dryRunPublish(input, network, baseUrl, true, true, {});
+    expect(result.intentions.estimatedVerificationFee).toBe("~0.10");
+    expect(result.intentions.verificationFeeSource).toBe("default");
+  });
+
+  it("uses live fee from /agent/status when provided", () => {
+    const result = dryRunPublish(input, network, baseUrl, true, true, {
+      verificationFee: 0.01,
+    });
+    expect(result.intentions.estimatedVerificationFee).toBe("0.01");
+    expect(result.intentions.verificationFeeSource).toBe("live");
+    expect(result.intentions.verificationEndpoint).toContain("/verify-content");
+  });
+
+  it("includes usdcBalance from live read when provided", () => {
+    const result = dryRunPublish(input, network, baseUrl, true, true, {
+      usdcBalance: "100.50",
+    });
+    expect(result.intentions.requiredWalletState.usdcBalance).toBe("100.50");
+  });
+
+  it("coversVerificationFee is true when balance >= fee", () => {
+    const result = dryRunPublish(input, network, baseUrl, true, true, {
+      verificationFee: 10,
+      usdcBalance: "100.00",
+    });
+    expect(result.intentions.requiredWalletState.coversVerificationFee).toBe(true);
+  });
+
+  it("coversVerificationFee is false when balance < fee", () => {
+    const result = dryRunPublish(input, network, baseUrl, true, true, {
+      verificationFee: 100,
+      usdcBalance: "10.00",
+    });
+    expect(result.intentions.requiredWalletState.coversVerificationFee).toBe(false);
+  });
+
+  it("coversVerificationFee is null when no live fee or no balance", () => {
+    const r1 = dryRunPublish(input, network, baseUrl, true, true, { usdcBalance: "10.00" });
+    expect(r1.intentions.requiredWalletState.coversVerificationFee).toBeNull();
+
+    const r2 = dryRunPublish(input, network, baseUrl, true, true, { verificationFee: 10 });
+    expect(r2.intentions.requiredWalletState.coversVerificationFee).toBeNull();
+
+    const r3 = dryRunPublish(input, network, baseUrl, true, true, {});
+    expect(r3.intentions.requiredWalletState.coversVerificationFee).toBeNull();
+  });
+
+  it("includes warnings when live read failed", () => {
+    const result = dryRunPublish(input, network, baseUrl, true, true, {
+      readError: "connection refused",
+    });
+    expect(result.warnings).toContain(
+      "Live fee and balance could not be read: connection refused. Fee shown is the default, not a quote.",
+    );
+  });
+
+  it("includes warning when fee was not returned by /agent/status", () => {
+    const result = dryRunPublish(input, network, baseUrl, true, true, { usdcBalance: "100.00" });
+    expect(result.warnings).toContain(
+      "Verification fee was not returned by /agent/status; the default is shown, not a quote.",
+    );
+  });
+
+  it("includes warning when balance does not cover fee", () => {
+    const result = dryRunPublish(input, network, baseUrl, true, true, {
+      verificationFee: 100,
+      usdcBalance: "10.00",
+    });
+    expect(result.warnings).toContain(
+      "Wallet holds 10.00 USDC, which does not cover the 100 USDC verification fee. Publish will create the resource but stop before verification.",
+    );
+  });
+
+  it("includes warning when balance was read but fee was not", () => {
+    const result = dryRunPublish(input, network, baseUrl, true, true, { usdcBalance: "100.00" });
+    expect(result.warnings).toContain(
+      "Balance was read but the fee was not, so affordability could not be determined. Check with mindvault_agent_status.",
+    );
+  });
+
+  it("includes warning when no publisher API key", () => {
+    const result = dryRunPublish(input, network, baseUrl, true, false, {});
+    expect(result.warnings).toContain(
+      "No publisher API key in the active profile; run mindvault_register first.",
+    );
+  });
+
+  it("warnings array is present and can be empty", () => {
+    const result = dryRunPublish(input, network, baseUrl, true, true, {
+      verificationFee: 0.01,
+      usdcBalance: "100.00",
+    });
+    expect(Array.isArray(result.warnings)).toBe(true);
+    // With live fee, balance, and api key, no warnings
+    const feeWarning = result.warnings.find((w) => w.includes("fee"));
+    expect(feeWarning).toBeUndefined();
+  });
+});
