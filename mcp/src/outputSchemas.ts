@@ -296,6 +296,61 @@ export const REGISTER_ONCHAIN_OUTPUT_SCHEMA = {
   oneOf: [MUTATION_SUMMARY_SCHEMA, DRY_RUN_SCHEMA, TEXT_RESULT_SCHEMA],
 } as const;
 
+const LEASE_VIEW_SCHEMA = {
+  type: "object",
+  properties: {
+    resourceId: { type: "string" },
+    holder: { type: "string" },
+    tier: { type: "string", enum: ["hour", "day", "week"] },
+    state: { type: "string" },
+    startLedger: { type: "integer" },
+    expiryLedger: { type: "integer" },
+    amountStroops: { type: "string" },
+    amountUsdc: { type: "string" },
+    txHash: { type: "string" },
+    recordedAt: { type: "integer" },
+  },
+  required: ["resourceId", "holder", "tier", "state", "startLedger", "expiryLedger", "amountUsdc"],
+} as const;
+
+const LEASE_BUY_SUCCESS_SCHEMA = {
+  type: "object",
+  properties: {
+    status: { type: "string", const: "success" },
+    resourceId: { type: "string" },
+    tier: { type: "string" },
+    creator: { type: "string" },
+    priceStroops: { type: "string" },
+    priceUsdc: { type: "string" },
+    paymentTxHash: { type: "string" },
+    paymentExplorerUrl: { type: ["string", "null"] },
+    lease: LEASE_VIEW_SCHEMA,
+    next: { type: "string" },
+  },
+  required: ["status", "resourceId", "tier", "priceUsdc", "paymentTxHash", "lease"],
+} as const;
+
+export const LEASE_BUY_OUTPUT_SCHEMA = {
+  type: "object",
+  oneOf: [LEASE_BUY_SUCCESS_SCHEMA, DRY_RUN_SCHEMA, TEXT_RESULT_SCHEMA],
+} as const;
+
+export const LEASE_STATUS_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    source: { type: "string" },
+    resourceId: { type: "string" },
+    holder: { type: "string" },
+    found: { type: "boolean" },
+    active: { type: "boolean" },
+    lease: LEASE_VIEW_SCHEMA,
+    message: { type: "string" },
+    contract: { type: "string" },
+    network: { type: "string" },
+  },
+  required: ["source", "resourceId", "holder", "found", "active", "message"],
+} as const;
+
 export const PUBLISH_STATUS_OUTPUT_SCHEMA = {
   type: "object",
   properties: {

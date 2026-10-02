@@ -4539,6 +4539,19 @@ fn full_workflow_emits_exactly_the_documented_events() {
         &String::from_str(&env, "sha256anchor2"),
     )); // -> "anchrfail"
     record(&env, &client, &mut observed);
+    // Keep retrying past the back-off window until the pair's attempt cap is
+    // reached; the attempt that reaches it also emits "anchrxhst".
+    for _ in 1..MAX_ANCHOR_ATTEMPTS {
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + ANCHOR_RETRY_BACKOFF_LEDGERS);
+        assert!(!client.attempt_anchor_purchase_receipt(
+            &verifier,
+            &r0,
+            &buyer,
+            &String::from_str(&env, "sha256anchor2"),
+        )); // -> "anchrfail" (+ "anchrxhst" on the last one)
+        record(&env, &client, &mut observed);
+    }
     client.remove_verifier(&verifier); // -> "rmverif"
     record(&env, &client, &mut observed);
 
@@ -4564,6 +4577,9 @@ fn full_workflow_emits_exactly_the_documented_events() {
 
     let payer = Address::generate(&env);
     let workflow_receipt = String::from_str(&env, "wfrcpt1");
+    // Payments require a listed resource; r0 was delisted above.
+    client.set_listed(&r0, &true); // -> "setlisted"
+    record(&env, &client, &mut observed);
     client.record_payment(
         &settler,
         &workflow_receipt,
@@ -4574,6 +4590,20 @@ fn full_workflow_emits_exactly_the_documented_events() {
     ); // -> "payment"
     record(&env, &client, &mut observed);
     client.settle_payment(&settler, &workflow_receipt); // -> "settle"
+    record(&env, &client, &mut observed);
+    // Time-limited access leases: buy (pending), settle, revoke.
+    let lease_amount = client.lease_price(&r0, &LeaseTier::Hour);
+    client.buy_lease(
+        &bob,
+        &r0,
+        &LeaseTier::Hour,
+        &lease_amount,
+        &String::from_str(&env, "leasetx0"),
+    ); // -> "lease"
+    record(&env, &client, &mut observed);
+    client.settle_lease(&settler, &r0, &bob); // -> "leasesetl"
+    record(&env, &client, &mut observed);
+    client.revoke_lease(&r0, &bob); // -> "leaserevk"
     record(&env, &client, &mut observed);
     client.remove_settler(&settler); // -> "rmsettlr"
     record(&env, &client, &mut observed);
@@ -9795,6 +9825,10 @@ fn attempt_anchor_reports_empty_and_oversized_receipt_hash() {
         AnchorFailureReason::InvalidReceiptHash
     );
 
+    // The pair is now inside its back-off window; move past it before the
+    // second attempt so the oversized hash is judged on its own.
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + ANCHOR_RETRY_BACKOFF_LEDGERS);
     let too_long = String::from_str(&env, &"a".repeat(MAX_TX_HASH_LEN as usize + 1));
     assert!(!client.attempt_anchor_purchase_receipt(&service, &id, &buyer, &too_long));
     assert_eq!(

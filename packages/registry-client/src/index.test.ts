@@ -241,6 +241,18 @@ describe("generated bindings (drift guard)", () => {
     "transfer_ownership",
     "unflag_resource",
     "update_metadata",
+    "list_listed_page",
+    "list_by_dispute_status_page",
+    "list_by_creator_page",
+    "list_by_tag_page",
+    "get_anchor_attempts",
+    "buy_lease",
+    "record_lease",
+    "settle_lease",
+    "revoke_lease",
+    "get_lease",
+    "lease_is_active",
+    "lease_price",
   ];
 
   it("re-exports the generated Client and Errors", () => {

@@ -99,7 +99,7 @@ fn storage_footprint_report() {
     let max_id = register_max_size_resource(&env, &creator, &client);
     let typical_id = register_tagged(&env, &creator, &client, "typicalres", &["dataset"]);
     let tag_fixture_creator = Address::generate(&env);
-    for i in 0..(TOP_TAGS_CAP - MAX_TAGS as u32) {
+    for i in 0..(TOP_TAGS_CAP - MAX_TAGS) {
         let tag = format!("{:02}{}", i, "t".repeat(MAX_TAG_LEN as usize - 2));
         let id = format!("topfixture{:02}", i);
         register_tagged(
@@ -157,6 +157,24 @@ fn storage_footprint_report() {
         &max_id,
         &moderator,
         &String::from_str(&env, &"f".repeat(MAX_FLAG_REASON_HASH_LEN as usize)),
+    );
+    // A rejected anchor attempt leaves the pair's retry bookkeeping behind.
+    let retry_buyer = Address::generate(&env);
+    assert!(!client.attempt_anchor_purchase_receipt(
+        &verifier,
+        &max_id,
+        &retry_buyer,
+        &String::from_str(&env, ""),
+    ));
+    // A max-size lease: the widest tier and a max-length tx hash.
+    let lessee = Address::generate(&env);
+    let lease_amount = client.lease_price(&max_id, &LeaseTier::Week);
+    client.buy_lease(
+        &lessee,
+        &max_id,
+        &LeaseTier::Week,
+        &lease_amount,
+        &String::from_str(&env, &"l".repeat(MAX_TX_HASH_LEN as usize)),
     );
     env.ledger().set_timestamp(100);
     client.set_paused_until(&admin, &200);
@@ -230,6 +248,18 @@ fn storage_footprint_report() {
             DataKey::PurchaseReceipt(max_id.clone(), buyer.clone()),
             StorageKind::Persistent,
             480,
+        ),
+        (
+            "AnchorAttempts",
+            DataKey::AnchorAttempts(max_id.clone(), retry_buyer.clone()),
+            StorageKind::Persistent,
+            200,
+        ),
+        (
+            "Lease (max-size)",
+            DataKey::Lease(max_id.clone(), lessee.clone()),
+            StorageKind::Persistent,
+            640,
         ),
         (
             "FlagReasonHash",

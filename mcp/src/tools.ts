@@ -26,6 +26,8 @@ import {
   METRICS_OUTPUT_SCHEMA,
   NETWORK_PROFILE_OUTPUT_SCHEMA,
   ONCHAIN_MUTATION_OUTPUT_SCHEMA,
+  LEASE_BUY_OUTPUT_SCHEMA,
+  LEASE_STATUS_OUTPUT_SCHEMA,
   PENDING_TRANSFER_OUTPUT_SCHEMA,
   PREVIEW_OUTPUT_SCHEMA,
   PUBLISH_BUY_OUTPUT_SCHEMA,
@@ -450,6 +452,81 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: false,
+    },
+  },
+  {
+    name: "mindvault_buy_lease",
+    description:
+      "Buy a time-limited access lease on a resource instead of paying per request: pay the creator in USDC directly (hour, day, or week tier priced from the on-chain lease_price), then record the lease on the vault registry contract with the payment hash. The lease is Pending until a settler confirms the payment. Payments above MINDVAULT_MAX_AUTO_PAY_USDC require maxAutoPayUsdc. On mainnet, pass confirmMainnet: true (or set MINDVAULT_ALLOW_MAINNET=1). Pass dryRun: true to see the quote and steps without paying.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        resourceId: {
+          type: "string",
+          description:
+            "The resource ID to lease, from mindvault_browse or mindvault_search. Letters, digits, dot, dash, or underscore.",
+          examples: ["cm7x8y9z", "swcn98besxpp6t1u8e77fqz3"],
+        },
+        tier: {
+          type: "string",
+          enum: ["hour", "day", "week"],
+          description:
+            "Lease duration tier: hour (720 ledgers, 1x price), day (17280 ledgers, 5x), or week (120960 ledgers, 20x).",
+          examples: ["day"],
+        },
+        dryRun: {
+          type: "boolean",
+          description:
+            "Optional dry-run flag. When true, quotes the lease price and lists the steps without paying or writing on-chain.",
+        },
+        maxAutoPayUsdc: {
+          type: "string",
+          description:
+            "Explicit per-call maximum automatic payment in USDC. Required when the lease costs more than MINDVAULT_MAX_AUTO_PAY_USDC; must be at least the quoted price.",
+          examples: ["25.00"],
+        },
+        confirmMainnet: {
+          type: "boolean",
+          description:
+            "Required on mainnet (or set MINDVAULT_ALLOW_MAINNET=1). Explicitly confirm this payment on the public Stellar network.",
+        },
+        confirmPaid: { ...CONFIRM_PAID_PROPERTY },
+      },
+      required: ["resourceId", "tier"],
+    },
+    outputSchema: LEASE_BUY_OUTPUT_SCHEMA as unknown as Record<string, unknown>,
+    annotations: {
+      title: "Buy Access Lease",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+    },
+  },
+  {
+    name: "mindvault_lease_status",
+    description:
+      "Read the access lease recorded on the vault registry contract for a resource and holder (defaults to the agent wallet): tier, state, start and expiry ledgers, and whether it currently grants access. Read-only; no payment.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        resourceId: {
+          type: "string",
+          description: "The resource ID to inspect. Example: 'cm7x8y9z'",
+          examples: ["cm7x8y9z", "res-001"],
+        },
+        holder: {
+          type: "string",
+          description: "Optional holder address (G… key). Defaults to the active agent wallet.",
+        },
+      },
+      required: ["resourceId"],
+    },
+    outputSchema: LEASE_STATUS_OUTPUT_SCHEMA as unknown as Record<string, unknown>,
+    annotations: {
+      title: "Lease Status",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
     },
   },
   {

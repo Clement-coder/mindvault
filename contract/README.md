@@ -138,6 +138,25 @@ Clients should paginate by passing `next_cursor` back as `cursor`/`start` instea
 recomputing offsets from `items.len()`. `list(start, limit)` remains available and
 returns only the `items` body for existing callers.
 
+The per-creator and per-tag listings are backed by index vectors that can lose
+entries between pages (tombstone, ownership transfer), so their paged variants
+use an id-based cursor instead of a position:
+
+```rust
+pub enum IdCursor {
+    Start,                     // first page
+    After(u32, String, u32),   // resume after (position, last_id, created_at) of the last resource returned
+    End,                       // end-of-list (returned; passing it back yields an empty page)
+}
+
+pub struct IdPage {
+    pub items: Vec<Resource>,
+    pub next_cursor: IdCursor,
+}
+```
+
+See [Stable cursors for filtered listings](#stable-cursors-for-filtered-listings).
+
 ### Tag popularity
 
 `top_tags(limit)` returns `TagPopularity` entries sorted by descending
@@ -323,6 +342,14 @@ See [`docs/adr-fee-config.md`](../docs/adr-fee-config.md) for the full design ra
 | `attempt_anchor_purchase_receipt(service, resource_id, buyer, receipt_hash)` | `verifier`                                               | `service: Address`; `resource_id: String`; `buyer: Address`; `receipt_hash: String`                                                                                                                                                                  | `Result<bool, Error>`                  | Same anchor, but a rejected attempt emits `anchrfail` and returns `false` instead of reverting. Authorization failures still revert.                                                                                                                                                                     |
 | `override_purchase_receipt_anchor(admin, resource_id, buyer, new_receipt_hash)` | `admin`                                                  | `admin: Address`; `resource_id: String`; `buyer: Address`; `new_receipt_hash: String`                                                                                                                                                                | `Result<(), Error>`                    | Override an existing purchase receipt anchor. Errors `NotFound` if it does not exist. Emits `anchor`.                                                                                                                                                                                                  |
 | `get_purchase_receipt(resource_id, buyer)`                                   | —                                                        | `resource_id: String`; `buyer: Address`                                                                                                                                                                                                              | `Result<PurchaseReceiptAnchor, Error>` | Fetch a purchase receipt anchor. Errors `NotFound` if absent.                                                                                                                                                                                                                                            |
+| `get_anchor_attempts(resource_id, buyer)`                                    | —                                                        | `resource_id: String`; `buyer: Address`                                                                                                                                                                                                              | `Result<AnchorAttempts, Error>`        | Rejected `attempt_anchor_purchase_receipt` count and last-attempt ledger for the pair; both `0` when it was never rejected or its anchor has since been written.                                                                                                                                         |
+| `buy_lease(holder, resource_id, tier, amount, tx_hash)`                      | `holder`                                                 | `holder: Address`; `resource_id: String`; `tier: LeaseTier` — `Hour`, `Day`, or `Week`; `amount: i128` — must equal `lease_price(resource_id, tier)`; `tx_hash: String` — 1-128 bytes                                                                 | `Result<Lease, Error>`                 | Record a time-limited access lease in `Pending` state, to be confirmed by `settle_lease`. Requires a `Listed` resource (`ResourceNotMutable`), the exact lease price (`PaymentAmountMismatch`), and no pending or unexpired active lease for the pair (`AlreadyRegistered`). Emits `lease`.                |
+| `record_lease(settler, holder, resource_id, tier, amount, tx_hash)`          | `settler` + `holder`                                     | `settler: Address` — holder of the settler role; then as `buy_lease`                                                                                                                                                                                 | `Result<Lease, Error>`                 | Settler-recorded lease: the same checks as `buy_lease`, written directly in `Active` state because the settler has already confirmed the payment. Emits `lease`.                                                                                                                                         |
+| `settle_lease(settler, resource_id, holder)`                                 | `settler`                                                | `settler: Address`; `resource_id: String`; `holder: Address`                                                                                                                                                                                         | `Result<Lease, Error>`                 | Advance a `Pending` lease to `Active`. Errors `NotFound` without a lease and `InvalidPaymentTransition` if it is not `Pending`. Emits `leasesetl`.                                                                                                                                                        |
+| `revoke_lease(resource_id, holder)`                                          | `creator`                                                | `resource_id: String`; `holder: Address`                                                                                                                                                                                                             | `Result<Lease, Error>`                 | Revoke a `Pending` or `Active` lease; terminal and immediate. Errors `NotFound` without a lease and `InvalidPaymentTransition` if already `Revoked`. Emits `leaserevk`.                                                                                                                                  |
+| `get_lease(resource_id, holder)`                                             | —                                                        | `resource_id: String`; `holder: Address`                                                                                                                                                                                                             | `Result<Lease, Error>`                 | Fetch the lease recorded for the pair, whatever its state. Errors `NotFound` if none exists. Bumps the entry's TTL.                                                                                                                                                                                      |
+| `lease_is_active(resource_id, holder)`                                       | —                                                        | `resource_id: String`; `holder: Address`                                                                                                                                                                                                             | `bool`                                 | `true` while a lease exists for the pair, is `Active`, and the current ledger is below its `expiry_ledger`. Never errors.                                                                                                                                                                                 |
+| `lease_price(resource_id, tier)`                                             | —                                                        | `resource_id: String`; `tier: LeaseTier`                                                                                                                                                                                                             | `Result<i128, Error>`                  | The resource's current price times the tier multiplier (`LEASE_HOUR_MULTIPLIER` 1, `LEASE_DAY_MULTIPLIER` 5, `LEASE_WEEK_MULTIPLIER` 20). Errors `NotFound` for an unknown resource.                                                                                                                     |
 | `extend_resource_ttl(creator, resource_id)`                                  | `creator`                                                | `creator: Address`; `resource_id: String`                                                                                                                                                                                                            | `Result<(), Error>`                    | Refresh a resource's persistent storage TTL. Emits `ttlext`.                                                                                                                                                                                                                                             |
 | `add_settler(settler)`                                                       | `admin`                                                  | `settler: Address`                                                                                                                                                                                                                                   | `Result<(), Error>`                    | Grant the settler role. Emits `addsettlr`.                                                                                                                                                                                                                                                               |
 | `remove_settler(settler)`                                                    | `admin`                                                  | `settler: Address`                                                                                                                                                                                                                                   | `Result<(), Error>`                    | Revoke the settler role. Emits `rmsettlr`.                                                                                                                                                                                                                                                               |
@@ -557,7 +584,7 @@ if (page.next_cursor !== null) {
 
 | Code | Error                           | Description                                                                             |
 | ---- | ------------------------------- | --------------------------------------------------------------------------------------- |
-| `1`  | `AlreadyRegistered`             | A resource with the given `id` or the target verifier already exists.                  |
+| `1` | `AlreadyRegistered` | A resource with the given `id` or the target verifier already exists, or the holder already has a pending or unexpired active lease on the resource (`buy_lease` / `record_lease`). |
 | `2`  | `NotFound`                      | No resource (or terms hash, receipt, or old verifier) matches the given key.            |
 | `3`  | `InvalidPrice`                  | Price is `<= 0`, exceeds `MAX_PRICE`, or is not strictly greater than the active `royalty_bps`. |
 | `4`  | `MetadataTooLong`               | Metadata pointer exceeds `MAX_METADATA_POINTER_LEN` (512 bytes).                        |
@@ -586,7 +613,7 @@ if (page.next_cursor !== null) {
 | `27` | `AlreadyFlagged`                | Resource is already flagged as disputed.                                                |
 | `28` | `NotFlagged`                    | Resource is not currently flagged as disputed.                                          |
 | `29` | `InvalidLifecycleTransition`    | The requested lifecycle transition is not allowed from the current state.               |
-| `30` | `ResourceNotMutable`            | A frozen, disputed, or tombstoned resource cannot be changed by its creator.            |
+| `30` | `ResourceNotMutable` | A frozen, disputed, or tombstoned resource cannot be changed by its creator, and a resource that is not `Listed` (delisted, frozen, disputed, or tombstoned) cannot accept a payment (`record_payment`) or a lease (`buy_lease` / `record_lease`). |
 | `31` | `NetworkAlreadyInitialized`     | Network identifier has already been initialized for this contract instance.             |
 | `32` | `NetworkIdMismatch`             | Invocation network identifier does not match configured network ID.                     |
 | `33` | `NetworkNotInitialized`         | Network identifier has not been initialized.                                            |
@@ -796,6 +823,37 @@ The `settags` event emits both previous and next tags, enabling indexers
 to detect tag removals and reconcile state changes without requiring full history
 scans.
 
+### Stable cursors for filtered listings
+
+`list_listed`, `list_by_dispute_status`, `list_by_creator`, and `list_by_tag`
+return a bare `Vec<Resource>`, which tempts a client into computing the next
+`start` as `start + items.len()`. For the filtered catalog scans that count is
+wrong whenever a slot was skipped, and for any of them a state change between
+two pages (a dispute flag flipping, a resource being delisted) can skip or
+repeat an entry. The `*_page` variants fix the cursor domain instead:
+
+| Listing                                       | Cursor                    | Why it is stable                                                                                                                                                                                |
+| --------------------------------------------- | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list_page`, `list_listed_page`, `list_by_dispute_status_page`, `list_by_verification_status` | catalog index (`u32`)     | `Index(i)` slots are append-only and never renumbered, so `next_cursor` names a slot, not a count of matches. Each slot is visited once; its state at that moment decides whether it is returned. |
+| `list_by_creator_page`, `list_by_tag_page`    | `IdCursor` (id-based)     | The backing vectors shift when an entry is removed. The cursor records the last id returned; resuming re-finds it (or, if it was removed too, the first entry registered after it).              |
+
+A flag that flips between two `list_by_dispute_status_page` calls therefore
+lands the resource in at most one of them: the page whose scan reached its
+slot while the flag matched. The unpaged functions keep their signatures for
+existing callers; document their `start` as a catalog index, never as a match
+count.
+
+### Payments require a listed resource
+
+`record_payment` and `record_payment_idempotent` reject a resource that is not
+in the `Listed` state with `ResourceNotMutable`: a buyer must not be able to
+pay for content the creator has delisted or frozen, or that an admin has put
+under dispute or tombstoned. The check runs after the existence check
+(`NotFound`) and before the price consistency check. A retry of an already
+recorded receipt through `record_payment_idempotent` still returns the stored
+receipt after the resource leaves `Listed`: the guard applies to new receipts
+only. `buy_lease` and `record_lease` apply the same rule.
+
 ### Reporting anchor failures
 
 `anchor_purchase_receipt` returns an `Error` when an anchor cannot be written,
@@ -817,7 +875,30 @@ and a `false` return instead of reverting:
 Authorization is never downgraded to an event: a caller without the verifier
 role, or one supplying a malformed `resource_id`, still reverts, so an address
 that cannot anchor cannot write to the event log either. A rejected attempt
-writes no storage and leaves any existing anchor for the pair untouched.
+leaves any existing anchor for the pair untouched.
+
+Rejected attempts are counted per `(resource_id, buyer)` in
+`DataKey::AnchorAttempts`, readable through `get_anchor_attempts`, so a
+settlement job that keeps retrying a permanently failing pair is throttled
+instead of re-running the data checks on every ledger:
+
+| Situation                                                              | `AnchorFailureReason` | Effect                                                                              |
+| ---------------------------------------------------------------------- | --------------------- | ----------------------------------------------------------------------------------- |
+| Retry fewer than `ANCHOR_RETRY_BACKOFF_LEDGERS` (12) ledgers after the last rejection | `RetryTooSoon`        | `anchrfail`, `false`; nothing written, data checks not run                          |
+| `MAX_ANCHOR_ATTEMPTS` (5) rejections accumulated                       | `AttemptsExhausted`   | `anchrfail`, `false`; nothing written, data checks not run                          |
+| A data rejection that brings the count to `MAX_ANCHOR_ATTEMPTS`        | (the data reason)     | `anchrfail` plus one `anchrxhst` whose topics name the pair and whose data is the final `AnchorAttempts` |
+| An anchor is written for the pair (either entry point)                 | —                     | The pair's attempt history is deleted                                               |
+
+Both throttling reasons exist only on this reporting path;
+`AnchorFailureReason::as_error` maps them to `InvalidPaymentTransition` so the
+mapping stays total.
+
+```rust
+pub struct AnchorAttempts {
+    pub attempts: u32,            // rejected attempts so far, never above MAX_ANCHOR_ATTEMPTS
+    pub last_attempt_ledger: u32, // ledger of the most recent rejection
+}
+```
 
 ```rust
 pub struct AnchorFailure {
@@ -828,6 +909,59 @@ pub struct AnchorFailure {
     pub ledger: u32,               // ledger sequence the attempt was rejected at
 }
 ```
+
+### Time-limited access leases
+
+A lease is the on-chain half of the access-lease design: an entitlement
+"`holder` may access `resource_id` until `expiry_ledger`", keyed by
+`DataKey::Lease(resource_id, holder)`, with one lease per pair at a time.
+Settlement stays off-chain (USDC moves buyer to creator exactly as it does for
+per-request purchases); the registry records the window and lets anyone check
+it with a single read.
+
+```rust
+pub enum LeaseTier { Hour, Day, Week }
+pub enum LeaseState { Pending, Active, Revoked }
+
+pub struct Lease {
+    pub resource_id: String,
+    pub holder: Address,
+    pub tier: LeaseTier,
+    pub start_ledger: u32,  // ledger the window opened (the recording ledger)
+    pub expiry_ledger: u32, // first ledger at which access is gone
+    pub amount: i128,       // USDC stroops paid; equals lease_price at recording time
+    pub tx_hash: String,    // settlement transaction hash, 1-128 bytes
+    pub state: LeaseState,
+    pub recorded_at: u32,
+}
+```
+
+| Tier   | Duration (`LEASE_*_LEDGERS`)    | Price (`lease_price`)  |
+| ------ | ------------------------------- | ---------------------- |
+| `Hour` | 720 ledgers                     | 1 × per-request price  |
+| `Day`  | 17 280 ledgers                  | 5 × per-request price  |
+| `Week` | 120 960 ledgers                 | 20 × per-request price |
+
+Two entry points write a lease. `buy_lease` is the holder's own path: it
+records the lease as `Pending` with the hash of the USDC transfer the holder
+made, and a settler promotes it with `settle_lease` once that transfer is
+confirmed. `record_lease` is the settler's path for payments it has already
+confirmed (an x402 settlement, for example) and writes the lease `Active`
+directly. Both require a `Listed` resource, `amount == lease_price`, and no
+pending or unexpired active lease for the pair; an expired or revoked lease
+is replaced.
+
+```text
+Pending --settle_lease--> Active --(ledger >= expiry_ledger)--> expired
+   |                        |
+   +------revoke_lease------+--> Revoked (terminal)
+```
+
+`lease_is_active` is the read a paywall needs: `true` only while the lease is
+`Active` and the current ledger is below `expiry_ledger`. Expiry is purely
+ledger-based; nothing renews a lease. The creator revokes with `revoke_lease`,
+which takes effect in the same ledger. `get_lease` returns the record in any
+state for audit.
 
 ### Retry-safe payment recording
 
@@ -907,6 +1041,10 @@ For feature detection, `resource_schema_version()` returns
 | `MAX_TX_HASH_LEN`          | `128`                        | Maximum length of a payment receipt tx hash in bytes. |
 | `MAX_PRICE`                | `1_000_000_000_000_000_000`  | Maximum price in USDC stroops (1 trillion USDC).      |
 | `LIST_PAGE_CAP`            | `20`                         | Maximum items returned per page by all `list*` calls. |
+| `MAX_ANCHOR_ATTEMPTS`      | `5`                          | Rejected `attempt_anchor_purchase_receipt` calls allowed per `(resource_id, buyer)` before the pair fails fast. |
+| `ANCHOR_RETRY_BACKOFF_LEDGERS` | `12`                     | Minimum ledgers between two rejected anchor attempts for the same pair. |
+| `LEASE_HOUR_LEDGERS` / `LEASE_DAY_LEDGERS` / `LEASE_WEEK_LEDGERS` | `720` / `17280` / `120960` | Lease duration per `LeaseTier`. |
+| `LEASE_HOUR_MULTIPLIER` / `LEASE_DAY_MULTIPLIER` / `LEASE_WEEK_MULTIPLIER` | `1` / `5` / `20` | Lease price multiplier over the per-request price, per `LeaseTier`. |
 | `RESOURCE_SCHEMA_VERSION`  | `2`                          | Current `Resource` schema version (tags added in v2). |
 | `REGISTRY_NAME`            | `"mindvault-vault-registry"` | Stable name returned by `registry_info()`.            |
 
@@ -935,6 +1073,10 @@ must require an explicit deployment guard.
 | `MAX_TX_HASH_LEN`          | `128`                        | Maximum length of a payment receipt tx hash, in bytes.                                                                                       |
 | `MAX_PRICE`                | `10^18`                      | Maximum price, in USDC stroops.                                                                                                              |
 | `LIST_PAGE_CAP`            | `20`                         | Maximum items returned per page by all `list*` calls.                                                                                        |
+| `MAX_ANCHOR_ATTEMPTS`      | `5`                          | Rejected `attempt_anchor_purchase_receipt` calls allowed per `(resource_id, buyer)` before the pair fails fast.                               |
+| `ANCHOR_RETRY_BACKOFF_LEDGERS` | `12`                     | Minimum ledgers between two rejected anchor attempts for the same pair.                                                                      |
+| `LEASE_HOUR_LEDGERS` / `LEASE_DAY_LEDGERS` / `LEASE_WEEK_LEDGERS` | `720` / `17280` / `120960` | Lease duration per `LeaseTier`.                                                                                          |
+| `LEASE_HOUR_MULTIPLIER` / `LEASE_DAY_MULTIPLIER` / `LEASE_WEEK_MULTIPLIER` | `1` / `5` / `20` | Lease price multiplier over the per-request price, per `LeaseTier`.                                                     |
 | `RESOURCE_SCHEMA_VERSION`  | `2`                          | Current `Resource` schema version (tags added in v2).                                                                                        |
 | `REGISTRY_NAME`            | `"mindvault-vault-registry"` | Stable name returned by `registry_info()`.                                                                                                   |
 | Constant                   | Value                        | Description                                                                                                                                  |
@@ -954,8 +1096,8 @@ Examples: `1_000_000` = 0.10 USDC, `10_000_000` = 1.00 USDC, `500_000` = 0.05 US
 ### WASM size budget
 
 This contract enforces a strictly tracked optimized WASM size budget in CI
-(`stellar contract build --optimize`). Currently the limit is **98,304 bytes
-(96 KB)**, against a current optimized size of ~82 KB.
+(`stellar contract build --optimize`). Currently the limit is **114,688 bytes
+(112 KB)**, against a current optimized size of ~107 KB.
 
 The budget has been raised as the surface grew: from a stale 10 KB figure to
 28 KB (tags, pagination, admin, terms hashes), to 36 KB (`registry_info`, the
@@ -965,7 +1107,12 @@ state machine, the moderator role and dispute flags, fee config, the tag index
 and its repair, the deployment network guard, payment receipts and the settler
 role, purchase receipt anchoring, and the emergency pause. That last raise was
 overdue: the crate did not compile for a stretch, so the 36 KB gate could not
-be measured against the code it was meant to guard. If genuine feature
+be measured against the code it was meant to guard. The raise to 112 KB came
+with time-limited access leases, the anchor attempt cap and back-off, and the
+cursor-based `*_page` listings: twelve new methods and six new types took the
+build from ~91 KB to ~107 KB, almost entirely spec entries and generated XDR
+conversions, with the release profile already at `opt-level = "z"`, LTO, one
+codegen unit and stripped symbols. If genuine feature
 additions push past the current limit, raise `MAX_SIZE` in
 `.github/workflows/contract-ci.yml` (and `MAX` in
 `contracts/vault-registry/Makefile`) and explain the growth in your PR

@@ -160,6 +160,10 @@ pub const METHOD_SCHEMA: &[(&str, &str)] = &[
     ("top_tags", "—"),
     ("list_by_dispute_status", "—"),
     ("list_by_verification_status", "—"),
+    ("list_listed_page", "—"),
+    ("list_by_dispute_status_page", "—"),
+    ("list_by_creator_page", "—"),
+    ("list_by_tag_page", "—"),
     // ── Verification ──────────────────────────────────────────────────────
     ("add_verifier", "admin"),
     ("remove_verifier", "admin"),
@@ -243,6 +247,15 @@ pub const METHOD_SCHEMA: &[(&str, &str)] = &[
     ("attempt_anchor_purchase_receipt", "verifier"),
     ("override_purchase_receipt_anchor", "admin"),
     ("get_purchase_receipt", "—"),
+    ("get_anchor_attempts", "—"),
+    // ── Access leases ─────────────────────────────────────────────────────
+    ("buy_lease", "holder"),
+    ("record_lease", "settler + holder"),
+    ("settle_lease", "settler"),
+    ("revoke_lease", "creator"),
+    ("get_lease", "—"),
+    ("lease_is_active", "—"),
+    ("lease_price", "—"),
     // ── TTL ───────────────────────────────────────────────────────────────
     ("extend_resource_ttl", "creator"),
     // ── Creator earnings estimator (#804) ─────────────────────────────────
@@ -263,7 +276,7 @@ pub const METHOD_SCHEMA: &[(&str, &str)] = &[
 /// between code, this const, and the README fails a test.
 #[cfg(test)]
 pub const ERROR_SCHEMA: &[(u32, &str, &str)] = &[
-    (1, "AlreadyRegistered", "A resource with the given `id` or the target verifier already exists."),
+    (1, "AlreadyRegistered", "A resource with the given `id` or the target verifier already exists, or the holder already has a pending or unexpired active lease on the resource (`buy_lease` / `record_lease`)."),
     (2, "NotFound", "No resource (or terms hash, receipt, or old verifier) matches the given key."),
     (3, "InvalidPrice", "Price is `<= 0`, exceeds `MAX_PRICE`, or is not strictly greater than the active `royalty_bps`."),
     (4, "MetadataTooLong", "Metadata pointer exceeds `MAX_METADATA_POINTER_LEN` (512 bytes)."),
@@ -292,7 +305,7 @@ pub const ERROR_SCHEMA: &[(u32, &str, &str)] = &[
     (27, "AlreadyFlagged", "Resource is already flagged as disputed."),
     (28, "NotFlagged", "Resource is not currently flagged as disputed."),
     (29, "InvalidLifecycleTransition", "The requested lifecycle transition is not allowed from the current state."),
-    (30, "ResourceNotMutable", "A frozen, disputed, or tombstoned resource cannot be changed by its creator."),
+    (30, "ResourceNotMutable", "A frozen, disputed, or tombstoned resource cannot be changed by its creator, and a resource that is not `Listed` (delisted, frozen, disputed, or tombstoned) cannot accept a payment (`record_payment`) or a lease (`buy_lease` / `record_lease`)."),
     (31, "NetworkAlreadyInitialized", "Network identifier has already been initialized for this contract instance."),
     (32, "NetworkIdMismatch", "Invocation network identifier does not match configured network ID."),
     (33, "NetworkNotInitialized", "Network identifier has not been initialized."),
@@ -640,6 +653,35 @@ pub struct CatalogPage {
     pub next_cursor: Option<u32>,
 }
 
+/// Cursor passed to and returned by the id-indexed listings
+/// (`list_by_creator_page`, `list_by_tag_page`). Pass `Start` for the first
+/// page and each page's `next_cursor` for the following one; `End` back means
+/// end-of-list (passing `End` in returns an empty page).
+///
+/// The backing index vectors can lose entries between pages (tombstone,
+/// ownership transfer), so a plain position would skip or repeat entries when
+/// the vector shifts. `After(position, last_id, created_at)` names the last
+/// resource returned instead: its index in the vector when the page was
+/// built, its id, and its registration ledger. Resuming looks the id up
+/// again: at `position` on the fast path, anywhere in the vector if entries
+/// before it were removed, and, if the id itself is gone, at the first entry
+/// registered after it (`created_at`), falling back to its former slot.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum IdCursor {
+    Start,
+    After(u32, String, u32),
+    End,
+}
+
+/// One page of an id-indexed listing plus the cursor for the next page.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct IdPage {
+    pub items: Vec<Resource>,
+    pub next_cursor: IdCursor,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct TagPopularity {
@@ -977,15 +1019,30 @@ pub enum AnchorFailureReason {
     /// An anchor already exists for `(resource_id, buyer)`
     /// (`Error::DuplicateReceipt`).
     DuplicateReceipt = 2,
+    /// The pair was retried fewer than `ANCHOR_RETRY_BACKOFF_LEDGERS` ledgers
+    /// after its last rejected attempt. Reported without re-running the data
+    /// checks and without writing storage; only `attempt_anchor_purchase_receipt`
+    /// produces it.
+    RetryTooSoon = 3,
+    /// The pair has already been rejected `MAX_ANCHOR_ATTEMPTS` times. Reported
+    /// without re-running the data checks and without writing storage; only
+    /// `attempt_anchor_purchase_receipt` produces it.
+    AttemptsExhausted = 4,
 }
 
 impl AnchorFailureReason {
-    /// The error `anchor_purchase_receipt` returns for this reason.
+    /// The error `anchor_purchase_receipt` returns for this reason. The two
+    /// throttling reasons never arise on the reverting path (it keeps no
+    /// attempt history); they map to `InvalidPaymentTransition` so the
+    /// mapping stays total.
     pub fn as_error(self) -> Error {
         match self {
             AnchorFailureReason::ResourceNotFound => Error::NotFound,
             AnchorFailureReason::InvalidReceiptHash => Error::InvalidTxHash,
             AnchorFailureReason::DuplicateReceipt => Error::DuplicateReceipt,
+            AnchorFailureReason::RetryTooSoon | AnchorFailureReason::AttemptsExhausted => {
+                Error::InvalidPaymentTransition
+            }
         }
     }
 }
@@ -1002,6 +1059,64 @@ pub struct AnchorFailure {
     pub receipt_hash: String,
     pub reason: AnchorFailureReason,
     pub ledger: u32,
+}
+
+/// Rejected-attempt bookkeeping for one `(resource_id, buyer)` anchor pair.
+/// Read back by `get_anchor_attempts`; both fields are `0` for a pair that
+/// has never been rejected or whose anchor has since been written.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AnchorAttempts {
+    /// Rejected attempts so far (never more than `MAX_ANCHOR_ATTEMPTS`).
+    pub attempts: u32,
+    /// Ledger sequence of the most recent rejected attempt.
+    pub last_attempt_ledger: u32,
+}
+
+/// Duration tier of a time-limited access lease. Each tier maps to a fixed
+/// number of ledgers (`lease_tier_ledgers`) and a price multiplier over the
+/// resource's per-request price (`lease_price`).
+///
+/// The discriminants are stable — do not renumber existing variants.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum LeaseTier {
+    Hour = 0,
+    Day = 1,
+    Week = 2,
+}
+
+/// Lifecycle state of an access lease.
+///
+/// `Pending` is a holder-recorded lease awaiting settlement confirmation;
+/// `Active` grants access until `expiry_ledger`; `Revoked` is terminal.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum LeaseState {
+    Pending,
+    Active,
+    Revoked,
+}
+
+/// Time-limited access lease: `holder` may access `resource_id` while the
+/// lease is `Active` and the current ledger is below `expiry_ledger`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Lease {
+    pub resource_id: String,
+    pub holder: Address,
+    pub tier: LeaseTier,
+    /// Ledger sequence at which the window opened (the recording ledger).
+    pub start_ledger: u32,
+    /// First ledger at which the lease no longer grants access.
+    pub expiry_ledger: u32,
+    /// Amount paid in USDC stroops; equals `lease_price` at recording time.
+    pub amount: i128,
+    /// Stellar transaction hash of the USDC transfer (non-empty, max 128 bytes).
+    pub tx_hash: String,
+    pub state: LeaseState,
+    /// Ledger sequence at which the lease was recorded.
+    pub recorded_at: u32,
 }
 
 #[contracterror]
@@ -2221,6 +2336,59 @@ impl VaultRegistry {
         }
         let next_cursor = if i < total { Some(i) } else { None };
         CatalogPage { items, next_cursor }
+    }
+
+    /// `list_listed` with next-cursor metadata: `cursor` and `next_cursor`
+    /// are global catalog indexes (same domain as `list_page`), so a page
+    /// boundary is stable however many resources change state between calls.
+    pub fn list_listed_page(env: Env, cursor: u32, limit: u32) -> CatalogPage {
+        Self::scan_catalog(&env, cursor, limit, |resource| {
+            resource.state == ResourceState::Listed
+        })
+    }
+
+    /// `list_by_dispute_status` with next-cursor metadata. Because the cursor
+    /// is a catalog index rather than a count of matches, a flag flipping
+    /// between pages can neither skip nor repeat a resource: each catalog slot
+    /// is visited exactly once, and its current flag decides inclusion.
+    pub fn list_by_dispute_status_page(
+        env: Env,
+        flagged: bool,
+        cursor: u32,
+        limit: u32,
+    ) -> CatalogPage {
+        Self::scan_catalog(&env, cursor, limit, |resource| {
+            resource.dispute_flag.is_flagged() == flagged
+        })
+    }
+
+    /// `list_by_creator` with an id-based cursor. Pass `IdCursor::Start` for
+    /// the first page and the returned `next_cursor` for each following page;
+    /// `IdCursor::End` back means end-of-list. See [`IdCursor`] for how the
+    /// cursor survives tombstones and transfers that remove entries from the
+    /// creator index.
+    pub fn list_by_creator_page(
+        env: Env,
+        creator: Address,
+        cursor: IdCursor,
+        limit: u32,
+    ) -> IdPage {
+        let ids = Self::creator_list(&env, &creator);
+        Self::id_page(&env, &ids, cursor, limit, |_| true)
+    }
+
+    /// `list_by_tag` with an id-based cursor (see `list_by_creator_page`).
+    /// Tombstoned resources are skipped exactly as `list_by_tag` skips them.
+    pub fn list_by_tag_page(env: Env, tag: String, cursor: IdCursor, limit: u32) -> IdPage {
+        let norm_tag = Self::normalize_tag(&env, &tag);
+        let ids: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TagIndex(norm_tag))
+            .unwrap_or_else(|| Vec::new(&env));
+        Self::id_page(&env, &ids, cursor, limit, |resource| {
+            resource.state != ResourceState::Tombstoned
+        })
     }
 
     /// Rebuild the tag index from an authoritative, admin-supplied ordered
@@ -3444,6 +3612,17 @@ impl VaultRegistry {
     /// reason without replaying the caller's logs.
     ///
     /// Returns `true` and emits the usual `anchor` event on success.
+    ///
+    ///
+    /// Rejected attempts are counted per `(resource_id, buyer)` pair (see
+    /// `get_anchor_attempts`). A retry fewer than `ANCHOR_RETRY_BACKOFF_LEDGERS`
+    /// ledgers after the last rejection fails fast with reason `RetryTooSoon`,
+    /// and once `MAX_ANCHOR_ATTEMPTS` rejections have accumulated every
+    /// further call fails fast with reason `AttemptsExhausted`; the attempt
+    /// that reaches the cap also emits `anchrxhst`. Both fast failures return
+    /// `false` after a single storage read, re-running none of the data checks
+    /// and writing nothing, so a permanently failing job stops paying for
+    /// resource lookups. A successful anchor clears the counter.
     pub fn attempt_anchor_purchase_receipt(
         env: Env,
         service: Address,
@@ -3455,21 +3634,73 @@ impl VaultRegistry {
         Self::require_not_paused(&env)?;
         Self::validate_resource_id(&resource_id)?;
 
-        if let Some(reason) = Self::anchor_blocker(&env, &resource_id, &buyer, &receipt_hash) {
+        let attempts_key = DataKey::AnchorAttempts(resource_id.clone(), buyer.clone());
+        let mut attempts = Self::anchor_attempts_state(&env, &attempts_key);
+        let now = env.ledger().sequence();
+        let throttled = if attempts.attempts >= MAX_ANCHOR_ATTEMPTS {
+            Some(AnchorFailureReason::AttemptsExhausted)
+        } else if attempts.attempts > 0
+            && now
+                < attempts
+                    .last_attempt_ledger
+                    .saturating_add(ANCHOR_RETRY_BACKOFF_LEDGERS)
+        {
+            Some(AnchorFailureReason::RetryTooSoon)
+        } else {
+            None
+        };
+        if let Some(reason) = throttled {
             let failure = AnchorFailure {
                 resource_id: resource_id.clone(),
                 buyer,
                 receipt_hash,
                 reason,
-                ledger: env.ledger().sequence(),
+                ledger: now,
             };
             env.events()
                 .publish((symbol_short!("anchrfail"), resource_id), failure);
             return Ok(false);
         }
 
+        if let Some(reason) = Self::anchor_blocker(&env, &resource_id, &buyer, &receipt_hash) {
+            attempts.attempts += 1;
+            attempts.last_attempt_ledger = now;
+            env.storage().persistent().set(&attempts_key, &attempts);
+            Self::bump_persistent(&env, &attempts_key);
+
+            let failure = AnchorFailure {
+                resource_id: resource_id.clone(),
+                buyer: buyer.clone(),
+                receipt_hash,
+                reason,
+                ledger: now,
+            };
+            env.events()
+                .publish((symbol_short!("anchrfail"), resource_id.clone()), failure);
+            if attempts.attempts >= MAX_ANCHOR_ATTEMPTS {
+                // Emitted once per pair, on the attempt that reaches the cap.
+                env.events()
+                    .publish((symbol_short!("anchrxhst"), resource_id, buyer), attempts);
+            }
+            return Ok(false);
+        }
+
         Self::write_anchor(&env, resource_id, buyer, receipt_hash);
         Ok(true)
+    }
+
+    /// Rejected `attempt_anchor_purchase_receipt` bookkeeping for a pair:
+    /// how many attempts have been rejected and at which ledger the last one
+    /// was. Both fields are `0` when the pair has never been rejected or its
+    /// anchor has since been written.
+    pub fn get_anchor_attempts(
+        env: Env,
+        resource_id: String,
+        buyer: Address,
+    ) -> Result<AnchorAttempts, Error> {
+        Self::validate_resource_id(&resource_id)?;
+        let key = DataKey::AnchorAttempts(resource_id, buyer);
+        Ok(Self::anchor_attempts_state(&env, &key))
     }
 
     /// Override a purchase receipt anchor for `(resource_id, buyer)`.
@@ -3733,6 +3964,166 @@ impl VaultRegistry {
             reason_hash: storage.get(&DataKey::FlagReasonHash(id.clone())),
             last_moderator: storage.get(&DataKey::FlagModerator(id)),
         })
+    }
+
+    // ─── Time-limited access leases ──────────────────────────────────────────
+
+    /// Price of a lease of `tier` on `resource_id`: the resource's current
+    /// per-request price times the tier's multiplier (`LEASE_*_MULTIPLIER`).
+    /// Errors `NotFound` for an unknown resource.
+    pub fn lease_price(env: Env, resource_id: String, tier: LeaseTier) -> Result<i128, Error> {
+        Self::validate_resource_id(&resource_id)?;
+        let resource = Self::load(&env, &resource_id)?;
+        Self::tier_price(resource.price, tier)
+    }
+
+    /// Record a lease bought by `holder` in `Pending` state, awaiting a
+    /// settler's confirmation of the USDC transfer identified by `tx_hash`
+    /// (`settle_lease`). The resource must be `Listed` (`ResourceNotListed`),
+    /// `amount` must equal `lease_price(resource_id, tier)`
+    /// (`LeaseAmountMismatch`), and `holder` must not already hold a pending
+    /// or unexpired active lease on the resource (`LeaseAlreadyActive`); an
+    /// expired or revoked lease is replaced. Emits `lease`.
+    pub fn buy_lease(
+        env: Env,
+        holder: Address,
+        resource_id: String,
+        tier: LeaseTier,
+        amount: i128,
+        tx_hash: String,
+    ) -> Result<Lease, Error> {
+        holder.require_auth();
+        Self::write_lease(
+            &env,
+            holder,
+            resource_id,
+            tier,
+            amount,
+            tx_hash,
+            LeaseState::Pending,
+        )
+    }
+
+    /// Settler-recorded lease: the same checks as `buy_lease`, written
+    /// directly in `Active` state because the settler has already confirmed
+    /// the payment. Requires the settler role (`NotSettler`) and the holder's
+    /// authorization, mirroring `record_payment`. Emits `lease`.
+    pub fn record_lease(
+        env: Env,
+        settler: Address,
+        holder: Address,
+        resource_id: String,
+        tier: LeaseTier,
+        amount: i128,
+        tx_hash: String,
+    ) -> Result<Lease, Error> {
+        settler.require_auth();
+        if !Self::is_settler(env.clone(), settler) {
+            return Err(Error::NotSettler);
+        }
+        holder.require_auth();
+        Self::write_lease(
+            &env,
+            holder,
+            resource_id,
+            tier,
+            amount,
+            tx_hash,
+            LeaseState::Active,
+        )
+    }
+
+    /// Advance a `Pending` lease to `Active` once its payment is confirmed.
+    /// Requires the settler role. Errors `NotFound` if no lease exists for
+    /// the pair and `InvalidLeaseTransition` if it is not `Pending`. Emits
+    /// `leasesetl`.
+    pub fn settle_lease(
+        env: Env,
+        settler: Address,
+        resource_id: String,
+        holder: Address,
+    ) -> Result<Lease, Error> {
+        settler.require_auth();
+        if !Self::is_settler(env.clone(), settler) {
+            return Err(Error::NotSettler);
+        }
+        Self::require_not_paused(&env)?;
+        Self::validate_resource_id(&resource_id)?;
+        let key = DataKey::Lease(resource_id.clone(), holder);
+        let mut lease: Lease = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(Error::NotFound)?;
+        if lease.state != LeaseState::Pending {
+            return Err(Error::InvalidPaymentTransition);
+        }
+        lease.state = LeaseState::Active;
+        env.storage().persistent().set(&key, &lease);
+        Self::bump_persistent(&env, &key);
+        env.events()
+            .publish((symbol_short!("leasesetl"), resource_id), lease.clone());
+        Ok(lease)
+    }
+
+    /// Revoke a `Pending` or `Active` lease. Only the resource creator may
+    /// call this. Revocation is immediate and terminal: `lease_is_active`
+    /// returns `false` from this ledger on, and the holder may buy a new
+    /// lease afterwards. Errors `NotFound` if no lease exists for the pair
+    /// and `InvalidLeaseTransition` if it is already `Revoked`. Emits
+    /// `leaserevk`.
+    pub fn revoke_lease(env: Env, resource_id: String, holder: Address) -> Result<Lease, Error> {
+        Self::require_not_paused(&env)?;
+        Self::validate_resource_id(&resource_id)?;
+        let resource = Self::load(&env, &resource_id)?;
+        resource.creator.require_auth();
+        let key = DataKey::Lease(resource_id.clone(), holder);
+        let mut lease: Lease = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(Error::NotFound)?;
+        if lease.state == LeaseState::Revoked {
+            return Err(Error::InvalidPaymentTransition);
+        }
+        lease.state = LeaseState::Revoked;
+        env.storage().persistent().set(&key, &lease);
+        Self::bump_persistent(&env, &key);
+        env.events()
+            .publish((symbol_short!("leaserevk"), resource_id), lease.clone());
+        Ok(lease)
+    }
+
+    /// Fetch the lease recorded for `(resource_id, holder)`, whatever its
+    /// state. Errors `NotFound` if none exists. Bumps the entry's TTL.
+    pub fn get_lease(env: Env, resource_id: String, holder: Address) -> Result<Lease, Error> {
+        Self::validate_resource_id(&resource_id)?;
+        let key = DataKey::Lease(resource_id, holder);
+        let lease: Lease = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(Error::NotFound)?;
+        Self::bump_persistent(&env, &key);
+        Ok(lease)
+    }
+
+    /// Whether `holder` currently has access to `resource_id` through a
+    /// lease: one exists, it is `Active`, and the current ledger is below
+    /// its `expiry_ledger`. Never errors; unknown pairs and malformed ids
+    /// simply return `false`.
+    pub fn lease_is_active(env: Env, resource_id: String, holder: Address) -> bool {
+        if Self::validate_resource_id(&resource_id).is_err() {
+            return false;
+        }
+        match env
+            .storage()
+            .persistent()
+            .get::<DataKey, Lease>(&DataKey::Lease(resource_id, holder))
+        {
+            Some(lease) => Self::lease_grants_access(&env, &lease),
+            None => false,
+        }
     }
 
     /// Extend the TTL of a resource's persistent storage entry.
@@ -4164,8 +4555,12 @@ impl VaultRegistry {
         amount: i128,
         tx_hash: String,
     ) -> Result<PaymentReceipt, Error> {
-        // The referenced resource must exist.
+        // The referenced resource must exist and be for sale: a delisted,
+        // frozen, disputed, or tombstoned resource must not accept payments.
         let resource = Self::load(env, &resource_id)?;
+        if resource.state != ResourceState::Listed {
+            return Err(Error::ResourceNotMutable);
+        }
 
         // Consistency guard: payment amount must match the resource's current price.
         if amount != resource.price {
@@ -4526,6 +4921,122 @@ impl VaultRegistry {
         DataKey::CreatorResources(creator.clone())
     }
 
+    /// Walk the global catalog from `cursor`, returning up to `limit` (capped
+    /// at `LIST_PAGE_CAP`) resources accepted by `include`, plus the catalog
+    /// index to resume from. Every visited entry has its TTL bumped.
+    fn scan_catalog(
+        env: &Env,
+        cursor: u32,
+        limit: u32,
+        include: impl Fn(&Resource) -> bool,
+    ) -> CatalogPage {
+        let total: u32 = env.storage().instance().get(&DataKey::Count).unwrap_or(0);
+        let page_size = limit.min(LIST_PAGE_CAP);
+        let mut items: Vec<Resource> = Vec::new(env);
+        let mut i = cursor;
+        while i < total && items.len() < page_size {
+            let idx_key = DataKey::Index(i);
+            if let Some(id) = env.storage().persistent().get::<DataKey, String>(&idx_key) {
+                Self::bump_persistent(env, &idx_key);
+                let res_key = DataKey::Resource(id);
+                if let Some(resource) = env
+                    .storage()
+                    .persistent()
+                    .get::<DataKey, Resource>(&res_key)
+                {
+                    Self::bump_persistent(env, &res_key);
+                    if include(&resource) {
+                        items.push_back(resource);
+                    }
+                }
+            }
+            i += 1;
+        }
+        let next_cursor = if i < total { Some(i) } else { None };
+        CatalogPage { items, next_cursor }
+    }
+
+    /// Position in `ids` to resume an id-cursor listing from.
+    fn resume_position(env: &Env, ids: &Vec<String>, cursor: &IdCursor) -> u32 {
+        let total = ids.len();
+        let (position, last_id, created_at) = match cursor {
+            IdCursor::Start => return 0,
+            IdCursor::End => return total,
+            IdCursor::After(position, last_id, created_at) => (*position, last_id, *created_at),
+        };
+        // Fast path: the vector did not shift under the cursor.
+        if position < total && ids.get(position).unwrap() == *last_id {
+            return position + 1;
+        }
+        // Entries before the cursor were removed: find the last returned id.
+        let mut i = 0u32;
+        while i < total {
+            if ids.get(i).unwrap() == *last_id {
+                return i + 1;
+            }
+            i += 1;
+        }
+        // The cursor's own resource was removed. Resume at the first entry
+        // registered after it; entries are in registration order, so the
+        // first `created_at` above the cursor's is the next unseen one.
+        let mut i = 0u32;
+        while i < total {
+            let id = ids.get(i).unwrap();
+            if let Some(resource) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, Resource>(&DataKey::Resource(id))
+            {
+                if resource.created_at > created_at {
+                    return i;
+                }
+            }
+            i += 1;
+        }
+        // Same-ledger siblings only: fall back to the cursor's former slot.
+        position.min(total)
+    }
+
+    /// One page of an id-indexed listing (creator or tag index) starting
+    /// after `cursor`, including only resources accepted by `include`.
+    fn id_page(
+        env: &Env,
+        ids: &Vec<String>,
+        cursor: IdCursor,
+        limit: u32,
+        include: impl Fn(&Resource) -> bool,
+    ) -> IdPage {
+        let page_size = limit.min(LIST_PAGE_CAP);
+        let mut items: Vec<Resource> = Vec::new(env);
+        let mut next_cursor = IdCursor::End;
+        if page_size == 0 {
+            return IdPage { items, next_cursor };
+        }
+        let total = ids.len();
+        let mut idx = Self::resume_position(env, ids, &cursor);
+        while idx < total && items.len() < page_size {
+            let id = ids.get(idx).unwrap();
+            let res_key = DataKey::Resource(id.clone());
+            if let Some(resource) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, Resource>(&res_key)
+            {
+                Self::bump_persistent(env, &res_key);
+                if include(&resource) {
+                    next_cursor = IdCursor::After(idx, id, resource.created_at);
+                    items.push_back(resource);
+                }
+            }
+            idx += 1;
+        }
+        // End-of-list once every remaining entry has been visited.
+        if idx >= total {
+            next_cursor = IdCursor::End;
+        }
+        IdPage { items, next_cursor }
+    }
+
     fn creator_list(env: &Env, creator: &Address) -> Vec<String> {
         env.storage()
             .persistent()
@@ -4706,7 +5217,93 @@ impl VaultRegistry {
 
     /// Persist an anchor that `anchor_blocker` has already cleared and emit
     /// the `anchor` event.
+    fn tier_ledgers(tier: LeaseTier) -> u32 {
+        match tier {
+            LeaseTier::Hour => LEASE_HOUR_LEDGERS,
+            LeaseTier::Day => LEASE_DAY_LEDGERS,
+            LeaseTier::Week => LEASE_WEEK_LEDGERS,
+        }
+    }
+
+    fn tier_price(price: i128, tier: LeaseTier) -> Result<i128, Error> {
+        let multiplier = match tier {
+            LeaseTier::Hour => LEASE_HOUR_MULTIPLIER,
+            LeaseTier::Day => LEASE_DAY_MULTIPLIER,
+            LeaseTier::Week => LEASE_WEEK_MULTIPLIER,
+        };
+        price.checked_mul(multiplier).ok_or(Error::PriceExceedsMax)
+    }
+
+    fn lease_grants_access(env: &Env, lease: &Lease) -> bool {
+        lease.state == LeaseState::Active && env.ledger().sequence() < lease.expiry_ledger
+    }
+
+    /// Validation and storage shared by `buy_lease` and `record_lease`.
+    fn write_lease(
+        env: &Env,
+        holder: Address,
+        resource_id: String,
+        tier: LeaseTier,
+        amount: i128,
+        tx_hash: String,
+        state: LeaseState,
+    ) -> Result<Lease, Error> {
+        Self::require_not_paused(env)?;
+        Self::validate_resource_id(&resource_id)?;
+        Self::validate_payment_amount(amount)?;
+        Self::validate_tx_hash(&tx_hash)?;
+
+        let resource = Self::load(env, &resource_id)?;
+        if resource.state != ResourceState::Listed {
+            return Err(Error::ResourceNotMutable);
+        }
+        if amount != Self::tier_price(resource.price, tier)? {
+            return Err(Error::PaymentAmountMismatch);
+        }
+
+        let key = DataKey::Lease(resource_id.clone(), holder.clone());
+        if let Some(existing) = env.storage().persistent().get::<DataKey, Lease>(&key) {
+            let still_open =
+                existing.state == LeaseState::Pending || Self::lease_grants_access(env, &existing);
+            if still_open {
+                return Err(Error::AlreadyRegistered);
+            }
+        }
+
+        let now = env.ledger().sequence();
+        let lease = Lease {
+            resource_id: resource_id.clone(),
+            holder,
+            tier,
+            start_ledger: now,
+            expiry_ledger: now.saturating_add(Self::tier_ledgers(tier)),
+            amount,
+            tx_hash,
+            state,
+            recorded_at: now,
+        };
+        env.storage().persistent().set(&key, &lease);
+        Self::bump_persistent(env, &key);
+        env.events()
+            .publish((symbol_short!("lease"), resource_id), lease.clone());
+        Ok(lease)
+    }
+
+    fn anchor_attempts_state(env: &Env, key: &DataKey) -> AnchorAttempts {
+        env.storage()
+            .persistent()
+            .get(key)
+            .unwrap_or(AnchorAttempts {
+                attempts: 0,
+                last_attempt_ledger: 0,
+            })
+    }
+
     fn write_anchor(env: &Env, resource_id: String, buyer: Address, receipt_hash: String) {
+        // A written anchor ends the pair's retry history.
+        env.storage()
+            .persistent()
+            .remove(&DataKey::AnchorAttempts(resource_id.clone(), buyer.clone()));
         let key = DataKey::PurchaseReceipt(resource_id.clone(), buyer.clone());
         let anchor = PurchaseReceiptAnchor {
             resource_id: resource_id.clone(),
