@@ -13,7 +13,7 @@
 extern crate alloc;
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Bytes, BytesN, Env,
     IntoVal, String, Symbol, Val, Vec,
 };
 
@@ -26,6 +26,13 @@ const LIFETIME_THRESHOLD: u32 = BUMP_AMOUNT - DAY_IN_LEDGERS;
 /// Max length for metadata pointers (IPFS URI, content hash, compact JSON anchor).
 pub const MAX_METADATA_POINTER_LEN: u32 = 512;
 pub const MAX_TERMS_HASH_LEN: u32 = 64;
+/// Max number of redundant metadata pointers (e.g. IPFS + Arweave + hosted)
+/// a resource may carry via `set_metadata_pointers`.
+pub const MAX_METADATA_POINTERS: u32 = 4;
+/// Domain separator prefixed to every preimage hashed by
+/// `compute_attestation_hash`, so the digest can never collide with a hash
+/// computed for another purpose over the same bytes.
+pub const ATTESTATION_HASH_DOMAIN: &str = "mindvault-attestation-v1";
 pub const MAX_CONTENT_HASH_LEN: u32 = 128;
 pub const DEFAULT_ATTESTATION_HASH_ALGORITHM: &str = "sha256";
 pub const MAX_ATTESTATION_HASH_ALGORITHM_LEN: u32 = 16;
@@ -111,6 +118,8 @@ pub const METHOD_SCHEMA: &[(&str, &str)] = &[
     ("set_price_many", "creator"),
     ("update_metadata", "creator"),
     ("freeze_metadata", "creator"),
+    ("set_metadata_pointers", "creator"),
+    ("get_metadata_pointers", "—"),
     ("set_tags", "creator"),
     ("set_royalty_recipient", "creator"),
     ("set_listed", "creator"),
@@ -154,6 +163,8 @@ pub const METHOD_SCHEMA: &[(&str, &str)] = &[
     ("is_verifier", "—"),
     ("set_verification_status", "verifier"),
     ("get_attestation_hash", "—"),
+    ("compute_attestation_hash", "—"),
+    ("verify_attestation_hash", "—"),
     ("get_memo_hash", "—"),
     // ── Registry introspection ────────────────────────────────────────────
     ("registry_info", "—"),
@@ -170,6 +181,10 @@ pub const METHOD_SCHEMA: &[(&str, &str)] = &[
         "current admin (or new_admin for bootstrap)",
     ),
     ("accept_admin", "pending admin"),
+    ("bootstrap_dual_admin", "admin + recovery_admin"),
+    ("recovery_admin", "—"),
+    ("set_recovery_admin", "admin"),
+    ("recover_admin", "recovery admin"),
     ("set_paused", "admin"),
     ("set_paused_until", "admin"),
     ("is_paused", "—"),
@@ -193,6 +208,8 @@ pub const METHOD_SCHEMA: &[(&str, &str)] = &[
     ("get_flag_deadline", "—"),
     ("is_flag_overdue", "—"),
     ("force_resolve_flag", "admin"),
+    ("is_flagged", "—"),
+    ("flag_details", "—"),
     // ── Terms hashes ──────────────────────────────────────────────────────
     ("set_terms_hash", "creator"),
     ("get_terms_hash", "—"),
@@ -207,6 +224,7 @@ pub const METHOD_SCHEMA: &[(&str, &str)] = &[
     ("repair_tag_index", "admin"),
     // ── Payment receipts ──────────────────────────────────────────────────
     ("record_payment", "settler + payer"),
+    ("record_payment_idempotent", "settler + payer"),
     ("settle_payment", "settler"),
     ("get_payment", "—"),
     ("get_payment_receipt", "—"),
@@ -276,9 +294,9 @@ pub const ERROR_SCHEMA: &[(u32, &str, &str)] = &[
     (48, "DuplicateTxHash", "A payment receipt is already stored for the supplied settlement transaction hash (`tx_hash`)."),
     (49, "FeeConfigNotSet", "`set_fee_recipient` or `set_fee_destination` was called before any fee config was set via `set_fee_config`."),
     (50, "AdminNominationExpired", "The pending admin nomination is missing or has expired."),
-    (51, "InvalidPaymentMemo", "`memo` in `record_payment_with_memo` is not the canonical `mv:<resource_id>` memo for the paid resource."),
-    (52, "FlagNotOverdue", "`force_resolve_flag` was called on a flag whose resolution deadline has not passed (or that has no deadline)."),
-    (53, "InvalidFlagResolutionWindow", "`set_flag_resolution_window` was called with a window above `MAX_FLAG_RESOLUTION_WINDOW`."),
+    (51, "InvalidMetadataPointers", "`set_metadata_pointers` received an empty, oversized (> `MAX_METADATA_POINTERS`), or duplicate pointer list, or an out-of-range `primary` index."),
+    (52, "AdminAlreadySet", "`bootstrap_dual_admin` was called after an admin was already set."),
+    (53, "RecoveryAdminNotSet", "`recover_admin` was called but no recovery admin is configured."),
 ];
 
 /// Canonical list of every event topic this contract emits, paired with a
@@ -312,6 +330,9 @@ pub const EVENT_SCHEMA: &[(&str, &str)] = &[
     ("setlisted", "(old_listed: bool, new_listed: bool)"),
     ("setterms", "terms_hash: String"),
     ("setadmin", "new_admin: Address"),
+    ("setrecov", "recovery_admin: Option<Address>"),
+    ("recover", "(old_admin: Address, new_admin: Address)"),
+    ("setptrs", "MetadataPointers { pointers, primary }"),
     ("nomadmin", "new_admin: Address"),
     ("accadmin", "new_admin: Address"),
     ("netinit", "network_id: BytesN<32>"),
@@ -320,8 +341,8 @@ pub const EVENT_SCHEMA: &[(&str, &str)] = &[
         "verify",
         "(old_status: VerificationStatus, new_status: VerificationStatus, attestation_hash: Option<String>)",
     ),
-    ("addverif", "true"),
-    ("rmverif", "false"),
+    ("addverif", "RoleChange { admin, target, granted: true }"),
+    ("rmverif", "RoleChange { admin, target, granted: false }"),
     ("verrot", "VerifierRotation { old_verifier, new_verifier, ledger }"),
     ("reindex", "new_count: u32 (topic carries old_count: u32)"),
     (
@@ -332,8 +353,8 @@ pub const EVENT_SCHEMA: &[(&str, &str)] = &[
         "settle",
         "PaymentReceipt { receipt_id, resource_id, payer, amount, state, tx_hash, recorded_at }",
     ),
-    ("addsettlr", "true"),
-    ("rmsettlr", "false"),
+    ("addsettlr", "RoleChange { admin, target, granted: true }"),
+    ("rmsettlr", "RoleChange { admin, target, granted: false }"),
     ("pause", "(paused: bool, admin: Address)"),
     ("pause_until", "(pause_until: u64, admin: Address)"),
     (
@@ -344,8 +365,8 @@ pub const EVENT_SCHEMA: &[(&str, &str)] = &[
         "anchrfail",
         "AnchorFailure { resource_id, buyer, receipt_hash, reason, ledger }",
     ),
-    ("addmod", "true"),
-    ("rmmod", "false"),
+    ("addmod", "RoleChange { admin, target, granted: true }"),
+    ("rmmod", "RoleChange { admin, target, granted: false }"),
     ("flag", "FlagEvent { id, moderator, reason }"),
     ("unflag", "resource id"),
     ("flagrsn", "(moderator: Address, reason_hash: String)"),
@@ -466,6 +487,18 @@ pub struct FlagEvent {
     pub id: String,
     pub moderator: Address,
     pub reason: FlagReason,
+}
+
+/// A resource's moderation state in one read, returned by `flag_details`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct FlagDetails {
+    /// Active dispute flag, or `DisputeFlag::NoFlag`.
+    pub dispute_flag: DisputeFlag,
+    /// Hash set via `set_flag_reason_hash`, if any.
+    pub reason_hash: Option<String>,
+    /// Moderator whose flag, unflag, or reason hash write came last, if any.
+    pub last_moderator: Option<Address>,
 }
 
 #[contracttype]
@@ -642,6 +675,8 @@ pub enum DataKey {
     AttestationHash(String),
     /// Ledger sequence at which the pending admin nomination expires.
     PendingAdminExpiry,
+    TagCount(String),
+    TopTags,
     /// Number of `creator`'s resources currently in the `Listed` state. Kept
     /// in step with `ListedCount` on every listed-state transition and moved
     /// between owners on transfer, so it is the per-creator view of
@@ -653,14 +688,38 @@ pub enum DataKey {
     /// mutated; `None` for resources registered through the other entry points.
     MemoHash(String),
     FeeDestination,
-    /// Canonical settlement memo (`mv:<resource_id>`) attached to a payment
-    /// receipt by `record_payment_with_memo`, keyed by `receipt_id`.
-    PaymentMemo(String),
-    /// Admin-configured number of ledgers a moderator has to resolve a flag
-    /// before it becomes overdue. `0`/absent disables deadlines.
-    FlagResolutionWindow,
-    /// Ledger sequence after which the active flag on a resource is overdue.
-    FlagDeadline(String),
+    /// Redundant metadata pointers set via `set_metadata_pointers`. The
+    /// entry at `primary` always mirrors `Resource.metadata`.
+    MetadataPointers(String),
+    /// Optional recovery admin set via `bootstrap_dual_admin` or
+    /// `set_recovery_admin`; may call `recover_admin` if the admin key is lost.
+    RecoveryAdmin,
+}
+
+/// Payload of every role grant/revoke event (`addverif`/`rmverif`,
+/// `addsettlr`/`rmsettlr`, `addmod`/`rmmod`). Carries the admin that
+/// authorized the change and the affected address so the event log alone
+/// is a complete audit trail of role changes.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RoleChange {
+    pub admin: Address,
+    pub target: Address,
+    /// `true` for a grant, `false` for a revocation.
+    pub granted: bool,
+}
+
+/// Redundant metadata pointers for a resource, so its content survives a
+/// single storage outage. `pointers[primary]` is the preferred pointer and is
+/// always equal to `Resource.metadata`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct MetadataPointers {
+    pub pointers: Vec<String>,
+    pub primary: u32,
+    /// Moderator who last called `flag_resource`, `unflag_resource`, or
+    /// `set_flag_reason_hash` for a resource. Read back by `flag_details`.
+    FlagModerator(String),
 }
 
 /// Event data emitted when a resource's metadata pointer is updated.
@@ -917,13 +976,13 @@ pub enum Error {
     FeeConfigNotSet = 49,
     /// The pending admin nomination is missing or has expired.
     AdminNominationExpired = 50,
-    /// `memo` supplied to `record_payment_with_memo` is not the canonical
-    /// `mv:<resource_id>` memo for the paid resource.
-    InvalidPaymentMemo = 51,
-    /// `force_resolve_flag` called before the flag's resolution deadline.
-    FlagNotOverdue = 52,
-    /// Flag resolution window exceeds `MAX_FLAG_RESOLUTION_WINDOW`.
-    InvalidFlagResolutionWindow = 53,
+    /// `set_metadata_pointers` received zero, more than `MAX_METADATA_POINTERS`,
+    /// or duplicate pointers, or a `primary` index out of range.
+    InvalidMetadataPointers = 51,
+    /// `bootstrap_dual_admin` was called after an admin was already set.
+    AdminAlreadySet = 52,
+    /// `recover_admin` was called but no recovery admin is configured.
+    RecoveryAdminNotSet = 53,
 }
 
 #[contract]
@@ -1187,6 +1246,10 @@ impl VaultRegistry {
         let old_metadata = resource.metadata.clone();
         resource.metadata = metadata.clone();
         Self::save(&env, &mut resource);
+        // A new primary pointer invalidates any previously published mirrors.
+        env.storage()
+            .persistent()
+            .remove(&DataKey::MetadataPointers(id.clone()));
         env.events().publish(
             (symbol_short!("updmeta"), id.clone()),
             MetadataUpdateEvent {
@@ -1215,6 +1278,87 @@ impl VaultRegistry {
         Self::save(&env, &mut resource);
         env.events().publish((symbol_short!("freeze"), id), ());
         Ok(())
+    }
+
+    /// Set up to `MAX_METADATA_POINTERS` redundant metadata pointers (e.g.
+    /// IPFS + Arweave + hosted) with `pointers[primary]` as the preferred one,
+    /// so the resource survives a single storage outage. Only the creator may
+    /// call this. Every pointer is validated like `update_metadata`, and
+    /// `Resource.metadata` is set to the primary pointer so single-pointer
+    /// readers keep working. Subject to the same freeze / content-hash rules
+    /// as `update_metadata`: a frozen resource may only re-publish mirrors
+    /// whose primary equals its current pointer. Emits `setptrs`.
+    pub fn set_metadata_pointers(
+        env: Env,
+        id: String,
+        pointers: Vec<String>,
+        primary: u32,
+    ) -> Result<(), Error> {
+        Self::require_not_paused(&env)?;
+        Self::validate_resource_id(&id)?;
+        let mut resource = Self::load(&env, &id)?;
+        resource.creator.require_auth();
+        Self::ensure_mutable(&resource)?;
+
+        if pointers.is_empty() || pointers.len() > MAX_METADATA_POINTERS || primary >= pointers.len()
+        {
+            return Err(Error::InvalidMetadataPointers);
+        }
+        for i in 0..pointers.len() {
+            let pointer = pointers.get_unchecked(i);
+            Self::validate_metadata_pointer(&pointer)?;
+            for j in (i + 1)..pointers.len() {
+                if pointers.get_unchecked(j) == pointer {
+                    return Err(Error::InvalidMetadataPointers);
+                }
+            }
+        }
+
+        let primary_pointer = pointers.get_unchecked(primary);
+        if primary_pointer != resource.metadata {
+            if resource.frozen || resource.content_hash.is_some() {
+                return Err(Error::MetadataFrozen);
+            }
+            let old_metadata = resource.metadata.clone();
+            resource.metadata = primary_pointer.clone();
+            Self::save(&env, &mut resource);
+            env.events().publish(
+                (symbol_short!("updmeta"), id.clone()),
+                MetadataUpdateEvent {
+                    id: id.clone(),
+                    old_metadata,
+                    new_metadata: primary_pointer,
+                },
+            );
+        }
+
+        let record = MetadataPointers { pointers, primary };
+        let key = DataKey::MetadataPointers(id.clone());
+        env.storage().persistent().set(&key, &record);
+        Self::bump_persistent(&env, &key);
+        env.events()
+            .publish((symbol_short!("setptrs"), id), record);
+        Ok(())
+    }
+
+    /// All metadata pointers for a resource. Falls back to a single-entry list
+    /// holding `Resource.metadata` (primary `0`) when no mirrors were set.
+    pub fn get_metadata_pointers(env: Env, id: String) -> Result<MetadataPointers, Error> {
+        Self::validate_resource_id(&id)?;
+        let resource = Self::load(&env, &id)?;
+        let key = DataKey::MetadataPointers(id);
+        if let Some(record) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, MetadataPointers>(&key)
+        {
+            Self::bump_persistent(&env, &key);
+            return Ok(record);
+        }
+        Ok(MetadataPointers {
+            pointers: Vec::from_array(&env, [resource.metadata]),
+            primary: 0,
+        })
     }
 
     /// Update a resource's on-chain verification status. Only an address
@@ -1281,6 +1425,57 @@ impl VaultRegistry {
             Self::bump_persistent(&env, &key);
         }
         hash
+    }
+
+    /// Pure function: recompute the attestation hash a verifier is expected to
+    /// submit for `(id, status, document_hash)`, so off-chain clients can
+    /// check integrity without trusting a wallet provider. Returns
+    /// `sha256:<64 lowercase hex>` over the preimage
+    /// `ATTESTATION_HASH_DOMAIN || u32_be(len(id)) || id || u32_be(status) || document_hash`.
+    /// Reads no storage and requires no auth.
+    pub fn compute_attestation_hash(
+        env: Env,
+        id: String,
+        status: VerificationStatus,
+        document_hash: BytesN<32>,
+    ) -> String {
+        let id_bytes = Self::string_bytes(&id);
+        let mut preimage = Bytes::from_slice(&env, ATTESTATION_HASH_DOMAIN.as_bytes());
+        preimage.extend_from_array(&(id_bytes.len() as u32).to_be_bytes());
+        preimage.extend_from_slice(&id_bytes);
+        preimage.extend_from_array(&(status as u32).to_be_bytes());
+        preimage.append(&document_hash.into());
+        let digest = env.crypto().sha256(&preimage).to_array();
+
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = alloc::vec::Vec::with_capacity(DEFAULT_ATTESTATION_HASH_ALGORITHM.len() + 1 + 64);
+        out.extend_from_slice(DEFAULT_ATTESTATION_HASH_ALGORITHM.as_bytes());
+        out.push(b':');
+        for byte in digest {
+            out.push(HEX[(byte >> 4) as usize]);
+            out.push(HEX[(byte & 0x0f) as usize]);
+        }
+        String::from_bytes(&env, &out)
+    }
+
+    /// Whether the resource is currently in `status` and its stored
+    /// attestation hash equals `compute_attestation_hash(id, status, document_hash)`.
+    pub fn verify_attestation_hash(
+        env: Env,
+        id: String,
+        status: VerificationStatus,
+        document_hash: BytesN<32>,
+    ) -> bool {
+        let Ok(resource) = Self::validate_resource_id(&id).and_then(|_| Self::load(&env, &id)) else {
+            return false;
+        };
+        if resource.verified != status {
+            return false;
+        }
+        match Self::get_attestation_hash(env.clone(), id.clone()) {
+            Some(stored) => stored == Self::compute_attestation_hash(env, id, status, document_hash),
+            None => false,
+        }
     }
 
     /// Read the memo hash recorded for a resource at registration, if it was
@@ -2277,6 +2472,87 @@ impl VaultRegistry {
         Ok(())
     }
 
+    /// Optional dual-key bootstrap: set `admin` and a separate
+    /// `recovery_admin` in one call, so the deployment can recover via
+    /// `recover_admin` if the sole admin key is lost. Both addresses must
+    /// authorize and must differ (`SameAdmin`). Only valid before any admin is
+    /// set (`AdminAlreadySet`); `nominate_new_admin` remains the single-key
+    /// bootstrap path. Emits `setadmin` and `setrecov`.
+    pub fn bootstrap_dual_admin(
+        env: Env,
+        admin: Address,
+        recovery_admin: Address,
+    ) -> Result<(), Error> {
+        if env.storage().instance().has(&DataKey::Admin) {
+            return Err(Error::AdminAlreadySet);
+        }
+        if admin == recovery_admin {
+            return Err(Error::SameAdmin);
+        }
+        admin.require_auth();
+        recovery_admin.require_auth();
+        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::RecoveryAdmin, &recovery_admin);
+        Self::bump_instance(&env);
+        env.events().publish((symbol_short!("setadmin"),), admin);
+        env.events()
+            .publish((symbol_short!("setrecov"),), Some(recovery_admin));
+        Ok(())
+    }
+
+    /// The configured recovery admin, if any.
+    pub fn recovery_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::RecoveryAdmin)
+    }
+
+    /// Set or clear the recovery admin. Only the current admin may call this;
+    /// the recovery admin must differ from the admin (`SameAdmin`). Emits
+    /// `setrecov`.
+    pub fn set_recovery_admin(env: Env, recovery_admin: Option<Address>) -> Result<(), Error> {
+        let admin = Self::require_admin(&env)?;
+        admin.require_auth();
+        match &recovery_admin {
+            Some(recovery) if *recovery == admin => return Err(Error::SameAdmin),
+            Some(recovery) => env
+                .storage()
+                .instance()
+                .set(&DataKey::RecoveryAdmin, recovery),
+            None => env.storage().instance().remove(&DataKey::RecoveryAdmin),
+        }
+        Self::bump_instance(&env);
+        env.events()
+            .publish((symbol_short!("setrecov"),), recovery_admin);
+        Ok(())
+    }
+
+    /// Replace a lost admin key. Only the recovery admin may call this.
+    /// Sets `new_admin` as admin immediately and clears any pending admin
+    /// nomination. The recovery admin itself is unchanged. Errors
+    /// `RecoveryAdminNotSet`, `AdminNotSet`, or `SameAdmin`. Emits `recover`.
+    pub fn recover_admin(env: Env, new_admin: Address) -> Result<(), Error> {
+        let recovery: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::RecoveryAdmin)
+            .ok_or(Error::RecoveryAdminNotSet)?;
+        recovery.require_auth();
+        let old_admin = Self::require_admin(&env)?;
+        if new_admin == old_admin || new_admin == recovery {
+            return Err(Error::SameAdmin);
+        }
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingAdminExpiry);
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        Self::bump_instance(&env);
+        env.events()
+            .publish((symbol_short!("recover"),), (old_admin, new_admin));
+        Ok(())
+    }
+
     /// Set or clear the emergency pause on all registry mutations.
     ///
     /// When `paused` is `true` every write method returns
@@ -2349,7 +2625,7 @@ impl VaultRegistry {
     pub fn add_verifier(env: Env, verifier: Address) -> Result<(), Error> {
         let admin = Self::require_admin(&env)?;
         admin.require_auth();
-        Self::add_verifier_internal(&env, verifier);
+        Self::add_verifier_internal(&env, &admin, verifier);
         Ok(())
     }
 
@@ -2357,7 +2633,7 @@ impl VaultRegistry {
     pub fn remove_verifier(env: Env, verifier: Address) -> Result<(), Error> {
         let admin = Self::require_admin(&env)?;
         admin.require_auth();
-        Self::remove_verifier_internal(&env, verifier);
+        Self::remove_verifier_internal(&env, &admin, verifier);
         Ok(())
     }
 
@@ -2379,8 +2655,8 @@ impl VaultRegistry {
             return Err(Error::AlreadyRegistered);
         }
 
-        Self::remove_verifier_internal(&env, old_verifier.clone());
-        Self::add_verifier_internal(&env, new_verifier.clone());
+        Self::remove_verifier_internal(&env, &admin, old_verifier.clone());
+        Self::add_verifier_internal(&env, &admin, new_verifier.clone());
         env.events().publish(
             (symbol_short!("verrot"), old_verifier.clone()),
             VerifierRotation {
@@ -2644,8 +2920,14 @@ impl VaultRegistry {
             .instance()
             .set(&DataKey::Settler(settler.clone()), &true);
         Self::bump_instance(&env);
-        env.events()
-            .publish((symbol_short!("addsettlr"), settler), true);
+        env.events().publish(
+            (symbol_short!("addsettlr"), settler.clone()),
+            RoleChange {
+                admin: admin,
+                target: settler,
+                granted: true,
+            },
+        );
         Ok(())
     }
 
@@ -2657,8 +2939,14 @@ impl VaultRegistry {
             .instance()
             .set(&DataKey::Settler(settler.clone()), &false);
         Self::bump_instance(&env);
-        env.events()
-            .publish((symbol_short!("rmsettlr"), settler), false);
+        env.events().publish(
+            (symbol_short!("rmsettlr"), settler.clone()),
+            RoleChange {
+                admin: admin,
+                target: settler,
+                granted: false,
+            },
+        );
         Ok(())
     }
 
@@ -2676,7 +2964,8 @@ impl VaultRegistry {
     /// address currently holding the settler role may call this.
     ///
     /// - `receipt_id` must be unique (max 64 bytes, non-empty); duplicate ids
-    ///   error `ReceiptAlreadyExists`.
+    ///   error `ReceiptAlreadyExists`. Use `record_payment_idempotent` for a
+    ///   retry-safe variant that returns the stored receipt instead.
     /// - `resource_id` must refer to an existing registered resource
     ///   (`NotFound` otherwise).
     /// - `amount` must be `> 0` (`InvalidPaymentAmount` otherwise).
@@ -2702,28 +2991,26 @@ impl VaultRegistry {
         amount: i128,
         tx_hash: String,
     ) -> Result<(), Error> {
-        Self::record_payment_inner(
+        Self::check_payment_args(
             &env,
-            settler,
-            receipt_id.clone(),
-            resource_id,
-            payer,
+            &settler,
+            &receipt_id,
+            &resource_id,
+            &payer,
             amount,
-            tx_hash.clone(),
+            &tx_hash,
         )?;
-        env.events()
-            .publish((symbol_short!("nomemo"), receipt_id.clone()), (receipt_id, tx_hash));
+        Self::write_payment(&env, receipt_id, resource_id, payer, amount, tx_hash)?;
         Ok(())
     }
 
-    /// Same as `record_payment`, but additionally requires the settlement
-    /// transaction's `MEMO_TEXT` (`memo`) to be the canonical provenance memo
-    /// `mv:<resource_id>` for the paid resource; anything else errors
-    /// `InvalidPaymentMemo`. The memo is stored with the receipt and readable
-    /// via `get_payment_memo`. The settler is responsible for passing the memo
-    /// exactly as it appears on the Stellar transaction identified by `tx_hash`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn record_payment_with_memo(
+    /// Retry-safe `record_payment`: same auth, validation, and pause rules,
+    /// but returns the stored receipt. If `receipt_id` is already recorded
+    /// with the same `resource_id`, `payer`, `amount`, and `tx_hash`, that
+    /// receipt is returned unchanged, whatever its state, with no write and
+    /// no event. The same id with different arguments still errors
+    /// `ReceiptAlreadyExists`.
+    pub fn record_payment_idempotent(
         env: Env,
         settler: Address,
         receipt_id: String,
@@ -2731,113 +3018,32 @@ impl VaultRegistry {
         payer: Address,
         amount: i128,
         tx_hash: String,
-        memo: String,
-    ) -> Result<(), Error> {
-        Self::validate_resource_id(&resource_id)?;
-        if !Self::is_canonical_payment_memo(&memo, &resource_id) {
-            return Err(Error::InvalidPaymentMemo);
-        }
-        Self::record_payment_inner(
+    ) -> Result<PaymentReceipt, Error> {
+        Self::check_payment_args(
             &env,
-            settler,
-            receipt_id.clone(),
-            resource_id,
-            payer,
+            &settler,
+            &receipt_id,
+            &resource_id,
+            &payer,
             amount,
-            tx_hash,
+            &tx_hash,
         )?;
-        let key = DataKey::PaymentMemo(receipt_id);
-        env.storage().persistent().set(&key, &memo);
-        Self::bump_persistent(&env, &key);
-        Ok(())
-    }
-
-    /// Canonical settlement memo stored for `receipt_id` by
-    /// `record_payment_with_memo`, or `None` if the receipt was recorded
-    /// without one (via `record_payment`) or does not exist.
-    pub fn get_payment_memo(env: Env, receipt_id: String) -> Option<String> {
-        env.storage()
+        let stored: Option<PaymentReceipt> = env
+            .storage()
             .persistent()
-            .get(&DataKey::PaymentMemo(receipt_id))
-    }
-
-    fn is_canonical_payment_memo(memo: &String, resource_id: &String) -> bool {
-        let memo = Self::string_bytes(memo);
-        let id = Self::string_bytes(resource_id);
-        let prefix = PAYMENT_MEMO_PREFIX.as_bytes();
-        memo.len() == prefix.len() + id.len()
-            && memo.starts_with(prefix)
-            && memo[prefix.len()..] == id[..]
-    }
-
-    fn record_payment_inner(
-        env: &Env,
-        settler: Address,
-        receipt_id: String,
-        resource_id: String,
-        payer: Address,
-        amount: i128,
-        tx_hash: String,
-    ) -> Result<(), Error> {
-        let env = env.clone();
-        settler.require_auth();
-        if !Self::is_settler(env.clone(), settler.clone()) {
-            return Err(Error::NotSettler);
+            .get(&DataKey::PaymentReceipt(receipt_id.clone()));
+        match stored {
+            Some(receipt)
+                if receipt.resource_id == resource_id
+                    && receipt.payer == payer
+                    && receipt.amount == amount
+                    && receipt.tx_hash == tx_hash =>
+            {
+                Ok(receipt)
+            }
+            Some(_) => Err(Error::ReceiptAlreadyExists),
+            None => Self::write_payment(&env, receipt_id, resource_id, payer, amount, tx_hash),
         }
-
-        Self::validate_receipt_id(&receipt_id)?;
-        payer.require_auth();
-        Self::require_not_paused(&env)?;
-        Self::validate_resource_id(&resource_id)?;
-        Self::validate_payment_amount(amount)?;
-        Self::validate_tx_hash(&tx_hash)?;
-
-        // The referenced resource must exist.
-        let resource = Self::load(&env, &resource_id)?;
-
-        // Consistency guard: payment amount must match the resource's current price.
-        if amount != resource.price {
-            return Err(Error::PaymentAmountMismatch);
-        }
-
-        let receipt_key = DataKey::PaymentReceipt(receipt_id.clone());
-        if env.storage().persistent().has(&receipt_key) {
-            return Err(Error::ReceiptAlreadyExists);
-        }
-        // A single Stellar transaction must settle at most one receipt: the
-        // tx hash is the ground truth the facilitator records against, so two
-        // receipts with the same tx_hash would double-count one payment.
-        let tx_hash_key = DataKey::PaymentTxHash(tx_hash.clone());
-        if env.storage().persistent().has(&tx_hash_key) {
-            return Err(Error::DuplicateTxHash);
-        }
-        let receipt = PaymentReceipt {
-            receipt_id: receipt_id.clone(),
-            resource_id: resource_id.clone(),
-            payer: payer.clone(),
-            amount,
-            state: PaymentState::Escrowed,
-            tx_hash,
-            recorded_at: env.ledger().sequence(),
-            ledger: env.ledger().sequence(),
-        };
-
-        env.storage().persistent().set(&receipt_key, &receipt);
-        Self::bump_persistent(&env, &receipt_key);
-
-        // Secondary indexes: `(resource_id, payer)` -> most recent receipt id
-        // (for `get_payment_receipt`), and `tx_hash` -> receipt id (enforces
-        // one receipt per Stellar settlement transaction).
-        let index_key = DataKey::PaymentIndex(resource_id, payer);
-        env.storage().persistent().set(&index_key, &receipt_id);
-        Self::bump_persistent(&env, &index_key);
-
-        env.storage().persistent().set(&tx_hash_key, &receipt_id);
-        Self::bump_persistent(&env, &tx_hash_key);
-
-        env.events()
-            .publish((symbol_short!("payment"), receipt_id), receipt);
-        Ok(())
     }
 
     /// Advance a payment receipt from `Escrowed` to `Settled`. Only an
@@ -3051,8 +3257,14 @@ impl VaultRegistry {
             .instance()
             .set(&DataKey::Moderator(moderator.clone()), &true);
         Self::bump_instance(&env);
-        env.events()
-            .publish((symbol_short!("addmod"), moderator), true);
+        env.events().publish(
+            (symbol_short!("addmod"), moderator.clone()),
+            RoleChange {
+                admin: admin,
+                target: moderator,
+                granted: true,
+            },
+        );
         Ok(())
     }
 
@@ -3064,8 +3276,14 @@ impl VaultRegistry {
             .instance()
             .set(&DataKey::Moderator(moderator.clone()), &false);
         Self::bump_instance(&env);
-        env.events()
-            .publish((symbol_short!("rmmod"), moderator), false);
+        env.events().publish(
+            (symbol_short!("rmmod"), moderator.clone()),
+            RoleChange {
+                admin: admin,
+                target: moderator,
+                granted: false,
+            },
+        );
         Ok(())
     }
 
@@ -3108,19 +3326,7 @@ impl VaultRegistry {
         let was_flagged = resource.dispute_flag.is_flagged();
         resource.dispute_flag = DisputeFlag::Flagged(reason);
         Self::save(&env, &mut resource);
-        // Start the resolution clock on a fresh flag; re-flagging keeps the
-        // original deadline so a moderator cannot extend it indefinitely.
-        if !was_flagged {
-            let window = Self::flag_resolution_window(env.clone());
-            let key = DataKey::FlagDeadline(id.clone());
-            if window > 0 {
-                let deadline = env.ledger().sequence().saturating_add(window);
-                env.storage().persistent().set(&key, &deadline);
-                Self::bump_persistent(&env, &key);
-            } else {
-                env.storage().persistent().remove(&key);
-            }
-        }
+        Self::record_flag_moderator(&env, &id, &moderator);
         env.events().publish(
             (symbol_short!("flag"), id.clone()),
             FlagEvent {
@@ -3154,86 +3360,7 @@ impl VaultRegistry {
         let mut resource = Self::load(&env, &id)?;
         resource.dispute_flag = DisputeFlag::NoFlag;
         Self::save(&env, &mut resource);
-        env.storage()
-            .persistent()
-            .remove(&DataKey::FlagDeadline(id.clone()));
-        env.events()
-            .publish((symbol_short!("unflag"), id.clone()), id);
-        Ok(())
-    }
-
-    /// Set how many ledgers a moderator has to resolve a flag before it
-    /// becomes overdue. Applies to flags raised after the change; `0` disables
-    /// deadlines. Admin only. Errors `InvalidFlagResolutionWindow` above
-    /// `MAX_FLAG_RESOLUTION_WINDOW`. Emits `flagwin`.
-    pub fn set_flag_resolution_window(env: Env, window_ledgers: u32) -> Result<(), Error> {
-        let admin = Self::require_admin(&env)?;
-        admin.require_auth();
-        Self::require_not_paused(&env)?;
-        if window_ledgers > MAX_FLAG_RESOLUTION_WINDOW {
-            return Err(Error::InvalidFlagResolutionWindow);
-        }
-        env.storage()
-            .instance()
-            .set(&DataKey::FlagResolutionWindow, &window_ledgers);
-        Self::bump_instance(&env);
-        env.events()
-            .publish((symbol_short!("flagwin"),), window_ledgers);
-        Ok(())
-    }
-
-    /// Configured flag resolution window in ledgers (`0` = no deadline).
-    pub fn flag_resolution_window(env: Env) -> u32 {
-        env.storage()
-            .instance()
-            .get(&DataKey::FlagResolutionWindow)
-            .unwrap_or(0)
-    }
-
-    /// Ledger sequence after which the active flag on `id` is overdue, or
-    /// `None` if the resource is not flagged or was flagged with no window.
-    pub fn get_flag_deadline(env: Env, id: String) -> Option<u32> {
-        env.storage().persistent().get(&DataKey::FlagDeadline(id))
-    }
-
-    /// Whether the active flag on `id` has passed its resolution deadline.
-    /// Off-chain indexers and moderation dashboards should escalate overdue
-    /// flags to the admin, who may then call `force_resolve_flag`.
-    pub fn is_flag_overdue(env: Env, id: String) -> bool {
-        match Self::get_flag_deadline(env.clone(), id) {
-            Some(deadline) => env.ledger().sequence() > deadline,
-            None => false,
-        }
-    }
-
-    /// Admin escape hatch for a flag a moderator never resolved: clears the
-    /// dispute flag once its resolution deadline has passed. Errors
-    /// `NotFlagged` if the resource is not flagged and `FlagNotOverdue` if the
-    /// deadline has not passed (or none was set). Emits `flagfrc` and `unflag`.
-    pub fn force_resolve_flag(env: Env, id: String, admin: Address) -> Result<(), Error> {
-        let current = Self::require_admin(&env)?;
-        if admin != current {
-            return Err(Error::Unauthorized);
-        }
-        admin.require_auth();
-        Self::require_not_paused(&env)?;
-        Self::validate_resource_id(&id)?;
-        let mut resource = Self::load(&env, &id)?;
-        if !resource.dispute_flag.is_flagged() {
-            return Err(Error::NotFlagged);
-        }
-        let deadline = Self::get_flag_deadline(env.clone(), id.clone())
-            .ok_or(Error::FlagNotOverdue)?;
-        if env.ledger().sequence() <= deadline {
-            return Err(Error::FlagNotOverdue);
-        }
-        resource.dispute_flag = DisputeFlag::NoFlag;
-        Self::save(&env, &mut resource);
-        env.storage()
-            .persistent()
-            .remove(&DataKey::FlagDeadline(id.clone()));
-        env.events()
-            .publish((symbol_short!("flagfrc"), id.clone()), (admin, deadline));
+        Self::record_flag_moderator(&env, &id, &moderator);
         env.events()
             .publish((symbol_short!("unflag"), id.clone()), id);
         Ok(())
@@ -3287,6 +3414,7 @@ impl VaultRegistry {
         let key = DataKey::FlagReasonHash(id.clone());
         env.storage().persistent().set(&key, &reason_hash);
         Self::bump_persistent(&env, &key);
+        Self::record_flag_moderator(&env, &id, &moderator);
 
         env.events()
             .publish((symbol_short!("flagrsn"), id), (moderator, reason_hash));
@@ -3299,6 +3427,27 @@ impl VaultRegistry {
         Self::validate_resource_id(&id)?;
         let key = DataKey::FlagReasonHash(id);
         env.storage().persistent().get(&key).ok_or(Error::NotFound)
+    }
+
+    /// Whether a resource currently carries a moderator dispute flag.
+    /// Errors with `NotFound` if the resource does not exist.
+    pub fn is_flagged(env: Env, id: String) -> Result<bool, Error> {
+        Self::validate_resource_id(&id)?;
+        Ok(Self::load(&env, &id)?.dispute_flag.is_flagged())
+    }
+
+    /// Dispute flag, reason hash, and last acting moderator for a resource in
+    /// one read. Errors with `NotFound` if the resource does not exist; a
+    /// resource no moderator has touched returns `NoFlag` and two `None`s.
+    pub fn flag_details(env: Env, id: String) -> Result<FlagDetails, Error> {
+        Self::validate_resource_id(&id)?;
+        let resource = Self::load(&env, &id)?;
+        let storage = env.storage().persistent();
+        Ok(FlagDetails {
+            dispute_flag: resource.dispute_flag,
+            reason_hash: storage.get(&DataKey::FlagReasonHash(id.clone())),
+            last_moderator: storage.get(&DataKey::FlagModerator(id)),
+        })
     }
 
     /// Extend the TTL of a resource's persistent storage entry.
@@ -3375,6 +3524,88 @@ impl VaultRegistry {
             return Err(Error::InvalidTxHash);
         }
         Ok(())
+    }
+
+    /// Auth, role, pause, and argument checks shared by `record_payment` and
+    /// `record_payment_idempotent`, in the order `record_payment` applies them.
+    fn check_payment_args(
+        env: &Env,
+        settler: &Address,
+        receipt_id: &String,
+        resource_id: &String,
+        payer: &Address,
+        amount: i128,
+        tx_hash: &String,
+    ) -> Result<(), Error> {
+        settler.require_auth();
+        if !Self::is_settler(env.clone(), settler.clone()) {
+            return Err(Error::NotSettler);
+        }
+
+        Self::validate_receipt_id(receipt_id)?;
+        payer.require_auth();
+        Self::require_not_paused(env)?;
+        Self::validate_resource_id(resource_id)?;
+        Self::validate_payment_amount(amount)?;
+        Self::validate_tx_hash(tx_hash)
+    }
+
+    /// Store a new `Escrowed` receipt with its secondary indexes and emit the
+    /// `payment` event. Callers run `check_payment_args` first.
+    fn write_payment(
+        env: &Env,
+        receipt_id: String,
+        resource_id: String,
+        payer: Address,
+        amount: i128,
+        tx_hash: String,
+    ) -> Result<PaymentReceipt, Error> {
+        // The referenced resource must exist.
+        let resource = Self::load(env, &resource_id)?;
+
+        // Consistency guard: payment amount must match the resource's current price.
+        if amount != resource.price {
+            return Err(Error::PaymentAmountMismatch);
+        }
+
+        let receipt_key = DataKey::PaymentReceipt(receipt_id.clone());
+        if env.storage().persistent().has(&receipt_key) {
+            return Err(Error::ReceiptAlreadyExists);
+        }
+        // A single Stellar transaction must settle at most one receipt: the
+        // tx hash is the ground truth the facilitator records against, so two
+        // receipts with the same tx_hash would double-count one payment.
+        let tx_hash_key = DataKey::PaymentTxHash(tx_hash.clone());
+        if env.storage().persistent().has(&tx_hash_key) {
+            return Err(Error::DuplicateTxHash);
+        }
+        let receipt = PaymentReceipt {
+            receipt_id: receipt_id.clone(),
+            resource_id: resource_id.clone(),
+            payer: payer.clone(),
+            amount,
+            state: PaymentState::Escrowed,
+            tx_hash,
+            recorded_at: env.ledger().sequence(),
+            ledger: env.ledger().sequence(),
+        };
+
+        env.storage().persistent().set(&receipt_key, &receipt);
+        Self::bump_persistent(env, &receipt_key);
+
+        // Secondary indexes: `(resource_id, payer)` -> most recent receipt id
+        // (for `get_payment_receipt`), and `tx_hash` -> receipt id (enforces
+        // one receipt per Stellar settlement transaction).
+        let index_key = DataKey::PaymentIndex(resource_id, payer);
+        env.storage().persistent().set(&index_key, &receipt_id);
+        Self::bump_persistent(env, &index_key);
+
+        env.storage().persistent().set(&tx_hash_key, &receipt_id);
+        Self::bump_persistent(env, &tx_hash_key);
+
+        env.events()
+            .publish((symbol_short!("payment"), receipt_id), receipt.clone());
+        Ok(receipt)
     }
 
     fn validate_resource_id(id: &String) -> Result<(), Error> {
@@ -3656,6 +3887,13 @@ impl VaultRegistry {
             .ok_or(Error::NotFound)
     }
 
+    /// Remember `moderator` as the last to act on `id`'s moderation state.
+    fn record_flag_moderator(env: &Env, id: &String, moderator: &Address) {
+        let key = DataKey::FlagModerator(id.clone());
+        env.storage().persistent().set(&key, moderator);
+        Self::bump_persistent(env, &key);
+    }
+
     fn save(env: &Env, resource: &mut Resource) {
         resource.version = resource.version.checked_add(1).unwrap_or(resource.version);
         resource.updated_at = env.ledger().sequence();
@@ -3782,22 +4020,34 @@ impl VaultRegistry {
         Self::bump_instance(env);
     }
 
-    fn add_verifier_internal(env: &Env, verifier: Address) {
+    fn add_verifier_internal(env: &Env, admin: &Address, verifier: Address) {
         env.storage()
             .instance()
             .set(&DataKey::Verifier(verifier.clone()), &true);
         Self::bump_instance(env);
-        env.events()
-            .publish((symbol_short!("addverif"), verifier), true);
+        env.events().publish(
+            (symbol_short!("addverif"), verifier.clone()),
+            RoleChange {
+                admin: admin.clone(),
+                target: verifier,
+                granted: true,
+            },
+        );
     }
 
-    fn remove_verifier_internal(env: &Env, verifier: Address) {
+    fn remove_verifier_internal(env: &Env, admin: &Address, verifier: Address) {
         env.storage()
             .instance()
             .set(&DataKey::Verifier(verifier.clone()), &false);
         Self::bump_instance(env);
-        env.events()
-            .publish((symbol_short!("rmverif"), verifier), false);
+        env.events().publish(
+            (symbol_short!("rmverif"), verifier.clone()),
+            RoleChange {
+                admin: admin.clone(),
+                target: verifier,
+                granted: false,
+            },
+        );
     }
 
     /// The current admin, or `AdminNotSet` if `nominate_new_admin` has never

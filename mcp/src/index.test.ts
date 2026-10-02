@@ -1169,11 +1169,34 @@ describe("dry-run – publish validation", () => {
 describe("dry-run – buy validation", () => {
   beforeEach(() => {
     _setAgentWallet(testWallet);
+    vi.stubEnv("MINDVAULT_MAX_AUTO_PAY_USDC", undefined);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(mockResponse({ price: "5.00" }));
   });
 
   afterEach(() => {
     _setAgentWallet(null);
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
+  });
+
+  it("uses the live payment ceiling and per-call override for the quoted price", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(mockResponse({ price: "10.01" }));
+
+    const result = await dispatchTool("mindvault_buy", {
+      resourceId: "res-001",
+      dryRun: true,
+      maxAutoPayUsdc: "10.01",
+    });
+
+    expect(JSON.parse(result).intentions.estimatedPrice).toBe("10.01");
+  });
+
+  it("rejects a quoted price above the default ceiling without an override", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(mockResponse({ price: "10.01" }));
+
+    await expect(
+      dispatchTool("mindvault_buy", { resourceId: "res-001", dryRun: true }),
+    ).rejects.toThrow(/exceeds the automatic payment ceiling/);
   });
 
   it("returns dry-run result without submitting payment", async () => {
@@ -1199,6 +1222,7 @@ describe("dry-run – buy validation", () => {
 
     const parsed = JSON.parse(result);
     expect(parsed.validation.resourceId.valid).toBe(false);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
   it("shows required wallet state in intentions", async () => {

@@ -38,6 +38,24 @@ Without a `progressToken` the tool behaves exactly as before — no notification
 are sent, and the final result is unchanged. `progress` increases with every
 notification, as the MCP spec requires.
 
+## Delivery order
+
+Every progress notification for a call is sent **before** that call's result,
+and none is sent after it. A notification belongs to the request that carried
+its token: once the result is out, some transports have already closed that
+request's stream (Streamable HTTP ends the SSE response) and drop a later
+notification without an error, and the client has stopped listening for the
+token. An update that arrived after the result would never be shown, so a long
+publish would look hung right up to its result.
+
+The server enforces this per call with `scopeProgressToRequest` in
+[`mcp/src/progress.ts`](../mcp/src/progress.ts). Before the tool result is
+returned — success or error — the call handler waits for any notification still
+being written, then closes the scope, so an update a tool emits afterwards (a
+fire-and-forget call, or a callback that outlives the tool) is dropped instead
+of reaching the transport. Both the stdio entry point and servers built with
+[`createMindVaultServer`](mcp-server-factory.md) do this.
+
 ## Publish verification (`mindvault_publish_status`)
 
 Verification is asynchronous: a freshly published resource starts at

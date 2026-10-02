@@ -51,6 +51,7 @@ baseline for comparing one revision of the contract against another.
 | PaymentIndex -> receipt id | persistent | 104 |    72 |   176 |    240 |
 | PurchaseReceipt (anchor)   | persistent | 108 |   300 |   408 |    480 |
 | FlagReasonHash             | persistent |  68 |    72 |   140 |    200 |
+| FlagModerator              | persistent |  68 |    40 |   108 |    160 |
 | AttestationHash            | persistent |  56 |    80 |   136 |    160 |
 | FeeConfig                  | instance   |  32 |   136 |   168 |    192 |
 | FeeDestination             | instance   |  36 |    76 |   112 |    192 |
@@ -86,6 +87,10 @@ shared bounded view and is not included in the per-registration aggregate.
   three role grants) share the contract's instance TTL, so they are bumped
   together and never archive independently. They are all small; `CreatorCount`
   is the only one that grows with the number of distinct creators.
+- **`FlagModerator`** holds a single `Address`: the moderator whose
+  `flag_resource`, `unflag_resource`, or `set_flag_reason_hash` came last,
+  read back by `flag_details`. It is one entry per moderated resource and is
+  overwritten in place, so it never grows.
 - **`DataKey::DisputeFlag` is never written.** The dispute flag lives on the
   `Resource` struct (see `flag_resource`), so the key exists in the `DataKey`
   enum without a corresponding entry.

@@ -52,7 +52,7 @@ vi.mock("@mindvault/registry-client", async (importOriginal) => {
   };
 });
 
-import { createProgressEmitter, type ProgressContext } from "./progress.js";
+import { createProgressEmitter, scopeProgressToRequest, type ProgressContext } from "./progress.js";
 
 // ── createProgressEmitter unit tests ────────────────────────────────────────
 
@@ -139,5 +139,82 @@ describe("createProgressEmitter", () => {
     await emit(4, 4, "d");
 
     expect(send).toHaveBeenCalledTimes(4);
+  });
+});
+
+// ── scopeProgressToRequest (#841) ───────────────────────────────────────────
+
+/** A send that stays pending until the test resolves or rejects it. */
+function deferredSend() {
+  const pending: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];
+  const send = vi.fn(
+    () =>
+      new Promise<void>((resolve, reject) => {
+        pending.push({ resolve, reject });
+      }),
+  );
+  return { send, pending };
+}
+
+describe("scopeProgressToRequest", () => {
+  it("forwards every update while the call is running", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const progress = scopeProgressToRequest(createProgressEmitter({ token: "t", send }));
+
+    await progress.emit(1, 2, "a");
+    await progress.emit(2, 2, "b");
+
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send.mock.calls[1][0]).toMatchObject({ params: { progress: 2, message: "b" } });
+  });
+
+  it("settle waits for a send that is still in flight", async () => {
+    const { send, pending } = deferredSend();
+    const progress = scopeProgressToRequest(send);
+    void progress.emit(1, 1, "slow");
+
+    let settled = false;
+    const settling = progress.settle().then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    pending[0].resolve();
+    await settling;
+    expect(settled).toBe(true);
+  });
+
+  it("drops updates emitted after settle instead of sending them", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const progress = scopeProgressToRequest(send);
+
+    await progress.emit(1, 2, "before");
+    await progress.settle();
+    await progress.emit(2, 2, "after");
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith(1, 2, "before");
+  });
+
+  it("still rejects the awaited emit on a failed send, but settle does not throw", async () => {
+    const { send, pending } = deferredSend();
+    const progress = scopeProgressToRequest(send);
+
+    const emitted = progress.emit(1, 1, "x");
+    pending[0].reject(new Error("transport closed"));
+
+    await expect(emitted).rejects.toThrow("transport closed");
+    await expect(progress.settle()).resolves.toBeUndefined();
+  });
+
+  it("does not leave an unhandled rejection for an update nobody awaited", async () => {
+    const progress = scopeProgressToRequest(() => {
+      throw new Error("sync failure");
+    });
+
+    void progress.emit(1, 1, "x");
+
+    await expect(progress.settle()).resolves.toBeUndefined();
   });
 });
