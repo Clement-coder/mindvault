@@ -123,15 +123,13 @@ export const ENV_VAR_DOCS: EnvVarDoc[] = [
   },
   {
     name: "MINDVAULT_RPC_FAILOVER_COOLDOWN_MS",
-    description:
-      "How long a failed Soroban endpoint is skipped before it is retried.",
+    description: "How long a failed Soroban endpoint is skipped before it is retried.",
     default: `${DEFAULT_COOLDOWN_MS} (ms)`,
     source: "mcp/src/rpcFailover.ts",
   },
   {
     name: "MINDVAULT_RPC_FAILOVER_MAX_ATTEMPTS",
-    description:
-      "Endpoint tries per call during failover. 0 tries every configured endpoint.",
+    description: "Endpoint tries per call during failover. 0 tries every configured endpoint.",
     default: `${DEFAULT_MAX_ATTEMPTS} (unlimited)`,
     source: "mcp/src/rpcFailover.ts",
   },
@@ -142,10 +140,7 @@ export const ENV_VAR_DOCS: EnvVarDoc[] = [
     description:
       "Operator-side unlock for mainnet mutations. Parsed fail-safe: only the documented opt-in spellings widen the policy, anything else — including an unexpanded template placeholder — keeps per-call confirmation (#606). A set-but-ineffective value raises a startup warning.",
     default: DEFAULT_MAINNET_MUTATION_POLICY,
-    values: [
-      "unset/0/false/no/off → per-call-confirm",
-      "1/true/yes → allow-all",
-    ],
+    values: ["unset/0/false/no/off → per-call-confirm", "1/true/yes → allow-all"],
     source: "mcp/src/mainnetGuardrails.ts",
   },
   {
@@ -211,7 +206,8 @@ export const ENV_VAR_DOCS: EnvVarDoc[] = [
   // ── Timeouts & retries ─────────────────────────────────────────────────────
   {
     name: "MINDVAULT_HTTP_TIMEOUT_MS",
-    description: "Request deadline for the MindVault API and sponsored-account service. 0 disables.",
+    description:
+      "Request deadline for the MindVault API and sponsored-account service. 0 disables.",
     default: `${DEFAULT_TIMEOUTS.http} (ms)`,
     source: "mcp/src/httpTimeout.ts",
   },
@@ -287,7 +283,7 @@ export const ENV_VAR_DOCS: EnvVarDoc[] = [
   {
     name: "MINDVAULT_AUDIT_LOG",
     description:
-      "Enable audit logging of tool calls to stderr. Exactly \"1\" enables; other spellings do not.",
+      'Enable audit logging of tool calls to stderr. Exactly "1" enables; other spellings do not.',
     default: "unset (disabled)",
     values: ["1"],
     source: "mcp/src/auditLog.ts",

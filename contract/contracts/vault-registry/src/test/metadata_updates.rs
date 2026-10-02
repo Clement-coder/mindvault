@@ -16,7 +16,10 @@ fn bootstrap_followed_by_second_nominate_uses_two_step_path() {
     assert_eq!(client.admin(), Some(initial_admin.clone())); // admin unchanged
     assert_eq!(client.pending_admin(), Some(second.clone())); // pending set
 
-    // The pending admin must accept before becoming admin.
+    // The pending admin must accept before becoming admin, and only after
+    // the mandatory ledger gap has elapsed.
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + ADMIN_NOMINATION_MIN_GAP);
     client.accept_admin(&second);
     assert_eq!(client.admin(), Some(second));
     assert_eq!(client.pending_admin(), None);
@@ -56,7 +59,10 @@ fn bootstrap_cannot_overwrite_existing_admin() {
     assert_eq!(client.admin(), Some(first_admin.clone())); // still first_admin
     assert_eq!(client.pending_admin(), Some(hijacker.clone()));
 
-    // Only accept_admin by the pending admin finalizes the transfer.
+    // Only accept_admin by the pending admin finalizes the transfer, and only
+    // after the mandatory ledger gap has elapsed.
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + ADMIN_NOMINATION_MIN_GAP);
     client.accept_admin(&hijacker);
     assert_eq!(client.admin(), Some(hijacker));
 }

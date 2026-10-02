@@ -112,7 +112,7 @@ fn creator_listed_count_follows_the_dispute_paths() {
     assert_counts(&client, &creator, 1);
 
     client.open_dispute(&id, &admin);
-    client.emergency_delist(&id, &admin);
+    client.emergency_delist(&id, &admin, &String::from_str(&env, "dispute upheld"));
     assert_counts(&client, &creator, 0);
 
     client.reactivate_resource(&id);

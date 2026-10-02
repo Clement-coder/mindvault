@@ -15,15 +15,34 @@ see [`contract/README.md`](../../README.md).
 | ------------------- | ---------------------------------------------------------- | ------------------------------------------------------ |
 | Testnet contract ID | `CDQKUIADLO5S5WEHEUTTXX2M45WAHVRU2PBEBD6ZGDKMOP5A72FJ3OD4` | Soroban testnet                                        |
 | Soroban RPC         | `https://soroban-testnet.stellar.org`                      |                                                        |
-| 1 USDC              | `10_000_000` stroops                                       | `price` field uses 7 decimal places                    |
-| 0.10 USDC           | `1_000_000` stroops                                        |                                                        |
-| Max price           | `1_000_000_000_000_000_000` stroops                        | 1 trillion USDC                                        |
+| 1 USDC              | `10_000_000` base units                                    | `price` field uses 7 decimal places                    |
+| 0.10 USDC           | `1_000_000` base units                                     |                                                        |
+| Max price           | `1_000_000_000_000_000_000` base units                     | 100 billion USDC (10^18 units at 7 decimals)           |
 | Max metadata        | 512 bytes                                                  | Must start with a supported prefix (see below)         |
 | Max tags            | 8                                                          | Each max 32 bytes, normalized to lowercase ASCII       |
 | Max top tags        | 20                                                         | `top_tags` response cap; counts saturate at `u32::MAX` |
 
 **Metadata pointer prefixes accepted:** `ipfs://`, `ar://`, `https://`,
 `http://`, `sha256:`, `sha-256:`, `0x`.
+
+### USDC units
+
+Every USDC amount in this crate — `Resource::price`, `PaymentReceipt::amount`,
+royalty and fee amounts — is an integer count of **USDC base units**, at
+`USDC_DECIMALS = 7` decimal places. 1 USDC is `10_000_000` base units, the
+precision of Stellar's USDC SAC. `USDC_BASE_UNITS_PER_USDC` is the constant the
+code uses for the conversion, and `record_payment` compares `amount` against
+`price` directly, so the two must be in the same unit — a receipt in a
+different decimal scale is rejected with `PaymentAmountMismatch` rather than
+silently recorded.
+
+**Do not call these "stroops."** A stroop is 10⁻⁵ **XLM**. USDC shares XLM's
+decimal _count_ but not its unit, so dividing a USDC base-unit amount by
+10⁵ is a 100x error, and reading it as 6 decimals is a 10x one. The on-chain
+integer is unambiguous; only the prose was not, which is what this section
+exists to fix. The TypeScript layer still uses `stroopsToUsdc` /
+`usdcToStroops` as function names for the same 10⁻⁷ quantity — see
+`docs/mcp-usdc-units.md` — but they are USDC base units there too.
 
 ### Canonical tag normalization
 
@@ -312,7 +331,7 @@ stellar contract invoke \
   --metadata 'ipfs://QmYwAPJzv5CZsnAzt8auV39tMVyQ4cZ3QqcSBuKkP3jRq8' \
   --tags '["dataset","research"]'
 
-# Update the price to 0.50 USDC (5_000_000 stroops)
+# Update the price to 0.50 USDC (5_000_000 base units)
 stellar contract invoke \
   --id $CONTRACT --rpc-url $RPC --network-passphrase "Test SDF Network ; September 2015" \
   --source my-identity \
@@ -559,10 +578,10 @@ const countByCreatorTx = await registry.creator_resource_count({
 
 ### Registering a resource (write + sign)
 
-`price` is in USDC stroops (7 decimal places): 1 USDC = `10_000_000`.
+`price` is in USDC base units (7 decimal places): 1 USDC = `10_000_000`.
 
 ```typescript
-// 1 USDC = 10_000_000 stroops
+// 1 USDC = 10_000_000 base units
 const ONE_USDC = BigInt(10_000_000);
 
 const tx = await registry.register({
@@ -649,7 +668,7 @@ fn empty_tags(env: &Env) -> Vec<String> { Vec::new(env) }
 let id = String::from_str(&env, "swcn98besxpp6t1u8e77fqz3");
 let metadata = String::from_str(&env, "ipfs://QmYwAPJzv5CZsnAzt8auV39tMVyQ4cZ3QqcSBuKkP3jRq8");
 
-// 1 USDC = 10_000_000 stroops
+// 1 USDC = 10_000_000 base units
 client.register(&creator, &id, &10_000_000i128, &metadata, &tags(&env, &["dataset"]));
 
 assert_eq!(client.count(), 1);
@@ -785,7 +804,7 @@ assert_eq!(
 
 ## Price encoding reference
 
-`price` is always in **USDC stroops** (7 decimal places, same as the USDC SAC):
+`price` is always in **USDC base units** (7 decimal places, same as the USDC SAC):
 
 | Human amount | Stroops value |
 | ------------ | ------------- |
