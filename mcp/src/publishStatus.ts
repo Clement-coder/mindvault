@@ -74,9 +74,64 @@ export type PublishStatusFetch = {
   } | null;
 };
 
+/** One backend response as returned by the MCP server's `jsonFetch`. */
+export type PublishStatusResponse = {
+  ok: boolean;
+  status: number;
+  data: any;
+};
+
 export function isVerificationSettled(status: string | null | undefined): boolean {
   if (!status) return false;
   return SETTLED_VERIFICATION.has(status as VerificationStatus);
+}
+
+function resourceNotFound(resourceId: string): Error {
+  return new Error(
+    `Resource "${resourceId}" not found. Confirm the id from mindvault_publish or mindvault_browse.`,
+  );
+}
+
+/**
+ * Combine one poll's `/meta` and `/verification` responses into a snapshot.
+ *
+ * A failed request (after `jsonFetch` has exhausted its retries) fails the
+ * poll, except when the other endpoint already reports a terminal
+ * verification status. Both endpoints read the same column and a settled
+ * status never goes back to pending, so that poll has settled: throwing there
+ * discarded a `rejected` the server had already returned and ended a
+ * `wait: true` call in an error instead of stopping at the terminal state
+ * (#840).
+ */
+export function publishStatusFromResponses(
+  resourceId: string,
+  metaRes: PublishStatusResponse,
+  verRes: PublishStatusResponse,
+): PublishStatusFetch {
+  if (metaRes.status === 404 && verRes.status === 404) {
+    throw resourceNotFound(resourceId);
+  }
+
+  const meta = metaRes.ok ? metaRes.data : null;
+  const verification = verRes.ok ? verRes.data : null;
+  const settled =
+    isVerificationSettled(verification?.status) || isVerificationSettled(meta?.verificationStatus);
+
+  if (!settled && !metaRes.ok && metaRes.status !== 404) {
+    throw new Error(
+      `Publish status meta failed [${metaRes.status}]: ${JSON.stringify(metaRes.data)}`,
+    );
+  }
+  if (!settled && !verRes.ok && verRes.status !== 404) {
+    throw new Error(
+      `Publish status verification failed [${verRes.status}]: ${JSON.stringify(verRes.data)}`,
+    );
+  }
+  if (!metaRes.ok && !verRes.ok) {
+    throw resourceNotFound(resourceId);
+  }
+
+  return { meta, verification };
 }
 
 /** The verification status a fetched snapshot reports, defaulting to pending. */

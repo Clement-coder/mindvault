@@ -2437,7 +2437,10 @@ fn expired_admin_nomination_can_be_replaced() {
     env.ledger().set_sequence_number(expiry);
 
     assert_eq!(client.try_nominate_new_admin(&replacement), Ok(Ok(())));
-    assert_eq!(client.pending_admin(), Some(replacement));
+    assert_eq!(client.pending_admin(), Some(replacement.clone()));
+    assert!(client.pending_admin_expiry().unwrap() > expiry);
+    client.accept_admin(&replacement);
+    assert_eq!(client.admin(), Some(replacement));
 }
 
 #[test]
@@ -4457,6 +4460,18 @@ fn full_workflow_emits_exactly_the_documented_events() {
     // `pause_until`).
     client.set_royalty_recipient(&r1, &Some(bob.clone())); // -> "setroyal"
     record(&env, &client, &mut observed);
+    client.set_metadata_pointers(
+        &r1,
+        &Vec::from_array(
+            &env,
+            [
+                String::from_str(&env, "ipfs://m"),
+                String::from_str(&env, "ar://mirror"),
+            ],
+        ),
+        &0,
+    ); // -> "setptrs"
+    record(&env, &client, &mut observed);
 
     let admin1 = Address::generate(&env);
     client.nominate_new_admin(&admin1); // bootstrap -> "setadmin"
@@ -4571,6 +4586,13 @@ fn full_workflow_emits_exactly_the_documented_events() {
     client.unflag_resource(&r0, &moderator); // -> "unflag"
     record(&env, &client, &mut observed);
     client.remove_moderator(&moderator); // -> "rmmod"
+    record(&env, &client, &mut observed);
+
+    // Recovery admin (dual-key bootstrap path).
+    let recovery = Address::generate(&env);
+    client.set_recovery_admin(&Some(recovery.clone())); // -> "setrecov"
+    record(&env, &client, &mut observed);
+    client.recover_admin(&Address::generate(&env)); // -> "recover"
     record(&env, &client, &mut observed);
 
     observed.sort();
@@ -8192,8 +8214,8 @@ fn get_flag_reason_hash_missing_fails() {
 // instead of only surfacing off-chain.
 
 #[test]
-fn add_moderator_emits_address_and_true_payload() {
-    let (env, _creator, _admin, client) = setup_with_admin();
+fn add_moderator_emits_address_and_role_change_payload() {
+    let (env, _creator, admin, client) = setup_with_admin();
     let moderator = Address::generate(&env);
 
     client.add_moderator(&moderator);
@@ -8204,13 +8226,21 @@ fn add_moderator_emits_address_and_true_payload() {
     assert_eq!(sym, Symbol::new(&env, "addmod"));
     let topic_moderator: Address = Address::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
     assert_eq!(topic_moderator, moderator);
-    let flag: bool = bool::try_from_val(&env, &data).unwrap();
-    assert!(flag, "addmod payload must be `true`");
+    let payload: RoleChange = RoleChange::try_from_val(&env, &data).unwrap();
+    assert_eq!(
+        payload,
+        RoleChange {
+            admin: admin.clone(),
+            target: moderator.clone(),
+            granted: true,
+        },
+        "addmod payload must carry the admin actor and target"
+    );
 }
 
 #[test]
-fn remove_moderator_emits_address_and_false_payload() {
-    let (env, _creator, _admin, client) = setup_with_admin();
+fn remove_moderator_emits_address_and_role_change_payload() {
+    let (env, _creator, admin, client) = setup_with_admin();
     let moderator = Address::generate(&env);
     client.add_moderator(&moderator);
 
@@ -8222,8 +8252,16 @@ fn remove_moderator_emits_address_and_false_payload() {
     assert_eq!(sym, Symbol::new(&env, "rmmod"));
     let topic_moderator: Address = Address::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
     assert_eq!(topic_moderator, moderator);
-    let flag: bool = bool::try_from_val(&env, &data).unwrap();
-    assert!(!flag, "rmmod payload must be `false`");
+    let payload: RoleChange = RoleChange::try_from_val(&env, &data).unwrap();
+    assert_eq!(
+        payload,
+        RoleChange {
+            admin: admin.clone(),
+            target: moderator.clone(),
+            granted: false,
+        },
+        "rmmod payload must carry the admin actor and target"
+    );
 }
 
 #[test]
@@ -9119,6 +9157,7 @@ fn storage_key_variant(env: &Env, key: &DataKey) -> Symbol {
 /// Every `DataKey` variant, with the name and arity it must keep across
 /// upgrades. Adding a variant means adding a row here — the exhaustive match in
 /// `storage_key_migration_covers_every_variant` will not compile until you do.
+fn storage_key_wire_contract(env: &Env) -> [(DataKey, &'static str, u32); 37] {
 fn storage_key_wire_contract(env: &Env) -> [(DataKey, &'static str, u32); 31] {
     let id = String::from_str(env, "migkey");
     let who = Address::generate(env);
@@ -9161,6 +9200,8 @@ fn storage_key_wire_contract(env: &Env) -> [(DataKey, &'static str, u32); 31] {
         (DataKey::PaymentTxHash(id.clone()), "PaymentTxHash", 2),
         (DataKey::AttestationHash(id.clone()), "AttestationHash", 2),
         (DataKey::PendingAdminExpiry, "PendingAdminExpiry", 1),
+        (DataKey::TagCount(id.clone()), "TagCount", 2),
+        (DataKey::TopTags, "TopTags", 1),
         (
             DataKey::CreatorListedCount(who.clone()),
             "CreatorListedCount",
@@ -9168,8 +9209,15 @@ fn storage_key_wire_contract(env: &Env) -> [(DataKey, &'static str, u32); 31] {
         ),
         (DataKey::MemoHash(id.clone()), "MemoHash", 2),
         (DataKey::FeeDestination, "FeeDestination", 1),
+        (DataKey::RefundReceipt(id.clone()), "RefundReceipt", 2),
+        (DataKey::RefundedAmount(id.clone()), "RefundedAmount", 2),
+        (DataKey::RefundTxHash(id.clone()), "RefundTxHash", 2),
+        (DataKey::RefundDeadline(id.clone()), "RefundDeadline", 2),
+        (DataKey::RefundWindow, "RefundWindow", 1),
+        (DataKey::PaymentRecipient(id.clone()), "PaymentRecipient", 2),
         (DataKey::TopTags, "TopTags", 1),
         (DataKey::TagCount(id), "TagCount", 2),
+        (DataKey::FlagModerator(id), "FlagModerator", 2),
     ]
 }
 
@@ -9211,6 +9259,7 @@ fn storage_key_migration_covers_every_variant() {
     let contract = storage_key_wire_contract(&env);
     assert_eq!(
         contract.len(),
+        37,
         31,
         "storage_key_wire_contract must list every DataKey variant"
     );
@@ -9243,11 +9292,20 @@ fn storage_key_migration_covers_every_variant() {
             DataKey::PaymentTxHash(_) => "PaymentTxHash",
             DataKey::AttestationHash(_) => "AttestationHash",
             DataKey::PendingAdminExpiry => "PendingAdminExpiry",
+            DataKey::TagCount(_) => "TagCount",
+            DataKey::TopTags => "TopTags",
             DataKey::CreatorListedCount(_) => "CreatorListedCount",
             DataKey::MemoHash(_) => "MemoHash",
             DataKey::FeeDestination => "FeeDestination",
+            DataKey::RefundReceipt(_) => "RefundReceipt",
+            DataKey::RefundedAmount(_) => "RefundedAmount",
+            DataKey::RefundTxHash(_) => "RefundTxHash",
+            DataKey::RefundDeadline(_) => "RefundDeadline",
+            DataKey::RefundWindow => "RefundWindow",
+            DataKey::PaymentRecipient(_) => "PaymentRecipient",
             DataKey::TopTags => "TopTags",
             DataKey::TagCount(_) => "TagCount",
+            DataKey::FlagModerator(_) => "FlagModerator",
         };
         assert_eq!(
             matched, *name,
@@ -9261,8 +9319,7 @@ fn same_string_addresses_a_different_entry_per_key_variant() {
     let (env, _creator, client) = setup();
     let shared = String::from_str(&env, "collide");
 
-    // Six variants take a bare String. If any two encoded to the same address,
-    // one would overwrite another and a resource id could clobber a tag index.
+    // String-keyed variants must remain distinct even when given identical ids.
     env.as_contract(&client.address, || {
         let keys = [
             DataKey::Resource(shared.clone()),
@@ -9271,6 +9328,12 @@ fn same_string_addresses_a_different_entry_per_key_variant() {
             DataKey::DisputeFlag(shared.clone()),
             DataKey::FlagReasonHash(shared.clone()),
             DataKey::MemoHash(shared.clone()),
+            DataKey::RefundReceipt(shared.clone()),
+            DataKey::RefundedAmount(shared.clone()),
+            DataKey::RefundTxHash(shared.clone()),
+            DataKey::RefundDeadline(shared.clone()),
+            DataKey::PaymentRecipient(shared.clone()),
+            DataKey::TagCount(shared.clone()),
         ];
         for (marker, key) in keys.iter().enumerate() {
             env.storage().persistent().set(key, &(marker as u32));
@@ -10791,3 +10854,5 @@ include!("test/auth_fixtures.rs");
 include!("test/tombstone_read.rs");
 include!("test/creator_listed_count.rs");
 include!("test/memo_hash.rs");
+include!("test/flag_details.rs");
+include!("test/payment_idempotency.rs");

@@ -200,6 +200,23 @@ fn tombstone_removes_resource_from_creator_index() {
 }
 
 #[test]
+fn tombstone_clears_pending_transfer() {
+    let (env, creator, admin, client) = setup_with_admin();
+    let id = register_default(&env, &creator, &client, "tombxfer");
+    let proposed = Address::generate(&env);
+    client.propose_transfer(&id, &proposed);
+
+    client.tombstone_resource(&id, &admin);
+
+    assert_eq!(
+        client.try_accept_transfer(&id),
+        Err(Ok(Error::NoPendingTransfer))
+    );
+    assert_eq!(client.get(&id).creator, creator);
+    assert_eq!(client.get(&id).state, ResourceState::Tombstoned);
+}
+
+#[test]
 fn tombstone_decrements_creator_resource_count() {
     let (env, creator, admin, client) = setup_with_admin();
     register_default(&env, &creator, &client, "tombcnt1");
