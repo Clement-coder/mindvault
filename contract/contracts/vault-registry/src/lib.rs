@@ -245,6 +245,14 @@ pub const METHOD_SCHEMA: &[(&str, &str)] = &[
     ("get_purchase_receipt", "—"),
     // ── TTL ───────────────────────────────────────────────────────────────
     ("extend_resource_ttl", "creator"),
+    // ── Creator earnings estimator (#804) ─────────────────────────────────
+    ("creator_earnings_estimate", "—"),
+    // ── Verifier status history (#805) ────────────────────────────────────
+    ("get_verifier_status_history", "—"),
+    // ── Resource state query (#806) ───────────────────────────────────────
+    ("list_by_state", "—"),
+    // ── Ownership transfer with terms handoff (#808) ──────────────────────
+    ("transfer_ownership_with_terms", "creator"),
 ];
 
 /// Canonical list of every error code this contract can return, paired with
@@ -395,6 +403,10 @@ pub const EVENT_SCHEMA: &[(&str, &str)] = &[
         "FeeDestinationUpdated { old_destination, new_destination, ledger }",
     ),
     ("ttlext", "()"),
+    (
+        "txfrterms",
+        "TransferWithTermsEvent { id, previous_owner, new_owner, terms_hash, attestation_reset }",
+    ),
 ];
 
 /// Registry discovery metadata returned by [`VaultRegistry::registry_info`].
@@ -635,6 +647,63 @@ pub struct TagPopularity {
     pub count: u32,
 }
 
+/// A single entry in a verifier's status-change history, stored per verifier.
+/// Written by `set_verification_status`; returned by `get_verifier_status_history`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct VerifierStatusEntry {
+    /// The resource whose verification status changed.
+    pub resource_id: String,
+    /// Previous status.
+    pub old_status: VerificationStatus,
+    /// New status applied.
+    pub new_status: VerificationStatus,
+    /// Attestation hash supplied with this status change, if any.
+    pub attestation_hash: Option<String>,
+    /// Ledger sequence at which this change was recorded.
+    pub ledger: u32,
+}
+
+/// One page of verifier status history with a cursor for the next page.
+/// Mirrors `CatalogPage` semantics: `next_cursor` is `None` at end-of-list.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct VerifierStatusPage {
+    pub items: Vec<VerifierStatusEntry>,
+    pub next_cursor: Option<u32>,
+}
+
+/// Aggregated creator earnings returned by `creator_earnings_estimate`.
+/// Carries both the address and the total in one read so callers do not need
+/// to issue a separate `get_owner` query.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreatorEarningsEstimate {
+    /// The creator whose earnings are aggregated.
+    pub creator: Address,
+    /// Sum of all settled payment amounts (in USDC stroops) for resources
+    /// owned by this creator at the time each payment was settled.
+    pub total_settled: i128,
+    /// Number of settled payment receipts included in `total_settled`.
+    pub settled_count: u32,
+}
+
+/// Structured payload emitted by `transfer_ownership_with_terms` (event topic
+/// `txfrterms`). Extends the basic `transfer` payload with terms-handoff
+/// information so indexers have a full atomic record without extra reads.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct TransferWithTermsEvent {
+    pub id: String,
+    pub previous_owner: Address,
+    pub new_owner: Address,
+    /// The new terms hash set on the incoming owner at the time of transfer.
+    /// `None` when no `new_terms_hash` was supplied.
+    pub terms_hash: Option<String>,
+    /// Whether the attestation hash was cleared as part of this transfer.
+    pub attestation_reset: bool,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
@@ -731,6 +800,15 @@ pub struct MetadataPointers {
     /// Moderator who last called `flag_resource`, `unflag_resource`, or
     /// `set_flag_reason_hash` for a resource. Read back by `flag_details`.
     FlagModerator(String),
+    /// Aggregated settled-payment earnings for a creator wallet address.
+    /// Written by `settle_payment` and read by `creator_earnings_estimate`.
+    /// Value type: `(i128, u32)` tuple — (total USDC stroops of all settled
+    /// receipts for resources owned by this creator at settlement time, count).
+    CreatorEarnings(Address),
+    /// Ordered history of verification status changes for a verifier address.
+    /// Written by `set_verification_status`; read by `get_verifier_status_history`.
+    /// Value type: `Vec<VerifierStatusEntry>`.
+    VerifierHistory(Address),
 }
 
 /// Event data emitted when a resource's metadata pointer is updated.
@@ -1403,7 +1481,7 @@ impl VaultRegistry {
     ) -> Result<(), Error> {
         verifier.require_auth();
         Self::require_not_paused(&env)?;
-        if !Self::is_verifier(env.clone(), verifier) {
+        if !Self::is_verifier(env.clone(), verifier.clone()) {
             return Err(Error::NotVerifier);
         }
 
@@ -1435,6 +1513,24 @@ impl VaultRegistry {
 
         resource.verified = status;
         Self::save(&env, &mut resource);
+
+        // Append to the verifier's status-change history for paginated reads.
+        let hist_key = DataKey::VerifierHistory(verifier.clone());
+        let mut history: Vec<VerifierStatusEntry> = env
+            .storage()
+            .persistent()
+            .get(&hist_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        history.push_back(VerifierStatusEntry {
+            resource_id: id.clone(),
+            old_status,
+            new_status: status,
+            attestation_hash: stored_attestation_hash.clone(),
+            ledger: env.ledger().sequence(),
+        });
+        env.storage().persistent().set(&hist_key, &history);
+        Self::bump_persistent(&env, &hist_key);
+
         env.events().publish(
             (symbol_short!("verify"), id),
             (old_status, status, stored_attestation_hash),
@@ -3658,6 +3754,223 @@ impl VaultRegistry {
         Self::bump_persistent(&env, &key);
         env.events()
             .publish((symbol_short!("ttlext"), resource_id), ());
+        Ok(())
+    }
+
+    // ── Issue #804: creator earnings / royalty balance estimator ──────────
+
+    /// Return the total USDC stroops earned by `creator` across all settled
+    /// payment receipts for resources they owned at settlement time. The
+    /// estimate is a running tally that `settle_payment` increments
+    /// atomically, so it is always consistent without re-scanning history.
+    ///
+    /// Returns a [`CreatorEarningsEstimate`] carrying the creator address,
+    /// the total settled amount, and the count of settled receipts included.
+    ///
+    /// A creator with no settled payments returns `total_settled = 0` and
+    /// `settled_count = 0` — this is not an error.
+    pub fn creator_earnings_estimate(env: Env, creator: Address) -> CreatorEarningsEstimate {
+        let key = DataKey::CreatorEarnings(creator.clone());
+        let (total_settled, settled_count): (i128, u32) = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or((0i128, 0u32));
+        if total_settled != 0 || settled_count != 0 {
+            Self::bump_persistent(&env, &key);
+        }
+        CreatorEarningsEstimate {
+            creator,
+            total_settled,
+            settled_count,
+        }
+    }
+
+    // ── Issue #805: paginated verifier status history reads ───────────────
+
+    /// Return a page of verification status changes performed by `verifier`,
+    /// in chronological order (oldest first).
+    ///
+    /// - `cursor` is a 0-based index into the verifier's history list.
+    /// - `limit` is capped at [`LIST_PAGE_CAP`] (20).
+    /// - `next_cursor` is `Some(next_index)` when more entries exist, or
+    ///   `None` at end-of-list.
+    ///
+    /// A verifier with no recorded history returns an empty page — not an error.
+    pub fn get_verifier_status_history(
+        env: Env,
+        verifier: Address,
+        cursor: u32,
+        limit: u32,
+    ) -> VerifierStatusPage {
+        let key = DataKey::VerifierHistory(verifier);
+        let history: Vec<VerifierStatusEntry> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(&env));
+        let page_size = limit.min(LIST_PAGE_CAP);
+        let total = history.len();
+        let mut items: Vec<VerifierStatusEntry> = Vec::new(&env);
+        let mut i = cursor;
+        while i < total && items.len() < page_size {
+            items.push_back(history.get(i).unwrap());
+            i += 1;
+        }
+        let next_cursor = if i < total { Some(i) } else { None };
+        if total > 0 {
+            Self::bump_persistent(&env, &key);
+        }
+        VerifierStatusPage { items, next_cursor }
+    }
+
+    // ── Issue #806: first-class ResourceState paginated query ─────────────
+
+    /// Paginated list of resources whose lifecycle state exactly matches
+    /// `state`. Unlike the boolean `listed` projection, this distinguishes
+    /// all five states: `Listed`, `Delisted`, `Frozen`, `Disputed`, and
+    /// `Tombstoned`.
+    ///
+    /// - `cursor` is a 0-based global catalog index (same domain as
+    ///   `list_page`'s `cursor`).
+    /// - `limit` is capped at [`LIST_PAGE_CAP`] (20).
+    /// - Returns a [`CatalogPage`] with `items` and `next_cursor`.
+    pub fn list_by_state(
+        env: Env,
+        state: ResourceState,
+        cursor: u32,
+        limit: u32,
+    ) -> CatalogPage {
+        let total: u32 = env.storage().instance().get(&DataKey::Count).unwrap_or(0);
+        let page_size = limit.min(LIST_PAGE_CAP);
+        let mut items: Vec<Resource> = Vec::new(&env);
+        let mut i = cursor;
+        while i < total && items.len() < page_size {
+            let idx_key = DataKey::Index(i);
+            if let Some(id) = env.storage().persistent().get::<DataKey, String>(&idx_key) {
+                Self::bump_persistent(&env, &idx_key);
+                let res_key = DataKey::Resource(id);
+                if let Some(resource) = env
+                    .storage()
+                    .persistent()
+                    .get::<DataKey, Resource>(&res_key)
+                {
+                    Self::bump_persistent(&env, &res_key);
+                    if resource.state == state {
+                        items.push_back(resource);
+                    }
+                }
+            }
+            i += 1;
+        }
+        let next_cursor = if i < total { Some(i) } else { None };
+        CatalogPage { items, next_cursor }
+    }
+
+    // ── Issue #808: ownership transfer with simultaneous terms handoff ─────
+
+    /// Transfer resource ownership while optionally rebinding the new owner's
+    /// terms hash and/or resetting the resource's attestation record
+    /// atomically in the same transaction.
+    ///
+    /// - `id` — resource to transfer.
+    /// - `new_creator` — the incoming owner.
+    /// - `new_terms_hash` — when `Some`, store this hash under the new
+    ///   creator's [`DataKey::CreatorTerms`] entry (max 64 bytes). The
+    ///   *old* owner's terms entry is left unchanged.
+    /// - `reset_attestation` — when `true`, clear the resource's stored
+    ///   attestation hash so the new owner can request fresh verification.
+    ///
+    /// Behaves identically to `transfer_ownership` when both optional
+    /// arguments are `None`/`false`: it errors `AlreadyOwner`, clears any
+    /// pending `propose_transfer`, and emits a `transfer` event. It also
+    /// emits a `txfrterms` event (even when neither optional action was
+    /// taken) so callers who care about terms-aware transfers can index
+    /// just that topic.
+    ///
+    /// Errors:
+    /// - [`Error::AlreadyOwner`] — `new_creator` already owns the resource.
+    /// - [`Error::TermsHashTooLong`] — `new_terms_hash` exceeds 64 bytes.
+    /// - [`Error::ResourceNotMutable`] — resource is `Frozen`, `Disputed`,
+    ///   or `Tombstoned`.
+    /// - [`Error::ContractPaused`] — the registry is paused.
+    pub fn transfer_ownership_with_terms(
+        env: Env,
+        id: String,
+        new_creator: Address,
+        new_terms_hash: Option<String>,
+        reset_attestation: bool,
+    ) -> Result<(), Error> {
+        Self::require_not_paused(&env)?;
+        Self::validate_resource_id(&id)?;
+        let mut resource = Self::load(&env, &id)?;
+        resource.creator.require_auth();
+        Self::ensure_mutable(&resource)?;
+        if resource.creator == new_creator {
+            return Err(Error::AlreadyOwner);
+        }
+
+        // Validate terms hash length before making any state changes.
+        if let Some(ref hash) = new_terms_hash {
+            Self::validate_bounded_string(
+                hash,
+                0,
+                MAX_TERMS_HASH_LEN,
+                Error::TermsHashTooLong,
+                Error::TermsHashTooLong,
+            )?;
+        }
+
+        let previous_owner = resource.creator.clone();
+        resource.creator = new_creator.clone();
+        Self::save(&env, &mut resource);
+        Self::move_creator_index(&env, &previous_owner, &new_creator, &id, resource.listed);
+
+        // Clear any pending propose_transfer for this resource (same as transfer_ownership).
+        let pending_key = DataKey::PendingTransfer(id.clone());
+        if env.storage().persistent().has(&pending_key) {
+            env.storage().persistent().remove(&pending_key);
+        }
+
+        // Optionally bind a terms hash to the new owner.
+        let stored_terms = if let Some(ref hash) = new_terms_hash {
+            let terms_key = DataKey::CreatorTerms(new_creator.clone());
+            env.storage().persistent().set(&terms_key, hash);
+            Self::bump_persistent(&env, &terms_key);
+            env.events().publish(
+                (symbol_short!("setterms"), new_creator.clone()),
+                hash.clone(),
+            );
+            Some(hash.clone())
+        } else {
+            None
+        };
+
+        // Optionally reset the resource's attestation hash.
+        if reset_attestation {
+            let attestation_key = DataKey::AttestationHash(id.clone());
+            if env.storage().persistent().has(&attestation_key) {
+                env.storage().persistent().remove(&attestation_key);
+            }
+        }
+
+        // Emit the basic transfer event for callers that only track ownership.
+        env.events().publish(
+            (symbol_short!("transfer"), id.clone()),
+            (previous_owner.clone(), new_creator.clone()),
+        );
+
+        // Emit the terms-aware event for callers that need the full context.
+        env.events().publish(
+            (Symbol::new(&env, "txfrterms"), id.clone()),
+            TransferWithTermsEvent {
+                id,
+                previous_owner,
+                new_owner: new_creator,
+                terms_hash: stored_terms,
+                attestation_reset: reset_attestation,
+            },
+        );
         Ok(())
     }
 }
