@@ -368,6 +368,10 @@ pub const EVENT_SCHEMA: &[(&str, &str)] = &[
     ("propose", "(owner: Address, proposed: Address)"),
     ("cancel", "owner: Address"),
     ("setlisted", "(old_listed: bool, new_listed: bool)"),
+    (
+        "emdelist",
+        "EmergencyDelistEvent { id, admin, reason }",
+    ),
     ("setterms", "terms_hash: String"),
     ("setadmin", "new_admin: Address"),
     ("setrecov", "recovery_admin: Option<Address>"),
@@ -531,6 +535,21 @@ pub struct FlagEvent {
     pub id: String,
     pub moderator: Address,
     pub reason: FlagReason,
+}
+
+/// Structured payload emitted by `emergency_delist()`.
+///
+/// Modelled on [`FlagEvent`]: an `id` for the resource, the acting `admin`, and
+/// the caller's justification. This is what makes an emergency delist
+/// distinguishable from a creator delist at the event boundary — a creator
+/// delist emits `setlisted` and nothing else, so an indexer that sees `emdelist`
+/// knows an admin took the resource down and can attribute it.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct EmergencyDelistEvent {
+    pub id: String,
+    pub admin: Address,
+    pub reason: String,
 }
 
 /// A resource's moderation state in one read, returned by `flag_details`.
@@ -2013,7 +2032,35 @@ impl VaultRegistry {
 
     /// Emergency-delist a disputed resource. Only the current admin may call
     /// this, and only while the resource is in the `Disputed` state.
-    pub fn emergency_delist(env: Env, id: String, admin: Address) -> Result<(), Error> {
+    ///
+    /// Emits an `emdelist` event with `EmergencyDelistEvent { id, admin, reason }`.
+    /// A creator delist goes through `set_listed`/`delist` and emits `setlisted`,
+    /// so the two actions are now distinguishable by topic alone: an indexer
+    /// seeing `emdelist` knows an admin pulled the resource and can attribute it
+    /// to `admin` with the caller's stated `reason`. Before this event existed,
+    /// `emergency_delist` emitted nothing at all, so an admin takedown was only
+    /// visible by reading resource state after the fact.
+    ///
+    /// `reason` is free-form and is not length-validated. The caller is the
+    /// authenticated current admin, so an oversized value costs the admin their
+    /// own transaction fee rather than enabling griefing, and the contract has no
+    /// spare error code to reject it with — `Error` is at the protocol's 50-case
+    /// cap (see the note on the enum). Admin justification is best left
+    /// unopinionated; consumers that need a controlled vocabulary can key off
+    /// `admin` plus the resulting `ResourceState`.
+    ///
+    /// Errors deterministically:
+    /// - [`Error::Unauthorized`] — caller is not the current admin
+    /// - [`Error::InvalidLifecycleTransition`] — resource is not `Disputed`
+    /// - [`Error::NotFound`] — `id` is not a registered resource
+    /// - [`Error::InvalidResourceId`] — `id` fails format validation
+    /// - [`Error::ContractPaused`] — the registry is paused
+    pub fn emergency_delist(
+        env: Env,
+        id: String,
+        admin: Address,
+        reason: String,
+    ) -> Result<(), Error> {
         Self::require_not_paused(&env)?;
         Self::validate_resource_id(&id)?;
         Self::require_current_admin(&env, &admin)?;
@@ -2022,6 +2069,10 @@ impl VaultRegistry {
             return Err(Error::InvalidLifecycleTransition);
         }
         Self::transition_state(&env, &mut resource, ResourceState::Delisted);
+        env.events().publish(
+            (symbol_short!("emdelist"), id.clone()),
+            EmergencyDelistEvent { id, admin, reason },
+        );
         Ok(())
     }
 
@@ -2422,12 +2473,30 @@ impl VaultRegistry {
     /// entries for the tags those resources currently carry. Safe to re-run
     /// with the correct current id list as a no-op. See
     /// `docs/tag-index-repair-design.md` for the full strategy.
+    ///
+    /// An empty `ids` list is a documented no-op: it returns `Ok(())` and
+    /// deliberately emits **no** `retagidx` event. There is nothing to index, so
+    /// every `TagIndex` entry is left exactly as it was, and suppressing the
+    /// event is what keeps the call from reading as a successful repair — the
+    /// ADR's `retagidx` payload is the signal operators and audit tooling use to
+    /// see that a repair ran and how broad it was, so emitting `retagidx` with a
+    /// count of `0` would assert a repair that never touched the index. Callers
+    /// driving this off-chain should treat "no `retagidx` event" as "no repair
+    /// performed" and must not infer that the tag index is empty.
+    ///
+    /// Errors deterministically:
+    /// - [`Error::NotFound`] — any id in `ids` is not a registered resource
+    /// - [`Error::AdminNotSet`] — no admin has been bootstrapped
+    /// - [`Error::ContractPaused`] — the registry is paused
     pub fn repair_tag_index(env: Env, ids: Vec<String>) -> Result<(), Error> {
         let admin = Self::require_admin(&env)?;
         admin.require_auth();
         Self::require_not_paused(&env)?;
 
         let len = ids.len();
+        if len == 0 {
+            return Ok(());
+        }
 
         // Validate every id exists before touching anything
         for i in 0..len {

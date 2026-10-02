@@ -659,6 +659,22 @@ export interface MetadataUpdateEvent {
 }
 
 
+/**
+ * Structured payload emitted by `emergency_delist()`.
+ * 
+ * Modelled on [`FlagEvent`]: an `id` for the resource, the acting `admin`, and
+ * the caller's justification. This is what makes an emergency delist
+ * distinguishable from a creator delist at the event boundary — a creator
+ * delist emits `setlisted` and nothing else, so an indexer that sees `emdelist`
+ * knows an admin took the resource down and can attribute it.
+ */
+export interface EmergencyDelistEvent {
+  admin: string;
+  id: string;
+  reason: string;
+}
+
+
 export interface FeeDestinationConfig {
   bps: u32;
   destination: FeeDestination;
@@ -1319,8 +1335,23 @@ export interface Client {
    * Construct and simulate a emergency_delist transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    * Emergency-delist a disputed resource. Only the current admin may call
    * this, and only while the resource is in the `Disputed` state.
+   * 
+   * Emits an `emdelist` event with `EmergencyDelistEvent { id, admin, reason }`.
+   * A creator delist goes through `set_listed`/`delist` and emits `setlisted`,
+   * so the two actions are now distinguishable by topic alone: an indexer
+   * seeing `emdelist` knows an admin pulled the resource and can attribute it
+   * to `admin` with the caller's stated `reason`. Before this event existed,
+   * `emergency_delist` emitted nothing at all, so an admin takedown was only
+   * visible by reading resource state after the fact.
+   * 
+   * `reason` is free-form and is not length-validated. The caller is the
+   * authenticated current admin, so an oversized value costs the admin their
+   * own transaction fee rather than enabling griefing, and the contract has no
+   * spare error code to reject it with — `Error` is at the protocol's 50-case
+   * cap (see the note on the enum). Admin justification is best left
+   * unopinionated; consumers that need a con
    */
-  emergency_delist: ({id, admin}: {id: string, admin: string}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+  emergency_delist: ({id, admin, reason}: {id: string, admin: string, reason: string}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
 
   /**
    * Construct and simulate a list_by_tag_page transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
@@ -1361,6 +1392,13 @@ export interface Client {
    * entries for the tags those resources currently carry. Safe to re-run
    * with the correct current id list as a no-op. See
    * `docs/tag-index-repair-design.md` for the full strategy.
+   * 
+   * An empty `ids` list is a documented no-op: it returns `Ok(())` and
+   * deliberately emits **no** `retagidx` event. There is nothing to index, so
+   * every `TagIndex` entry is left exactly as it was, and suppressing the
+   * event is what keeps the call from reading as a successful repair — the
+   * ADR's `retagidx` payload is the signal operators and audit tooling use to
+   * see that 
    */
   repair_tag_index: ({ids}: {ids: Array<string>}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
 
@@ -1814,7 +1852,7 @@ export class Client extends ContractClient {
         "AAAAAAAAAMxgbGlzdF9saXN0ZWRgIHdpdGggbmV4dC1jdXJzb3IgbWV0YWRhdGE6IGBjdXJzb3JgIGFuZCBgbmV4dF9jdXJzb3JgCmFyZSBnbG9iYWwgY2F0YWxvZyBpbmRleGVzIChzYW1lIGRvbWFpbiBhcyBgbGlzdF9wYWdlYCksIHNvIGEgcGFnZQpib3VuZGFyeSBpcyBzdGFibGUgaG93ZXZlciBtYW55IHJlc291cmNlcyBjaGFuZ2Ugc3RhdGUgYmV0d2VlbiBjYWxscy4AAAAQbGlzdF9saXN0ZWRfcGFnZQAAAAIAAAAAAAAABmN1cnNvcgAAAAAABAAAAAAAAAAFbGltaXQAAAAAAAAEAAAAAQAAB9AAAAALQ2F0YWxvZ1BhZ2UA",
         "AAAAAAAAAEBQcm9wb3NlIGEgdHJhbnNmZXIgdG8gYSBuZXcgb3duZXIuIFRoZSBuZXcgb3duZXIgbXVzdCBhY2NlcHQgaXQuAAAAEHByb3Bvc2VfdHJhbnNmZXIAAAACAAAAAAAAAAJpZAAAAAAAEAAAAAAAAAALbmV3X2NyZWF0b3IAAAAAEwAAAAEAAAPpAAAD7QAAAAAAAAAD",
         "AAAAAAAAAElSZXZva2UgdGhlIG1vZGVyYXRvciByb2xlIGZyb20gYG1vZGVyYXRvcmAuIE9ubHkgdGhlIGFkbWluIG1heSBjYWxsIHRoaXMuAAAAAAAAEHJlbW92ZV9tb2RlcmF0b3IAAAABAAAAAAAAAAltb2RlcmF0b3IAAAAAAAATAAAAAQAAA+kAAAPtAAAAAAAAAAM=",
-        "AAAAAAAAAo9SZWJ1aWxkIHRoZSB0YWcgaW5kZXggZnJvbSBhbiBhdXRob3JpdGF0aXZlLCBhZG1pbi1zdXBwbGllZCBvcmRlcmVkCmxpc3Qgb2YgcmVzb3VyY2UgaWRzLiBPbmx5IHRoZSBhZG1pbiBtYXkgY2FsbCB0aGlzLiBFdmVyeSBpZCBtdXN0CmFscmVhZHkgZXhpc3QgYXMgYSByZWdpc3RlcmVkIGBSZXNvdXJjZWAgKGVsc2UgYE5vdEZvdW5kYCkuIFVubGlrZQpgcmVwYWlyX2luZGV4YCwgZHVwbGljYXRlcyBpbiB0aGUgaWQgbGlzdCBhcmUgaGFybWxlc3MgKHRhZyBpbmRleCBoYXMKc2V0IHNlbWFudGljcyBwZXIgdGFnIOKAlCByZS1pbmRleGluZyB0aGUgc2FtZSBpZCBpcyBpZGVtcG90ZW50KSBhbmQKYXJlIHNpbGVudGx5IGRlLWR1cGxpY2F0ZWQgcmF0aGVyIHRoYW4gcmVqZWN0ZWQuIE5ldmVyIHJlYWRzLCB3cml0ZXMsCm9yIGRlbGV0ZXMgYFJlc291cmNlYCBzdG9yYWdlIOKAlCBvbmx5IHJld3JpdGVzIHRoZSBkZXJpdmVkIGBUYWdJbmRleGAKZW50cmllcyBmb3IgdGhlIHRhZ3MgdGhvc2UgcmVzb3VyY2VzIGN1cnJlbnRseSBjYXJyeS4gU2FmZSB0byByZS1ydW4Kd2l0aCB0aGUgY29ycmVjdCBjdXJyZW50IGlkIGxpc3QgYXMgYSBuby1vcC4gU2VlCmBkb2NzL3RhZy1pbmRleC1yZXBhaXItZGVzaWduLm1kYCBmb3IgdGhlIGZ1bGwgc3RyYXRlZ3kuAAAAABByZXBhaXJfdGFnX2luZGV4AAAAAQAAAAAAAAADaWRzAAAAA+oAAAAQAAAAAQAAA+kAAAPtAAAAAAAAAAM=",
+        "AAAAAAAABABSZWJ1aWxkIHRoZSB0YWcgaW5kZXggZnJvbSBhbiBhdXRob3JpdGF0aXZlLCBhZG1pbi1zdXBwbGllZCBvcmRlcmVkCmxpc3Qgb2YgcmVzb3VyY2UgaWRzLiBPbmx5IHRoZSBhZG1pbiBtYXkgY2FsbCB0aGlzLiBFdmVyeSBpZCBtdXN0CmFscmVhZHkgZXhpc3QgYXMgYSByZWdpc3RlcmVkIGBSZXNvdXJjZWAgKGVsc2UgYE5vdEZvdW5kYCkuIFVubGlrZQpgcmVwYWlyX2luZGV4YCwgZHVwbGljYXRlcyBpbiB0aGUgaWQgbGlzdCBhcmUgaGFybWxlc3MgKHRhZyBpbmRleCBoYXMKc2V0IHNlbWFudGljcyBwZXIgdGFnIOKAlCByZS1pbmRleGluZyB0aGUgc2FtZSBpZCBpcyBpZGVtcG90ZW50KSBhbmQKYXJlIHNpbGVudGx5IGRlLWR1cGxpY2F0ZWQgcmF0aGVyIHRoYW4gcmVqZWN0ZWQuIE5ldmVyIHJlYWRzLCB3cml0ZXMsCm9yIGRlbGV0ZXMgYFJlc291cmNlYCBzdG9yYWdlIOKAlCBvbmx5IHJld3JpdGVzIHRoZSBkZXJpdmVkIGBUYWdJbmRleGAKZW50cmllcyBmb3IgdGhlIHRhZ3MgdGhvc2UgcmVzb3VyY2VzIGN1cnJlbnRseSBjYXJyeS4gU2FmZSB0byByZS1ydW4Kd2l0aCB0aGUgY29ycmVjdCBjdXJyZW50IGlkIGxpc3QgYXMgYSBuby1vcC4gU2VlCmBkb2NzL3RhZy1pbmRleC1yZXBhaXItZGVzaWduLm1kYCBmb3IgdGhlIGZ1bGwgc3RyYXRlZ3kuCgpBbiBlbXB0eSBgaWRzYCBsaXN0IGlzIGEgZG9jdW1lbnRlZCBuby1vcDogaXQgcmV0dXJucyBgT2soKCkpYCBhbmQKZGVsaWJlcmF0ZWx5IGVtaXRzICoqbm8qKiBgcmV0YWdpZHhgIGV2ZW50LiBUaGVyZSBpcyBub3RoaW5nIHRvIGluZGV4LCBzbwpldmVyeSBgVGFnSW5kZXhgIGVudHJ5IGlzIGxlZnQgZXhhY3RseSBhcyBpdCB3YXMsIGFuZCBzdXBwcmVzc2luZyB0aGUKZXZlbnQgaXMgd2hhdCBrZWVwcyB0aGUgY2FsbCBmcm9tIHJlYWRpbmcgYXMgYSBzdWNjZXNzZnVsIHJlcGFpciDigJQgdGhlCkFEUidzIGByZXRhZ2lkeGAgcGF5bG9hZCBpcyB0aGUgc2lnbmFsIG9wZXJhdG9ycyBhbmQgYXVkaXQgdG9vbGluZyB1c2UgdG8Kc2VlIHRoYXQgAAAAEHJlcGFpcl90YWdfaW5kZXgAAAABAAAAAAAAAANpZHMAAAAD6gAAABAAAAABAAAD6QAAA+0AAAAAAAAAAw==",
         "AAAAAAAAAVJTY2hlZHVsZSBhbiBlbWVyZ2VuY3kgcGF1c2UgdGhhdCBhdXRvbWF0aWNhbGx5IGV4cGlyZXMgYXQgYHBhdXNlX3VudGlsYC4KClRoZSBkZWFkbGluZSBpcyBhbiBhYnNvbHV0ZSBVbml4IHRpbWVzdGFtcCBpbiBzZWNvbmRzIGZyb20gdGhlIGxlZGdlcgpjbG9jay4gVGhlIGV4aXN0aW5nIGBzZXRfcGF1c2VkKGFkbWluLCB0cnVlKWAgZW50cnkgcG9pbnQgcmVtYWlucyB0aGUKd2F5IHRvIGNyZWF0ZSBhbiBpbmRlZmluaXRlIHBhdXNlLiBBIGRlYWRsaW5lIGF0IG9yIGJlZm9yZSB0aGUgY3VycmVudApsZWRnZXIgdGltZXN0YW1wIHRha2VzIGVmZmVjdCBhcyBhbiBpbW1lZGlhdGUgcmVzdW1lLgAAAAAAEHNldF9wYXVzZWRfdW50aWwAAAACAAAAAAAAAAVhZG1pbgAAAAAAABMAAAAAAAAAC3BhdXNlX3VudGlsAAAAAAYAAAABAAAD6QAAA+0AAAAAAAAAAw==",
         "AAAAAQAAANBSZWplY3RlZC1hdHRlbXB0IGJvb2trZWVwaW5nIGZvciBvbmUgYChyZXNvdXJjZV9pZCwgYnV5ZXIpYCBhbmNob3IgcGFpci4KUmVhZCBiYWNrIGJ5IGBnZXRfYW5jaG9yX2F0dGVtcHRzYDsgYm90aCBmaWVsZHMgYXJlIGAwYCBmb3IgYSBwYWlyIHRoYXQKaGFzIG5ldmVyIGJlZW4gcmVqZWN0ZWQgb3Igd2hvc2UgYW5jaG9yIGhhcyBzaW5jZSBiZWVuIHdyaXR0ZW4uAAAAAAAAAA5BbmNob3JBdHRlbXB0cwAAAAAAAgAAAEFSZWplY3RlZCBhdHRlbXB0cyBzbyBmYXIgKG5ldmVyIG1vcmUgdGhhbiBgTUFYX0FOQ0hPUl9BVFRFTVBUU2ApLgAAAAAAAAhhdHRlbXB0cwAAAAQAAAA0TGVkZ2VyIHNlcXVlbmNlIG9mIHRoZSBtb3N0IHJlY2VudCByZWplY3RlZCBhdHRlbXB0LgAAABNsYXN0X2F0dGVtcHRfbGVkZ2VyAAAAAAQ=",
         "AAAAAgAAAAAAAAAAAAAADkZlZURlc3RpbmF0aW9uAAAAAAADAAAAAAAAAAAAAAAETm9uZQAAAAAAAAAAAAAABEJ1cm4AAAABAAAAAAAAAAdDaGFyaXR5AAAAAAEAAAAT",
@@ -1852,6 +1890,7 @@ export class Client extends ContractClient {
         "AAAAAQAAAOtFdmVudCBkYXRhIGVtaXR0ZWQgd2hlbiBhIHJlc291cmNlJ3MgbWV0YWRhdGEgcG9pbnRlciBpcyB1cGRhdGVkLgpDYXJyaWVzIHRoZSByZXNvdXJjZSBpZCwgdGhlIHByZXZpb3VzIG1ldGFkYXRhIHBvaW50ZXIsIGFuZCB0aGUgbmV3IG9uZQpzbyB0aGF0IG9mZi1jaGFpbiBpbmRleGVycyBjYW4gYnVpbGQgYSBmdWxsIGF1ZGl0IHRyYWlsIHdpdGhvdXQgcXVlcnlpbmcKaGlzdG9yaWNhbCBsZWRnZXIgc3RhdGUuAAAAAAAAAAATTWV0YWRhdGFVcGRhdGVFdmVudAAAAAADAAAAAAAAAAJpZAAAAAAAEAAAAAAAAAAMbmV3X21ldGFkYXRhAAAAEAAAAAAAAAAMb2xkX21ldGFkYXRhAAAAEA==",
         "AAAAAAAAAJ5OdW1iZXIgb2YgcmVzb3VyY2VzIGN1cnJlbnRseSBvd25lZCBieSBgY3JlYXRvcmAgKG1vdmVzIHdpdGgKYHRyYW5zZmVyX293bmVyc2hpcGAvYGFjY2VwdF90cmFuc2ZlcmA7IHVucmVsYXRlZCB0byB0aGUgbW9ub3RvbmljLApuZXZlci1kZWNyZW1lbnRlZCBgY291bnQoKWApLgAAAAAAFmNyZWF0b3JfcmVzb3VyY2VfY291bnQAAAAAAAEAAAAAAAAAB2NyZWF0b3IAAAAAEwAAAAEAAAAE",
         "AAAAAAAAAQZQYWdpbmF0ZWQgbGlzdCBvZiByZXNvdXJjZXMgZmlsdGVyZWQgYnkgYWN0aXZlIG1vZGVyYXRvciBkaXNwdXRlIGZsYWcuCgpgZmxhZ2dlZCA9IHRydWVgIHJldHVybnMgcmVzb3VyY2VzIHdpdGggYERpc3B1dGVGbGFnOjpGbGFnZ2VkKF8pYDsKYGZsYWdnZWQgPSBmYWxzZWAgcmV0dXJucyByZXNvdXJjZXMgd2l0aCBgRGlzcHV0ZUZsYWc6Ok5vRmxhZ2AuCmBzdGFydGAgaXMgYSBnbG9iYWwgY2F0YWxvZyBjdXJzb3IsIG1hdGNoaW5nIGBsaXN0X2xpc3RlZGAuAAAAAAAWbGlzdF9ieV9kaXNwdXRlX3N0YXR1cwAAAAAAAwAAAAAAAAAHZmxhZ2dlZAAAAAABAAAAAAAAAAVzdGFydAAAAAAAAAQAAAAAAAAABWxpbWl0AAAAAAAABAAAAAEAAAPqAAAH0AAAAAhSZXNvdXJjZQ==",
+        "AAAAAQAAAZhTdHJ1Y3R1cmVkIHBheWxvYWQgZW1pdHRlZCBieSBgZW1lcmdlbmN5X2RlbGlzdCgpYC4KCk1vZGVsbGVkIG9uIFtgRmxhZ0V2ZW50YF06IGFuIGBpZGAgZm9yIHRoZSByZXNvdXJjZSwgdGhlIGFjdGluZyBgYWRtaW5gLCBhbmQKdGhlIGNhbGxlcidzIGp1c3RpZmljYXRpb24uIFRoaXMgaXMgd2hhdCBtYWtlcyBhbiBlbWVyZ2VuY3kgZGVsaXN0CmRpc3Rpbmd1aXNoYWJsZSBmcm9tIGEgY3JlYXRvciBkZWxpc3QgYXQgdGhlIGV2ZW50IGJvdW5kYXJ5IOKAlCBhIGNyZWF0b3IKZGVsaXN0IGVtaXRzIGBzZXRsaXN0ZWRgIGFuZCBub3RoaW5nIGVsc2UsIHNvIGFuIGluZGV4ZXIgdGhhdCBzZWVzIGBlbWRlbGlzdGAKa25vd3MgYW4gYWRtaW4gdG9vayB0aGUgcmVzb3VyY2UgZG93biBhbmQgY2FuIGF0dHJpYnV0ZSBpdC4AAAAAAAAAFEVtZXJnZW5jeURlbGlzdEV2ZW50AAAAAwAAAAAAAAAFYWRtaW4AAAAAAAATAAAAAAAAAAJpZAAAAAAAEAAAAAAAAAAGcmVhc29uAAAAAAAQ",
         "AAAAAQAAAAAAAAAAAAAAFEZlZURlc3RpbmF0aW9uQ29uZmlnAAAAAgAAAAAAAAADYnBzAAAAAAQAAAAAAAAAC2Rlc3RpbmF0aW9uAAAAB9AAAAAORmVlRGVzdGluYXRpb24AAA==",
         "AAAAAAAAAPlBbmNob3IgYSBwdXJjaGFzZSByZWNlaXB0IGhhc2ggZm9yIGAocmVzb3VyY2VfaWQsIGJ1eWVyKWAuCgpUaGlzIGlzIGltbXV0YWJsZTogZHVwbGljYXRlIGFuY2hvcnMgZm9yIHRoZSBzYW1lIHBhaXIgZXJyb3Igd2l0aApgRHVwbGljYXRlUmVjZWlwdGAsIHNvIGRvd25zdHJlYW0gc2VydmljZXMgY2FuIHRyZWF0IHRoZSBmaXJzdCBhbmNob3IgYXMKY2Fub25pY2FsLiBUaGUgY2FsbGVyIG11c3QgaG9sZCB0aGUgdmVyaWZpZXIgcm9sZS4AAAAAAAAXYW5jaG9yX3B1cmNoYXNlX3JlY2VpcHQAAAAABAAAAAAAAAAHc2VydmljZQAAAAATAAAAAAAAAAtyZXNvdXJjZV9pZAAAAAAQAAAAAAAAAAVidXllcgAAAAAAABMAAAAAAAAADHJlY2VpcHRfaGFzaAAAABAAAAABAAAD6QAAA+0AAAAAAAAAAw==",
         "AAAAAAAAAVRVcGRhdGUgYSByZXNvdXJjZSdzIG9uLWNoYWluIHZlcmlmaWNhdGlvbiBzdGF0dXMuIE9ubHkgYW4gYWRkcmVzcwpjdXJyZW50bHkgaG9sZGluZyB0aGUgdmVyaWZpZXIgcm9sZSAoc2VlIGBhZGRfdmVyaWZpZXJgKSBtYXkgY2FsbAp0aGlzLiBPbmx5IGBQZW5kaW5nIC0+IFZlcmlmaWVkYCwgYFBlbmRpbmcgLT4gUmVqZWN0ZWRgLApgVmVyaWZpZWQgLT4gUmVqZWN0ZWRgLCBhbmQgYFJlamVjdGVkIC0+IFZlcmlmaWVkYCBhcmUgYWxsb3dlZDsKc2VsZi10cmFuc2l0aW9ucyBhbmQgcmV2ZXJ0aW5nIHRvIGBQZW5kaW5nYCBlcnJvciB3aXRoCmBJbnZhbGlkVmVyaWZpY2F0aW9uVHJhbnNpdGlvbmAuAAAAF3NldF92ZXJpZmljYXRpb25fc3RhdHVzAAAAAAQAAAAAAAAAAmlkAAAAAAAQAAAAAAAAAAh2ZXJpZmllcgAAABMAAAAAAAAABnN0YXR1cwAAAAAH0AAAABJWZXJpZmljYXRpb25TdGF0dXMAAAAAAAAAAAAQYXR0ZXN0YXRpb25faGFzaAAAA+gAAAAQAAAAAQAAA+kAAAPtAAAAAAAAAAM=",

@@ -4030,15 +4030,39 @@ fn repair_tag_index_emits_retagidx_event() {
     );
 }
 
+/// Regression test for #778: an empty id list must not report a repair.
+///
+/// The old behavior emitted `retagidx` with a count of `0`, which read to
+/// operators and audit tooling as "a repair ran and covered 0 resources" —
+/// indistinguishable from a real repair of an empty catalog. It now returns
+/// `Ok` without emitting, so "no `retagidx` event" is an unambiguous "no repair
+/// performed".
 #[test]
-fn repair_tag_index_with_empty_id_list_emits_event() {
-    let (env, _creator, _admin, client) = setup_with_admin();
+fn repair_tag_index_with_empty_id_list_is_a_silent_no_op() {
+    let (env, creator, _admin, client) = setup_with_admin();
+    let a = register_tagged(&env, &creator, &client, "emptyrepair", &["keepme"]);
+
+    // Seed a real index entry so we can prove the empty call leaves it intact.
+    let keepme = String::from_str(&env, "keepme");
+    assert_eq!(client.list_by_tag(&keepme, &0u32, &20u32).len(), 1);
+
     client.repair_tag_index(&Vec::new(&env));
-    let all = env.events().all();
-    assert_eq!(all.len(), 1);
-    let (_, _, data) = all.get(0).unwrap();
-    let count: u32 = u32::try_from_val(&env, &data).unwrap();
-    assert_eq!(count, 0u32);
+
+    assert_eq!(
+        env.events().all().len(),
+        0,
+        "an empty id list must not emit `retagidx`: the event is the audit \
+         signal that a repair ran, and a 0-count event would falsely assert one"
+    );
+
+    let survivors = client.list_by_tag(&keepme, &0u32, &20u32);
+    assert_eq!(
+        survivors.len(),
+        1,
+        "an empty id list must not truncate the tag index — nothing is indexed, \
+         so every existing TagIndex entry has to survive untouched"
+    );
+    assert_eq!(survivors.get(0).unwrap().id, a);
 }
 
 #[test]
@@ -4704,6 +4728,18 @@ fn full_workflow_emits_exactly_the_documented_events() {
     client.open_dispute(&r2, &admin2); // -> "lifecycle"
     record(&env, &client, &mut observed);
     client.resolve_dispute(&r2, &admin2, &ResourceState::Frozen); // -> "lifecycle"
+    record(&env, &client, &mut observed);
+
+    // Admin emergency takedown. This is the only path that emits `emdelist` —
+    // a creator delist above emitted `setlisted` instead — so the workflow has
+    // to exercise it for the event-schema drift check to see every topic.
+    client.open_dispute(&r1, &admin2);
+    record(&env, &client, &mut observed);
+    client.emergency_delist(
+        &r1,
+        &admin2,
+        &String::from_str(&env, "workflow emergency takedown"),
+    ); // -> "emdelist"
     record(&env, &client, &mut observed);
     client.extend_resource_ttl(&bob, &r0); // -> "ttlext"
     record(&env, &client, &mut observed);
@@ -5600,7 +5636,7 @@ fn admin_can_emergency_delist_disputed_resource() {
     let id = register_default(&env, &creator, &client, "emerdelist");
 
     client.open_dispute(&id, &admin);
-    client.emergency_delist(&id, &admin);
+    client.emergency_delist(&id, &admin, &String::from_str(&env, "dispute upheld"));
 
     let resource = client.get(&id);
     assert_eq!(resource.state, ResourceState::Delisted);
@@ -5615,17 +5651,89 @@ fn emergency_delist_requires_current_admin_and_disputed_state() {
     let stranger = Address::generate(&env);
 
     assert_eq!(
-        client.try_emergency_delist(&id, &stranger),
+        client.try_emergency_delist(&id, &stranger, &String::from_str(&env, "dispute upheld")),
         Err(Ok(Error::Unauthorized))
     );
     assert_eq!(
-        client.try_emergency_delist(&id, &admin),
+        client.try_emergency_delist(&id, &admin, &String::from_str(&env, "dispute upheld")),
         Err(Ok(Error::InvalidLifecycleTransition))
     );
 
     client.open_dispute(&id, &admin);
-    client.emergency_delist(&id, &admin);
+    client.emergency_delist(&id, &admin, &String::from_str(&env, "dispute upheld"));
     assert_eq!(client.get(&id).state, ResourceState::Delisted);
+}
+
+/// Regression test for #779: an admin emergency delist must be attributable
+/// at the event boundary.
+///
+/// Before this, `emergency_delist` emitted no event at all, so an indexer could
+/// not tell an admin takedown from a creator delist without re-reading state.
+/// The payload must carry the acting admin and the caller's reason verbatim.
+#[test]
+fn emergency_delist_emits_event_with_acting_admin_and_reason() {
+    let (env, creator, admin, client) = setup_with_admin();
+    let id = register_default(&env, &creator, &client, "emdelistevt");
+    let contract_id = client.address.clone();
+
+    client.open_dispute(&id, &admin);
+    client.emergency_delist(
+        &id,
+        &admin,
+        &String::from_str(&env, "counterfeit listing, dispute upheld"),
+    );
+
+    let payload: EmergencyDelistEvent =
+        find_event(&env, &contract_id, "emdelist").expect("emdelist must be emitted");
+    assert_eq!(
+        payload.id, id,
+        "payload must identify the delisted resource"
+    );
+    assert_eq!(
+        payload.admin, admin,
+        "payload must name the admin who acted, so the takedown is attributable"
+    );
+    assert_eq!(
+        payload.reason,
+        String::from_str(&env, "counterfeit listing, dispute upheld"),
+        "payload must carry the admin's stated reason verbatim"
+    );
+}
+
+/// The event topic itself is the discriminator: a creator delist emits
+/// `setlisted` and no `emdelist`, and an admin takedown emits `emdelist` and no
+/// `setlisted`. An indexer keying on topic can therefore never confuse the two.
+#[test]
+fn emergency_delist_and_creator_delist_are_distinguishable_by_topic() {
+    let (env, creator, admin, client) = setup_with_admin();
+    let contract_id = client.address.clone();
+
+    // Creator-initiated delist.
+    let creator_id = register_default(&env, &creator, &client, "emdelistcrea");
+    client.delist(&creator_id);
+    assert!(
+        find_event::<EmergencyDelistEvent>(&env, &contract_id, "emdelist").is_none(),
+        "a creator delist must not emit `emdelist`"
+    );
+    assert!(
+        find_event::<(bool, bool)>(&env, &contract_id, "setlisted").is_some(),
+        "a creator delist emits `setlisted`"
+    );
+
+    // Admin-initiated emergency delist on a separate resource.
+    let admin_id = register_default(&env, &creator, &client, "emdelistadmn");
+    client.open_dispute(&admin_id, &admin);
+    client.emergency_delist(&admin_id, &admin, &String::from_str(&env, "abuse"));
+
+    assert!(
+        find_event::<EmergencyDelistEvent>(&env, &contract_id, "emdelist").is_some(),
+        "an admin emergency delist must emit `emdelist`"
+    );
+
+    // Both resources end up `Delisted`, so state alone cannot tell them apart —
+    // only the event stream can. That is the bug this fixes.
+    assert_eq!(client.get(&creator_id).state, ResourceState::Delisted);
+    assert_eq!(client.get(&admin_id).state, ResourceState::Delisted);
 }
 
 #[test]

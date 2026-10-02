@@ -260,7 +260,7 @@ See [`docs/adr-fee-config.md`](../docs/adr-fee-config.md) for the full design ra
 | `freeze_resource(id)`                                                        | `creator`                                                | `id: String`                                                                                                                                                                                                                                         | `Result<(), Error>`                    | Move a `Listed`/`Delisted` resource to `Frozen`. Only the creator can move it out again, via `reactivate_resource`.                                                                                                                                                                                       |
 | `open_dispute(id, admin)`                                                    | `admin`                                                  | `id: String`; `admin: Address`                                                                                                                                                                                                                       | `Result<(), Error>`                    | Place a `Listed`/`Delisted`/`Frozen` resource under a dispute hold.                                                                                                                                                                                                                                      |
 | `resolve_dispute(id, admin, state)`                                          | `admin`                                                  | `id: String`; `admin: Address`; `state: ResourceState` — `Listed`, `Delisted`, or `Frozen`                                                                                                                                                           | `Result<(), Error>`                    | Resolve a `Disputed` resource back to an active state.                                                                                                                                                                                                                                                   |
-| `emergency_delist(id, admin)`                                                | `admin`                                                  | `id: String`; `admin: Address`                                                                                                                                                                                                                       | `Result<(), Error>`                    | Immediately move a `Disputed` resource to `Delisted`. Only the current admin may use this emergency path.                                                                                                                                                                                               |
+| `emergency_delist(id, admin, reason)`                                       | `admin`                                                  | `id: String`; `admin: Address`; `reason: String` (free-form admin justification)                                                                                                                                                                       | `Result<(), Error>`                    | Immediately move a `Disputed` resource to `Delisted`. Only the current admin may use this emergency path. Emits `emdelist` with `EmergencyDelistEvent { id, admin, reason }`.                                                                                                                           |
 | `tombstone_resource(id, admin)`                                              | `admin`                                                  | `id: String`; `admin: Address`                                                                                                                                                                                                                       | `Result<(), Error>`                    | Permanently retire a resource. Terminal state; also purges it from the derived listing indexes.                                                                                                                                                                                                          |
 | `reactivate_resource(id)`                                                    | `creator`                                                | `id: String`                                                                                                                                                                                                                                         | `Result<(), Error>`                    | Reactivate a `Frozen`/`Delisted` resource back to `Listed` after its dispute was resolved. Only the creator may call it; `Disputed` and `Tombstoned` resources have no creator exit. Emits `reactive`.                                                                                                   |
 | `list(start, limit)`                                                         | —                                                        | `start: u32`; `limit: u32` — capped at `LIST_PAGE_CAP` (20)                                                                                                                                                                                          | `Vec<Resource>`                        | Paginated resource list in insertion order (items only; prefer `list_page` for cursors).                                                                                                                                                                                                                 |
@@ -646,6 +646,18 @@ if (page.next_cursor !== null) {
 | `52` | `AdminAlreadySet` | `bootstrap_dual_admin` was called after an admin was already set. |
 | `53` | `RecoveryAdminNotSet` | `recover_admin` was called but no recovery admin is configured. |
 
+#### Error budget
+
+This enum is **full**. The protocol caps a contract error enum at 50 cases
+(`ScSpecUdtErrorEnumV0.cases` is `VecM<_, 50>`), and codes `1`–`50` are all
+allocated, so `#[contracterror]` fails to compile with `LengthExceedsMax` on a
+`51` variant. Adding an error code therefore requires retiring an existing one
+first, and retiring a code is a breaking change for anything matching on it.
+
+Plan new validation around an existing code where the semantics genuinely fit,
+or prefer a behavior that needs no new code (a documented no-op, or folding the
+case into a broader existing error) over growing the enum.
+
 ### Resource ID format and reserved words
 
 A resource `id` is a short, URL-safe string chosen at registration time. It is
@@ -701,6 +713,7 @@ apart, so update all three together.
 | `propose`   | `(owner: Address, proposed: Address)`                                                    | `propose_transfer()` succeeds                              |
 | `cancel`    | `owner: Address`                                                                         | `cancel_transfer()` succeeds                               |
 | `setlisted` | `(old_listed: bool, new_listed: bool)`                                                   | `set_listed()` (and `delist()`) succeeds                   |
+| `emdelist` | `EmergencyDelistEvent { id, admin, reason }`                                             | `emergency_delist()` succeeds                             |
 | `setterms`  | `terms_hash: String`                                                                     | `set_terms_hash()` succeeds                                |
 | `setadmin`  | `new_admin: Address`                                                                     | The first (bootstrap) `nominate_new_admin()` call succeeds |
 | `setrecov` | `recovery_admin: Option<Address>` | `bootstrap_dual_admin()` or `set_recovery_admin()` succeeds |
@@ -752,6 +765,20 @@ Both `set_listed(id, false)` and `delist(id)` produce an identical `setlisted`
 event — `delist` is a thin convenience wrapper that calls `set_listed`.
 For backwards compatibility, no-op listing calls still emit the corresponding
 `setlisted` event but do not count as lifecycle transitions.
+
+An admin emergency delist is **not** a `setlisted` event. It goes through
+`emergency_delist(id, admin, reason)` and emits `emdelist` with
+`EmergencyDelistEvent { id, admin, reason }`, so an indexer can tell the two
+apart by topic alone and attribute the takedown to `admin` with the stated
+`reason`. `reason` is free-form and is not length-validated: the caller is the
+authenticated current admin, so an oversized value costs that admin their own
+transaction fee rather than enabling griefing. Note that a failed
+`emergency_delist` (wrong admin, resource not `Disputed`) emits nothing at all.
+
+The `retagidx` event is the audit signal that a `repair_tag_index` run actually
+performed work — its payload is the number of ids processed. An empty id list is
+a no-op that emits **no** `retagidx` event, so "no event" is an unambiguous "no
+repair performed" and must not be read as "the tag index is now empty".
 
 ### Resource lifecycle state machine
 
