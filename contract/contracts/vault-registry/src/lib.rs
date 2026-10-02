@@ -21,6 +21,10 @@ use soroban_sdk::{
 // write so an actively-managed resource is never archived out from under us.
 const DAY_IN_LEDGERS: u32 = 17280;
 const ADMIN_NOMINATION_DURATION: u32 = 7 * DAY_IN_LEDGERS;
+/// Default creator refund window, matching the ADR's example dispute window.
+pub const DEFAULT_REFUND_WINDOW_LEDGERS: u32 = DAY_IN_LEDGERS;
+/// Maximum refund window leaves one day of TTL beyond the 30-day storage bump.
+pub const MAX_REFUND_WINDOW_LEDGERS: u32 = 29 * DAY_IN_LEDGERS;
 const BUMP_AMOUNT: u32 = 30 * DAY_IN_LEDGERS;
 const LIFETIME_THRESHOLD: u32 = BUMP_AMOUNT - DAY_IN_LEDGERS;
 /// Max length for metadata pointers (IPFS URI, content hash, compact JSON anchor).
@@ -228,6 +232,13 @@ pub const METHOD_SCHEMA: &[(&str, &str)] = &[
     ("settle_payment", "settler"),
     ("get_payment", "—"),
     ("get_payment_receipt", "—"),
+    ("set_refund_window", "admin"),
+    ("refund_window", "—"),
+    ("record_creator_refund", "creator"),
+    ("record_admin_refund", "admin override"),
+    ("get_refund", "—"),
+    ("get_refunded_amount", "—"),
+    ("get_refund_deadline", "—"),
     ("anchor_purchase_receipt", "verifier"),
     ("attempt_anchor_purchase_receipt", "verifier"),
     ("override_purchase_receipt_anchor", "verifier"),
@@ -249,7 +260,7 @@ pub const ERROR_SCHEMA: &[(u32, &str, &str)] = &[
     (3, "InvalidPrice", "Price is `<= 0`, exceeds `MAX_PRICE`, or is not strictly greater than the active `royalty_bps`."),
     (4, "MetadataTooLong", "Metadata pointer exceeds `MAX_METADATA_POINTER_LEN` (512 bytes)."),
     (5, "InvalidTag", "Tag validation failed (too many tags, empty tag, tag exceeds 32 bytes, or duplicate normalized tag)."),
-    (6, "Unauthorized", "Caller authentication check failed or unauthorized."),
+    (6, "Unauthorized", "Caller is unauthorized, including a refund recipient mismatch."),
     (7, "PendingAdminNotSet", "No pending admin is set, or caller does not match the pending admin."),
     (8, "PendingAdminAlreadySet", "A pending admin nomination is already active."),
     (9, "SameAdmin", "Nominated new admin is already the current contract admin."),
@@ -267,8 +278,8 @@ pub const ERROR_SCHEMA: &[(u32, &str, &str)] = &[
     (21, "AlreadyFrozen", "`freeze_metadata` was called on a resource whose metadata is already frozen."),
     (22, "MetadataFrozen", "`update_metadata` was called on a resource whose metadata has been frozen."),
     (23, "DuplicateInRepair", "`repair_index` received a list with duplicate resource ids."),
-    (24, "InvalidTxHash", "`tx_hash` in `record_payment` is empty or exceeds `MAX_TX_HASH_LEN` (128 bytes)."),
-    (25, "InvalidPaymentAmount", "`amount` in `record_payment` is `<= 0`."),
+    (24, "InvalidTxHash", "A payment or refund `tx_hash` is empty or exceeds `MAX_TX_HASH_LEN` (128 bytes)."),
+    (25, "InvalidPaymentAmount", "A payment or refund `amount` is `<= 0`, or a refund window is outside its allowed bounds."),
     (26, "NotModerator", "Caller does not hold the moderator role."),
     (27, "AlreadyFlagged", "Resource is already flagged as disputed."),
     (28, "NotFlagged", "Resource is not currently flagged as disputed."),
@@ -285,13 +296,13 @@ pub const ERROR_SCHEMA: &[(u32, &str, &str)] = &[
     (39, "FlagReasonHashTooLong", "`reason_hash` in `set_flag_reason_hash` exceeds `MAX_FLAG_REASON_HASH_LEN` (64 bytes)."),
     (40, "ContractPaused", "A state-changing method was called while the registry is paused."),
     (41, "NotSettler", "Caller does not hold the settler role."),
-    (42, "ReceiptAlreadyExists", "A payment receipt is already stored for the supplied `receipt_id`."),
-    (43, "InvalidPaymentTransition", "The requested payment receipt state transition is not allowed (e.g. settling an already-settled receipt)."),
+    (42, "ReceiptAlreadyExists", "A payment or refund receipt is already stored for the supplied id."),
+    (43, "InvalidPaymentTransition", "Payment is not settled, its creator refund deadline has expired, or a payment state transition is not allowed."),
     (44, "InvalidReceiptId", "`receipt_id` is empty or exceeds `MAX_RECEIPT_ID_LEN` (64 bytes)."),
     (45, "ContentHashTooLong", "`content_hash` exceeds `MAX_CONTENT_HASH_LEN` (128 bytes)."),
     (46, "AttestationHashTooLong", "`attestation_hash` exceeds `MAX_ATTESTATION_HASH_LEN` (64 bytes)."),
-    (47, "PaymentAmountMismatch", "Payment receipt amount does not match the resource's current price."),
-    (48, "DuplicateTxHash", "A payment receipt is already stored for the supplied settlement transaction hash (`tx_hash`)."),
+    (47, "PaymentAmountMismatch", "Payment amount differs from the resource price or cumulative refunds exceed the original payment."),
+    (48, "DuplicateTxHash", "A payment or refund receipt already uses the supplied transaction hash (`tx_hash`)."),
     (49, "FeeConfigNotSet", "`set_fee_recipient` or `set_fee_destination` was called before any fee config was set via `set_fee_config`."),
     (50, "AdminNominationExpired", "The pending admin nomination is missing or has expired."),
     (51, "InvalidMetadataPointers", "`set_metadata_pointers` received an empty, oversized (> `MAX_METADATA_POINTERS`), or duplicate pointer list, or an out-of-range `primary` index."),
@@ -846,6 +857,22 @@ pub struct PaymentReceipt {
     pub ledger: u32,
 }
 
+/// On-chain record of a completed refund transfer associated with a payment.
+/// The registry records and caps refunds but does not custody or transfer USDC.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RefundReceipt {
+    pub refund_id: String,
+    pub payment_receipt_id: String,
+    pub resource_id: String,
+    pub recipient: Address,
+    pub amount: i128,
+    pub tx_hash: String,
+    pub initiated_by: Address,
+    pub recorded_at: u32,
+    pub admin_override: bool,
+}
+
 /// Immutable on-chain anchor for a purchase receipt hash.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -928,9 +955,9 @@ pub enum Error {
     AlreadyFrozen = 21,
     MetadataFrozen = 22,
     DuplicateInRepair = 23,
-    /// `tx_hash` is empty or exceeds `MAX_TX_HASH_LEN` (128 bytes).
+    /// A payment or refund `tx_hash` is empty or exceeds `MAX_TX_HASH_LEN` (128 bytes).
     InvalidTxHash = 24,
-    /// `amount` supplied to `record_payment` is `<= 0`.
+    /// A payment/refund `amount` is `<= 0`, or a refund window is invalid.
     InvalidPaymentAmount = 25,
     NotModerator = 26,
     AlreadyFlagged = 27,
@@ -1829,6 +1856,9 @@ impl VaultRegistry {
         let owned = Self::creator_count(&env, &resource.creator);
         Self::set_creator_count(&env, &resource.creator, owned.saturating_sub(1));
 
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PendingTransfer(id.clone()));
         Self::transition_state(&env, &mut resource, ResourceState::Tombstoned);
         Ok(())
     }
@@ -2960,6 +2990,35 @@ impl VaultRegistry {
 
     // ─── Escrow-ready payment state ───────────────────────────────────────────
 
+    /// Configure the creator refund window for payments settled after this call.
+    /// Existing payment deadlines are not changed. The initial value is one day.
+    pub fn set_refund_window(env: Env, admin: Address, window_ledgers: u32) -> Result<(), Error> {
+        Self::require_current_admin(&env, &admin)?;
+        Self::require_not_paused(&env)?;
+        if window_ledgers == 0 || window_ledgers > MAX_REFUND_WINDOW_LEDGERS {
+            return Err(Error::InvalidPaymentAmount);
+        }
+
+        let old_window = Self::refund_window(env.clone());
+        env.storage()
+            .instance()
+            .set(&DataKey::RefundWindow, &window_ledgers);
+        Self::bump_instance(&env);
+        env.events().publish(
+            (symbol_short!("refwin"), admin),
+            (old_window, window_ledgers),
+        );
+        Ok(())
+    }
+
+    /// Current creator refund window in ledgers. Defaults to one day.
+    pub fn refund_window(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::RefundWindow)
+            .unwrap_or(DEFAULT_REFUND_WINDOW_LEDGERS)
+    }
+
     /// Record an x402/Soroban payment receipt in `Escrowed` state. Only an
     /// address currently holding the settler role may call this.
     ///
@@ -2998,6 +3057,33 @@ impl VaultRegistry {
             &resource_id,
             &payer,
             amount,
+            state: PaymentState::Escrowed,
+            tx_hash,
+            recorded_at: env.ledger().sequence(),
+            ledger: env.ledger().sequence(),
+        };
+
+        env.storage().persistent().set(&receipt_key, &receipt);
+        Self::bump_persistent(&env, &receipt_key);
+
+        let recipient_key = DataKey::PaymentRecipient(receipt_id.clone());
+        env.storage()
+            .persistent()
+            .set(&recipient_key, &resource.creator);
+        Self::bump_persistent(&env, &recipient_key);
+
+        // Secondary indexes: `(resource_id, payer)` -> most recent receipt id
+        // (for `get_payment_receipt`), and `tx_hash` -> receipt id (enforces
+        // one receipt per Stellar settlement transaction).
+        let index_key = DataKey::PaymentIndex(resource_id, payer);
+        env.storage().persistent().set(&index_key, &receipt_id);
+        Self::bump_persistent(&env, &index_key);
+
+        env.storage().persistent().set(&tx_hash_key, &receipt_id);
+        Self::bump_persistent(&env, &tx_hash_key);
+
+        env.events()
+            .publish((symbol_short!("payment"), receipt_id), receipt);
             &tx_hash,
         )?;
         Self::write_payment(&env, receipt_id, resource_id, payer, amount, tx_hash)?;
@@ -3081,6 +3167,18 @@ impl VaultRegistry {
         env.storage().persistent().set(&receipt_key, &receipt);
         Self::bump_persistent(&env, &receipt_key);
 
+        let deadline = env
+            .ledger()
+            .sequence()
+            .saturating_add(Self::refund_window(env.clone()));
+        let deadline_key = DataKey::RefundDeadline(receipt_id.clone());
+        env.storage().persistent().set(&deadline_key, &deadline);
+        Self::bump_persistent(&env, &deadline_key);
+        let recipient_key = DataKey::PaymentRecipient(receipt_id.clone());
+        if env.storage().persistent().has(&recipient_key) {
+            Self::bump_persistent(&env, &recipient_key);
+        }
+
         env.events()
             .publish((symbol_short!("settle"), receipt_id), receipt);
         Ok(())
@@ -3120,6 +3218,96 @@ impl VaultRegistry {
             .ok_or(Error::NotFound)?;
         Self::bump_persistent(&env, &index_key);
         Self::get_payment(env, receipt_id)
+    }
+
+    /// Record a completed creator-initiated refund for a settled payment.
+    /// The transfer must already have occurred; the registry stores its hash
+    /// as an audit anchor and does not custody or move USDC.
+    pub fn record_creator_refund(
+        env: Env,
+        creator: Address,
+        refund_id: String,
+        payment_receipt_id: String,
+        recipient: Address,
+        amount: i128,
+        tx_hash: String,
+    ) -> Result<(), Error> {
+        creator.require_auth();
+        Self::record_refund(
+            &env,
+            creator,
+            refund_id,
+            payment_receipt_id,
+            recipient,
+            amount,
+            tx_hash,
+            false,
+        )
+    }
+
+    /// Record a refund under the admin override path. This bypasses the
+    /// creator signature and refund deadline, but not payer or amount checks.
+    pub fn record_admin_refund(
+        env: Env,
+        admin: Address,
+        refund_id: String,
+        payment_receipt_id: String,
+        recipient: Address,
+        amount: i128,
+        tx_hash: String,
+    ) -> Result<(), Error> {
+        Self::require_current_admin(&env, &admin)?;
+        Self::record_refund(
+            &env,
+            admin,
+            refund_id,
+            payment_receipt_id,
+            recipient,
+            amount,
+            tx_hash,
+            true,
+        )
+    }
+
+    /// Fetch a refund record by its caller-assigned `refund_id`.
+    pub fn get_refund(env: Env, refund_id: String) -> Result<RefundReceipt, Error> {
+        Self::validate_receipt_id(&refund_id)?;
+        let key = DataKey::RefundReceipt(refund_id);
+        let refund: RefundReceipt = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(Error::NotFound)?;
+        Self::bump_persistent(&env, &key);
+        Ok(refund)
+    }
+
+    /// Total amount recorded as refunded for a payment receipt.
+    pub fn get_refunded_amount(env: Env, payment_receipt_id: String) -> Result<i128, Error> {
+        Self::get_payment(env.clone(), payment_receipt_id.clone())?;
+        let key = DataKey::RefundedAmount(payment_receipt_id);
+        let refunded = env.storage().persistent().get(&key).unwrap_or(0);
+        if env.storage().persistent().has(&key) {
+            Self::bump_persistent(&env, &key);
+        }
+        Ok(refunded)
+    }
+
+    /// Exclusive ledger deadline for creator refunds of a settled payment.
+    pub fn get_refund_deadline(env: Env, payment_receipt_id: String) -> Result<u32, Error> {
+        let payment = Self::get_payment(env.clone(), payment_receipt_id.clone())?;
+        if payment.state != PaymentState::Settled {
+            return Err(Error::InvalidPaymentTransition);
+        }
+        let key = DataKey::RefundDeadline(payment_receipt_id);
+        if let Some(deadline) = env.storage().persistent().get(&key) {
+            Self::bump_persistent(&env, &key);
+            Ok(deadline)
+        } else {
+            Ok(payment
+                .recorded_at
+                .saturating_add(DEFAULT_REFUND_WINDOW_LEDGERS))
+        }
     }
 
     /// Anchor a purchase receipt hash for `(resource_id, buyer)`.
@@ -3474,6 +3662,108 @@ impl VaultRegistry {
 }
 
 impl VaultRegistry {
+    fn record_refund(
+        env: &Env,
+        initiator: Address,
+        refund_id: String,
+        payment_receipt_id: String,
+        recipient: Address,
+        amount: i128,
+        tx_hash: String,
+        admin_override: bool,
+    ) -> Result<(), Error> {
+        Self::require_not_paused(env)?;
+        Self::validate_receipt_id(&refund_id)?;
+        Self::validate_receipt_id(&payment_receipt_id)?;
+        Self::validate_payment_amount(amount)?;
+        Self::validate_tx_hash(&tx_hash)?;
+
+        let refund_key = DataKey::RefundReceipt(refund_id.clone());
+        if env.storage().persistent().has(&refund_key) {
+            return Err(Error::ReceiptAlreadyExists);
+        }
+        let refund_tx_key = DataKey::RefundTxHash(tx_hash.clone());
+        if env.storage().persistent().has(&refund_tx_key)
+            || env
+                .storage()
+                .persistent()
+                .has(&DataKey::PaymentTxHash(tx_hash.clone()))
+        {
+            return Err(Error::DuplicateTxHash);
+        }
+
+        let payment = Self::get_payment(env.clone(), payment_receipt_id.clone())?;
+        if payment.state != PaymentState::Settled {
+            return Err(Error::InvalidPaymentTransition);
+        }
+        if recipient != payment.payer {
+            return Err(Error::Unauthorized);
+        }
+        let resource = Self::load(env, &payment.resource_id)?;
+        let recipient_key = DataKey::PaymentRecipient(payment_receipt_id.clone());
+        let payment_recipient = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Address>(&recipient_key)
+            .unwrap_or(resource.creator);
+        if !admin_override && payment_recipient != initiator {
+            return Err(Error::Unauthorized);
+        }
+
+        if !admin_override {
+            let deadline_key = DataKey::RefundDeadline(payment_receipt_id.clone());
+            let deadline = env
+                .storage()
+                .persistent()
+                .get::<DataKey, u32>(&deadline_key)
+                .unwrap_or_else(|| {
+                    payment
+                        .recorded_at
+                        .saturating_add(DEFAULT_REFUND_WINDOW_LEDGERS)
+                });
+            if env.ledger().sequence() >= deadline {
+                return Err(Error::InvalidPaymentTransition);
+            }
+        }
+
+        let refunded_key = DataKey::RefundedAmount(payment_receipt_id.clone());
+        let refunded = env
+            .storage()
+            .persistent()
+            .get::<DataKey, i128>(&refunded_key)
+            .unwrap_or(0);
+        if amount > payment.amount.saturating_sub(refunded) {
+            return Err(Error::PaymentAmountMismatch);
+        }
+        let next_refunded = refunded
+            .checked_add(amount)
+            .ok_or(Error::PaymentAmountMismatch)?;
+
+        let refund = RefundReceipt {
+            refund_id: refund_id.clone(),
+            payment_receipt_id,
+            resource_id: payment.resource_id,
+            recipient,
+            amount,
+            tx_hash: tx_hash.clone(),
+            initiated_by: initiator,
+            recorded_at: env.ledger().sequence(),
+            admin_override,
+        };
+        env.storage().persistent().set(&refund_key, &refund);
+        Self::bump_persistent(env, &refund_key);
+        env.storage()
+            .persistent()
+            .set(&refunded_key, &next_refunded);
+        Self::bump_persistent(env, &refunded_key);
+        env.storage().persistent().set(&refund_tx_key, &refund_id);
+        Self::bump_persistent(env, &refund_tx_key);
+
+        env.events()
+            .publish((symbol_short!("refund"), refund_id), refund);
+        Ok(())
+    }
+
     fn validate_price(env: &Env, price: i128) -> Result<(), Error> {
         if price <= 0 {
             return Err(Error::InvalidPrice);
