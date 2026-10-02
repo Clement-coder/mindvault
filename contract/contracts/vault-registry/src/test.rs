@@ -10788,6 +10788,65 @@ fn tag_popularity_counter_saturates_at_u32_max() {
     assert_eq!(top.get(0).unwrap().count, u32::MAX);
 }
 
+#[test]
+fn register_surfaces_count_overflow_when_count_is_max() {
+    let (env, creator, client) = setup();
+    env.as_contract(&client.address, || {
+        env.storage().instance().set(&DataKey::Count, &u32::MAX);
+    });
+
+    let res = client.try_register(
+        &creator,
+        &String::from_str(&env, "ovf1"),
+        &100i128,
+        &String::from_str(&env, "ipfs://m"),
+        &empty_tags(&env),
+    );
+    assert_eq!(res, Err(Ok(Error::CountOverflow)));
+}
+
+#[test]
+fn initialize_network_rejects_replay_even_with_mismatched_id() {
+    let (env, _creator, client) = setup();
+    let network_id = env.ledger().network_id();
+    client.initialize_network(&network_id);
+
+    let mut wrong = network_id.to_array();
+    wrong[0] ^= 1;
+    let wrong = BytesN::from_array(&env, &wrong);
+
+    // After network is initialized, duplicate call with wrong id fails with NetworkAlreadyInitialized
+    assert_eq!(
+        client.try_initialize_network(&wrong),
+        Err(Ok(Error::NetworkAlreadyInitialized))
+    );
+}
+
+#[test]
+fn differently_cased_tags_indexed_under_same_normalized_tag() {
+    let (env, creator, client) = setup();
+    let r1 = String::from_str(&env, "case1");
+    let r2 = String::from_str(&env, "case2");
+
+    client.register(
+        &creator,
+        &r1,
+        &100i128,
+        &String::from_str(&env, "ipfs://1"),
+        &tags(&env, &["RustLang"]),
+    );
+    client.register(
+        &creator,
+        &r2,
+        &200i128,
+        &String::from_str(&env, "ipfs://2"),
+        &tags(&env, &["rustlang"]),
+    );
+
+    let results = client.list_by_tag(&String::from_str(&env, "RUSTLANG"), &0, &10);
+    assert_eq!(results.len(), 2);
+}
+
 include!("test/lifecycle_events.rs");
 include!("test/storage_footprint.rs");
 
