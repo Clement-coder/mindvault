@@ -102,6 +102,27 @@ export function retryPolicyFromEnv(env: NodeJS.ProcessEnv = process.env): RetryP
 }
 
 /**
+ * Resolve a retry policy for one MCP tool. Tool overrides use the global
+ * variable name plus a normalized tool suffix, e.g.
+ * MINDVAULT_RETRY_ATTEMPTS_MINDVAULT_BROWSE=5.
+ */
+export function retryPolicyForTool(
+  toolName: string,
+  env: NodeJS.ProcessEnv = process.env,
+): RetryPolicy {
+  const globalPolicy = retryPolicyFromEnv(env);
+  const suffix = toolName.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
+  const read = (name: string, fallback: number, min: number) =>
+    parsePositiveInt(env[`${name}_${suffix}`], fallback, min);
+
+  return {
+    attempts: read(RETRY_ENV_VARS.attempts, globalPolicy.attempts, 1),
+    baseDelayMs: read(RETRY_ENV_VARS.baseDelayMs, globalPolicy.baseDelayMs, 0),
+    maxDelayMs: read(RETRY_ENV_VARS.maxDelayMs, globalPolicy.maxDelayMs, 0),
+  };
+}
+
+/**
  * Delay before the given retry (1 = first retry): exponential backoff capped at
  * maxDelayMs, then full jitter across [0, capped]. Full jitter spreads
  * concurrent retriers far better than a fixed fraction.

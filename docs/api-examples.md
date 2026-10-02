@@ -158,7 +158,7 @@ Expected response (array):
 
 ### Searching and filtering
 
-`GET /resources` accepts optional query parameters that narrow the catalog. They can be combined; all filtering is applied **server-side** before the response is returned. (The web app's `CatalogSearch` UI and the MCP `mindvault_search` tool send these same parameters.)
+`GET /resources` accepts optional query parameters that narrow the catalog. They can be combined; supported HTTP filters are applied **server-side** before the response is returned. The MCP `mindvault_browse` and `mindvault_search` tools apply `tags` and `listed` client-side after receiving the server results. (The web app's `CatalogSearch` UI and the MCP `mindvault_search` tool send these same server-supported parameters.)
 
 | Parameter            | Type                                               | Effect                                                           |
 | -------------------- | -------------------------------------------------- | ---------------------------------------------------------------- |
@@ -173,6 +173,8 @@ Expected response (array):
 | `offset`             | integer ≥ 0                                        | Pagination offset                                                |
 
 The MCP `mindvault_browse` and `mindvault_search` tools forward these same parameters (MCP `query` maps to `search`). They also accept `tags` and `listed`, which are applied client-side for parity with catalog/meta and on-chain fields (the public HTTP schema rejects unknown query params).
+
+Price bounds are compared numerically, so equivalent decimal strings such as `"0.50"` and `"0.5"` match the same USDC prices. MCP tag matching is case-insensitive and requires every requested tag. Because the public catalog contains listed resources only, `listed=true` preserves the public result set and `listed=false` returns no public catalog matches.
 
 ```bash
 # Verified links priced between 0.10 and 1.00 USDC that mention "dataset"

@@ -2,7 +2,7 @@
 
 This document describes how an AI agent (Claude Code, Codex, or any MCP-enabled client) interacts with MindVault through the MCP server.
 
-The MCP server is a thin adapter layer. It translates natural-language tool calls into HTTP API requests and x402 payment flows, then returns results as text. The agent never touches Stellar or Soroban directly — the MCP server handles wallet management, payment signing, and x402 negotiation.
+The MCP server is a thin adapter layer. It translates natural-language tool calls into HTTP API requests and x402 payment flows, then returns a human-readable text block and, for tools with structured results, a machine-readable `structuredContent` object (see [mcp-structured-output.md](mcp-structured-output.md)). The agent never touches Stellar or Soroban directly — the MCP server handles wallet management, payment signing, and x402 negotiation.
 
 ---
 

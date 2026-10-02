@@ -26,15 +26,21 @@
     "mindvault-mcp": "dist/index.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "provenance.json"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "dev": "tsx src/index.ts",
+    "generate-fixtures": "tsx scripts/generate-fixtures.ts",
+    "generate-tool-docs": "tsx scripts/generate-tool-docs.ts",
+    "generate-env-reference": "tsx scripts/generate-env-reference.ts",
+    "check-tool-docs": "tsx scripts/generate-tool-docs.ts --check",
+    "prepublish:check": "tsx scripts/prepublish-check.ts",
+    "provenance": "tsx scripts/write-provenance.ts",
     "smoke": "tsx scripts/smoke.ts",
     "smoke:install": "tsx scripts/install-smoke.ts",
-    "test": "vitest run",
-    "prepublish:check": "tsx scripts/prepublish-check.ts"
+    "test": "vitest run"
   },
   "dependencies": {
     "@mindvault/registry-client": "workspace:*",
@@ -46,6 +52,7 @@
   },
   "devDependencies": {
     "@types/node": "^25.9.1",
+    "prettier": "^3.8.4",
     "tsx": "^4.21.0",
     "typescript": "^6.0.2",
     "vitest": "^4.1.7"

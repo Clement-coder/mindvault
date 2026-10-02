@@ -169,6 +169,20 @@ describe("auditLog – network request logging", () => {
     const logged = JSON.parse((console.error as any).mock.calls[0][0]);
     expect(logged.errorSummary).toBe("Internal server error: database connection failed");
   });
+
+  it("captures a redacted request payload snapshot", () => {
+    logNetworkRequest("POST", "https://example.com", "api", 201, 100, {
+      requestPayload: {
+        title: "Research notes",
+        credentials: { apiKey: "sk_live_1234567890abcdef" },
+        authorization: "Bearer token-that-must-not-appear",
+      },
+    });
+    const logged = JSON.parse((console.error as any).mock.calls[0][0]);
+    expect(logged.requestPayload.title).toBe("Research notes");
+    expect(logged.requestPayload.credentials.apiKey).toBe("[REDACTED]");
+    expect(logged.requestPayload.authorization).toBe("[REDACTED]");
+  });
 });
 
 describe("auditLog – payment logging", () => {

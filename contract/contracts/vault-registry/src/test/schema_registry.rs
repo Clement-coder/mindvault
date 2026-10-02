@@ -372,7 +372,7 @@ fn full_workflow_emits_exactly_the_documented_events() {
     let verifier = Address::generate(&env);
     client.add_verifier(&verifier); // -> "addverif"
     record(&env, &client, &mut observed);
-    client.set_verification_status(&r2, &verifier, &VerificationStatus::Verified); // -> "verify"
+    client.set_verification_status(&r2, &verifier, &VerificationStatus::Verified, &None::<String>); // -> "verify"
     record(&env, &client, &mut observed);
     client.set_fee_config(&FeeConfig {
         platform_fee_bps: 100,

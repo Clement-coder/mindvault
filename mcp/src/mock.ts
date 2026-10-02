@@ -24,7 +24,7 @@ export function mockEnabledFromEnv(env: NodeJS.ProcessEnv): boolean {
   return typeof raw === "string" && TRUTHY.has(raw.trim().toLowerCase());
 }
 
-interface MockResource {
+export interface MockResource {
   id: string;
   title: string;
   description: string;
@@ -34,30 +34,45 @@ interface MockResource {
   accessUrl: string;
 }
 
+export interface MockRegistryResource {
+  id: string;
+  creator: string;
+  price: string;
+  metadata: string;
+  listed: boolean;
+  tags: string[];
+}
+
+/**
+ * Catalog resources seeded into the in-memory mock. Exported so the fixture
+ * generation script (`scripts/generate-fixtures.ts`) can serialise them to
+ * `fixtures/` without duplicating the source data.
+ */
+export const MOCK_CATALOG_RESOURCES: MockResource[] = [
+  {
+    id: "mock-1",
+    title: "Intro to Stellar Smart Contracts",
+    description: "A beginner guide to Soroban.",
+    price: "1.5",
+    resourceType: "link",
+    verificationStatus: "verified",
+    accessUrl: "https://example.com/mock-1",
+  },
+  {
+    id: "mock-2",
+    title: "x402 Payments Cheat Sheet",
+    description: "Pay-per-use HTTP flows with USDC.",
+    price: "0.5",
+    resourceType: "link",
+    verificationStatus: "verified",
+    accessUrl: "https://example.com/mock-2",
+  },
+];
+
 /** Two seeded resources so browse/preview/registry return content out of the box. */
 function seedResources(): Map<string, MockResource> {
   const resources = new Map<string, MockResource>();
-  const seed: MockResource[] = [
-    {
-      id: "mock-1",
-      title: "Intro to Stellar Smart Contracts",
-      description: "A beginner guide to Soroban.",
-      price: "1.5",
-      resourceType: "link",
-      verificationStatus: "verified",
-      accessUrl: "https://example.com/mock-1",
-    },
-    {
-      id: "mock-2",
-      title: "x402 Payments Cheat Sheet",
-      description: "Pay-per-use HTTP flows with USDC.",
-      price: "0.5",
-      resourceType: "link",
-      verificationStatus: "verified",
-      accessUrl: "https://example.com/mock-2",
-    },
-  ];
-  for (const r of seed) resources.set(r.id, r);
+  for (const r of MOCK_CATALOG_RESOURCES) resources.set(r.id, r);
   return resources;
 }
 
@@ -311,6 +326,34 @@ export function mockRegistryLookup(
   );
 }
 
+export function mockVerifyAttestation(
+  resourceId: string,
+  expectedAttestationHash: string,
+  contractId: string,
+): string {
+  const registeredAttestationHash = resourceId === "mock1" ? "mock-attestation-1" : null;
+  const matches =
+    registeredAttestationHash !== null && registeredAttestationHash === expectedAttestationHash;
+  return JSON.stringify(
+    {
+      source: "on-chain (mock)",
+      resourceId,
+      expectedAttestationHash,
+      registeredAttestationHash,
+      matches,
+      verified: matches,
+      summary: matches
+        ? "Attestation hash matches the value registered on-chain."
+        : registeredAttestationHash === null
+          ? "No attestation hash is registered for this resource in mock mode."
+          : "The supplied attestation hash does not match the value registered on-chain.",
+      contract: contractId,
+    },
+    null,
+    2,
+  );
+}
+
 export function mockUpdateMetadata(resourceId: string, metadata: string): string {
   return JSON.stringify(
     {
@@ -356,6 +399,59 @@ export function mockTransferOwnership(resourceId: string, newCreator: string): s
   );
 }
 
+export function mockAcceptTransfer(resourceId: string): string {
+  return JSON.stringify(
+    {
+      status: "success",
+      resourceId,
+      txHash: `MOCK_TX_ACCEPT_TRANSFER_${resourceId}`,
+      explorerUrl: explorerTxUrl(`MOCK_TX_ACCEPT_TRANSFER_${resourceId}`),
+      source: "on-chain (mock)",
+    },
+    null,
+    2,
+  );
+}
+
+export function mockCancelTransfer(resourceId: string): string {
+  return JSON.stringify(
+    {
+      status: "success",
+      resourceId,
+      txHash: `MOCK_TX_CANCEL_TRANSFER_${resourceId}`,
+      explorerUrl: explorerTxUrl(`MOCK_TX_CANCEL_TRANSFER_${resourceId}`),
+      source: "on-chain (mock)",
+    },
+    null,
+    2,
+  );
+}
+
+export function mockPendingTransfer(resourceId: string): string {
+  // Deterministic mock: derive a stable proposed-owner address from the resource id.
+  const mockProposedOwner = Keypair.fromRawEd25519Seed(
+    Buffer.from(
+      `mock-proposed-owner-${resourceId}`.padEnd(32, "\0").slice(0, 32),
+      "utf8",
+    ),
+  ).publicKey();
+
+  return JSON.stringify(
+    {
+      source: "on-chain (mock)",
+      resourceId,
+      found: true,
+      proposedNewOwner: mockProposedOwner,
+      message: `A pending ownership transfer exists for resource "${resourceId}".`,
+      contract: "MOCK_CONTRACT_ID",
+      network: "Test SDF Network ; September 2015",
+      rpc: "https://soroban-testnet.stellar.org",
+    },
+    null,
+    2,
+  );
+}
+
 export function mockSetListed(resourceId: string, listed: boolean): string {
   return JSON.stringify(
     {
@@ -371,14 +467,96 @@ export function mockSetListed(resourceId: string, listed: boolean): string {
   );
 }
 
-const MOCK_REGISTRY_RESOURCES = [
+export function mockSetTags(resourceId: string, tags: string[]): string {
+  const txHash = `MOCK_TX_SET_TAGS_${resourceId}`;
+  return [
+    `Tags updated for resource "${resourceId}".`,
+    `Tags: ${tags.length > 0 ? tags.join(", ") : "(none)"}`,
+    `Tx hash: ${txHash}`,
+    `Explorer: ${explorerTxUrl(txHash)}`,
+    "Source: on-chain (mock)",
+  ].join("\n");
+}
+
+/**
+ * Deterministic mock for batch publish. Returns a summary that mirrors the
+ * real `publishBatch` output with all items approved and registered on-chain.
+ */
+export function mockPublishBatch(
+  items: Array<{ title: string; description?: string; price: string; externalUrl: string }>,
+): string {
+  const itemResults = items.map((item, i) => ({
+    index: i,
+    title: item.title,
+    id: `mock-batch-${i + 1}`,
+    verificationStatus: "approved" as const,
+    onchainStatus: "registered",
+  }));
+  return JSON.stringify(
+    {
+      requested: items.length,
+      verified: items.length,
+      rejected: 0,
+      errored: 0,
+      onchainStatus: "registered",
+      txHash: `MOCK_TX_BATCH_REGISTER`,
+      items: itemResults,
+      source: "on-chain (mock)",
+    },
+    null,
+    2,
+  );
+}
+
+/**
+ * Deterministic mock receipt for buy flows. Returns a purchase receipt object
+ * that mirrors the shape of a real x402 payment receipt, with deterministic
+ * fields so tests can assert on exact values.
+ */
+export interface MockBuyReceipt {
+  resourceId: string;
+  amount: string;
+  network: string;
+  txHash: string;
+  receiptRef: string;
+  purchasedAt: string;
+}
+
+const MOCK_BUY_COUNTER = new WeakMap<object, number>();
+
+export function mockBuyReceipt(
+  resourceId: string,
+  amount: string,
+  network: string = "stellar:testnet",
+  nonce?: object,
+): MockBuyReceipt {
+  const counter = nonce
+    ? ((MOCK_BUY_COUNTER.get(nonce) ?? 0) + 1,
+      MOCK_BUY_COUNTER.set(nonce, (MOCK_BUY_COUNTER.get(nonce) ?? 0) + 1),
+      MOCK_BUY_COUNTER.get(nonce)!)
+    : 1;
+  return {
+    resourceId,
+    amount,
+    network,
+    txHash: `MOCK_TX_BUY_${resourceId}_${counter}`,
+    receiptRef: `mock-receipt-${resourceId}-${counter}`,
+    purchasedAt: "2026-08-25T12:00:00.000Z",
+  };
+}
+
+/**
+ * On-chain registry resources seeded into the mock. Exported so the fixture
+ * generation script can serialise them alongside the catalog fixtures.
+ */
+export const MOCK_REGISTRY_RESOURCES: MockRegistryResource[] = [
   {
     id: "mock-1",
     creator: "GMOCKCREATOR1",
     price: "1.5000000 USDC",
     metadata: "Intro to Stellar",
     listed: true,
-    tags: [] as string[],
+    tags: [],
   },
   {
     id: "mock-2",
@@ -386,7 +564,7 @@ const MOCK_REGISTRY_RESOURCES = [
     price: "0.5000000 USDC",
     metadata: "x402 Cheat Sheet",
     listed: true,
-    tags: [] as string[],
+    tags: [],
   },
 ];
 
@@ -442,4 +620,36 @@ export function mockRegistryList(
     null,
     2,
   );
+}
+
+/**
+ * Stand-in for the on-chain count()/listed_count()/creator_resource_count()
+ * trio. Derives values from the same MOCK_REGISTRY_RESOURCES seed so the
+ * numbers stay consistent with mockRegistryList.
+ */
+export function mockRegistryCount(creator: string | undefined, contractId: string): string {
+  const all = MOCK_REGISTRY_RESOURCES;
+  const count = all.length;
+  const listedCount = all.filter((r) => r.listed).length;
+
+  const payload: {
+    source: string;
+    count: number;
+    listedCount: number;
+    creatorCount?: number;
+    creator?: string;
+    contract: string;
+  } = {
+    source: "on-chain (mock)",
+    count,
+    listedCount,
+    contract: contractId,
+  };
+
+  if (creator != null) {
+    payload.creator = creator;
+    payload.creatorCount = all.filter((r) => r.creator === creator).length;
+  }
+
+  return JSON.stringify(payload, null, 2);
 }

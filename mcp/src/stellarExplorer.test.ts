@@ -10,10 +10,13 @@ import {
 // The helper resolves its network segment from STELLAR_NETWORK; restore it after
 // each case so tests stay independent of the ambient environment.
 const ORIGINAL_NETWORK = process.env.STELLAR_NETWORK;
+const ORIGINAL_HORIZON_URL = process.env.HORIZON_URL;
 
 afterEach(() => {
   if (ORIGINAL_NETWORK === undefined) delete process.env.STELLAR_NETWORK;
   else process.env.STELLAR_NETWORK = ORIGINAL_NETWORK;
+  if (ORIGINAL_HORIZON_URL === undefined) delete process.env.HORIZON_URL;
+  else process.env.HORIZON_URL = ORIGINAL_HORIZON_URL;
 });
 
 describe("resolveExplorerNetwork", () => {
@@ -67,6 +70,19 @@ describe("explorerTxUrl", () => {
     expect(explorerTxUrl("abc123")).toBe("https://stellar.expert/explorer/public/tx/abc123");
     process.env.STELLAR_NETWORK = "testnet";
     expect(explorerTxUrl("abc123")).toBe("https://stellar.expert/explorer/testnet/tx/abc123");
+  });
+
+  it("uses HORIZON_URL as the explorer base when configured", () => {
+    process.env.HORIZON_URL = "https://horizon.example.test/";
+    expect(explorerTxUrl("abc123", "testnet")).toBe(
+      "https://horizon.example.test/explorer/testnet/tx/abc123",
+    );
+    expect(explorerAccountUrl("GABC", "testnet")).toBe(
+      "https://horizon.example.test/explorer/testnet/account/GABC",
+    );
+    expect(explorerContractUrl("CABC", "testnet")).toBe(
+      "https://horizon.example.test/explorer/testnet/contract/CABC",
+    );
   });
 });
 

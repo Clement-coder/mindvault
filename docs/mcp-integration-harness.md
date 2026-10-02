@@ -28,13 +28,14 @@ on-chain registry lookups use the deterministic fixtures in
 
 ## What it covers
 
-| Check         | How                                                         |
-| ------------- | ----------------------------------------------------------- |
-| Tool listing  | `client.listTools()` over the in-memory transport           |
-| Catalog tools | `mindvault_browse`, `mindvault_search`, `mindvault_preview` |
-| Registry mock | `mindvault_registry_lookup` (seeded hit + miss), `mindvault_registry_list` (pagination) |
-| Wallet setup  | `mindvault_setup_wallet` via mock `/create`                 |
-| Error shape   | Unknown tool + missing wallet                               |
+| Check           | How                                                                                     |
+| --------------- | --------------------------------------------------------------------------------------- |
+| Tool listing    | `client.listTools()` over the in-memory transport                                       |
+| Catalog tools   | `mindvault_browse`, `mindvault_search`, `mindvault_preview`                             |
+| Registry mock   | `mindvault_registry_lookup` (seeded hit + miss), `mindvault_registry_list` (pagination) |
+| Wallet setup    | `mindvault_setup_wallet` via mock `/create`                                             |
+| Structured JSON | `structuredContent` on catalog, preview, receipts, wallet; absent on text-only tools    |
+| Error shape     | Unknown tool + missing wallet                                                           |
 
 ## Error handling contract
 
@@ -48,7 +49,9 @@ result — not an uncaught transport failure:
 
 Clients (and this harness) treat either `isError` or a leading `Error:` line as
 failure. Soft, non-throwing outcomes (for example registry “not found” JSON)
-remain successful tool results with `isError` unset.
+remain successful tool results with `isError` unset. Thrown failures never
+include `structuredContent`. Successful structured tools attach it next to the
+text; `harnessStructuredContent()` reads that object.
 
 The message _inside_ that envelope is structured: a summary line, a
 machine-readable `Source: … · Category: … · HTTP …` line, and a `Next:` step.

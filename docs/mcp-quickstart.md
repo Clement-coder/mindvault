@@ -31,9 +31,13 @@ Creates a sponsored Stellar testnet account. The sponsor covers the ~1.5 XLM res
 
 ```
 Wallet created.
+Profile: default
 Address: GAGENT...XYZ
-Secret key stored in memory (not persisted).
+Wallet persisted to ~/.mindvault/state.json (mode 0600).
 ```
+
+`structuredContent` carries `{ profile, address, persisted }` so the agent can
+read the public key without parsing the lines. Secret keys are never returned.
 
 ### 2. Funding the agent wallet
 
@@ -147,6 +151,10 @@ Lists resources in the catalog with their IDs, titles, prices, and access URLs. 
   https://mindvault-hyr3.onrender.com/r/abc123
 ```
 
+The same resources also arrive as MCP `structuredContent` (`items` with `id`,
+`title`, `price`, `accessUrl`) so an agent does not have to parse the list.
+See [mcp-structured-output.md](mcp-structured-output.md).
+
 ### 9. `mindvault_search` (optional)
 
 Search the catalog by keyword plus filters. Server-supported filters are forwarded to `GET /resources`; `tags` and `listed` are applied client-side for parity with catalog/meta fields.
@@ -177,6 +185,15 @@ Search the catalog by keyword plus filters. Server-supported filters are forward
   https://mindvault-hyr3.onrender.com/r/abc123
 ```
 
+### 8b. Catalog resources (`resources/list` and `resources/read`) _(optional)_
+
+The MCP server also advertises the `resources` capability, so clients can discover catalog entries without invoking a tool. `resources/list` returns every catalog entry with a stable URI, and `resources/read` returns its **public metadata only** — never gated content.
+
+- URI scheme: `mindvault://resource/<id>` (e.g. `mindvault://resource/abc123`)
+- `resources/list` → entries with `name` (the title), `description`, and `mimeType: application/json`
+- `resources/read` on a known URI → `{ id, title, description, price, resourceType, verificationStatus, accessUrl }`
+- Unknown URIs and unknown resource ids return deterministic errors, so agents can correct the URI or fall back to `mindvault_browse` / `mindvault_search`
+
 If no resource matches, the error message includes the applied filters, for example:
 
 ```
@@ -187,7 +204,8 @@ Invalid filter values (bad price range, unknown enums, etc.) return a determinis
 
 ### 10. `mindvault_preview` (optional)
 
-Show full metadata and verification status before paying.
+Show full metadata and verification status before paying. The JSON text and
+`structuredContent` share `{ id, title, description, price, type, verificationStatus, accessUrl }`.
 
 **Input:**
 
@@ -205,7 +223,8 @@ Pays the resource price in USDC via x402 and returns the protected content.
 { "resourceId": "abc123" }
 ```
 
-**Example output:** the resource payload (link, JSON, or file body), preceded by an x402 settlement summary.
+**Example output:** a JSON summary (`before` / `after` / `txHash`) as both text
+and `structuredContent`. The protected content is in the `after` object.
 
 > Troubleshooting: a `402 Payment Required` after `buy` means the payment didn't settle — usually insufficient USDC. Run `mindvault_wallet_info` to check the balance.
 

@@ -1,0 +1,27 @@
+{
+  "_meta": {
+    "generatedBy": "scripts/generate-fixtures.ts",
+    "description": "Snapshot of MOCK_CATALOG_RESOURCES — the deterministic catalog the in-process mock serves for GET /resources.",
+    "cacheControl": "max-age=60"
+  },
+  "resources": [
+    {
+      "id": "mock-1",
+      "title": "Intro to Stellar Smart Contracts",
+      "description": "A beginner guide to Soroban.",
+      "price": "1.5",
+      "resourceType": "link",
+      "verificationStatus": "verified",
+      "accessUrl": "https://example.com/mock-1"
+    },
+    {
+      "id": "mock-2",
+      "title": "x402 Payments Cheat Sheet",
+      "description": "Pay-per-use HTTP flows with USDC.",
+      "price": "0.5",
+      "resourceType": "link",
+      "verificationStatus": "verified",
+      "accessUrl": "https://example.com/mock-2"
+    }
+  ]
+}

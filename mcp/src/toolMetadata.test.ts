@@ -11,46 +11,50 @@
 import { describe, it, expect } from "vitest";
 import { TOOL_DEFINITIONS } from "./tools.js";
 import { catalogFilterInputProperties } from "./catalogFilters.js";
+import { TEXT_ONLY_TOOLS } from "./outputSchemas.js";
 
 describe("MCP tool metadata", () => {
   it("all tools have required fields", () => {
-    // Inline expected tool names from index.ts for snapshot validation.
-    // Integration tests assert the live ListTools response via the SDK harness.
-    const expectedToolNames = [
-      "mindvault_setup_wallet",
-      "mindvault_wallet_info",
-      "mindvault_use_profile",
-      "mindvault_list_profiles",
-      "mindvault_browse",
-      "mindvault_search",
-      "mindvault_preview",
-      "mindvault_register",
-      "mindvault_publish",
-      "mindvault_publish_status",
-      "mindvault_buy",
-      "mindvault_purchase_history",
-      "mindvault_register_onchain",
-      "mindvault_agent_status",
-      "mindvault_registry_info",
-      "mindvault_network_profile",
-      "mindvault_check_bindings",
-      "mindvault_check_consistency",
-      "mindvault_registry_lookup",
-      "mindvault_tx_status",
-      "mindvault_reset",
-      "mindvault_backup_state",
-      "mindvault_restore_state",
-      "mindvault_metrics",
-      "mindvault_update_metadata",
-      "mindvault_set_price",
-      "mindvault_transfer_ownership",
-      "mindvault_set_listed",
-    ];
     for (const tool of TOOL_DEFINITIONS) {
       expect(tool.name).toMatch(/^mindvault_/);
       expect(typeof tool.description).toBe("string");
       expect(tool.description.length).toBeGreaterThan(0);
       expect(tool.inputSchema.type).toBe("object");
+    }
+  });
+
+  it("every tool declares MCP annotations with a title (#552)", () => {
+    for (const tool of TOOL_DEFINITIONS) {
+      const annotations = tool.annotations;
+      expect(annotations, `tool ${tool.name} has annotations`).toBeDefined();
+      expect(typeof annotations.title, `tool ${tool.name} has a title`).toBe("string");
+      expect(annotations.title.length).toBeGreaterThan(0);
+      expect(typeof annotations.readOnlyHint).toBe("boolean");
+      expect(typeof annotations.destructiveHint).toBe("boolean");
+      expect(typeof annotations.idempotentHint).toBe("boolean");
+    }
+  });
+
+  it("read-only tools are not marked destructive (#552)", () => {
+    const readOnlyTools = TOOL_DEFINITIONS.filter((tool) => tool.annotations.readOnlyHint);
+    expect(readOnlyTools.length).toBeGreaterThan(0);
+    for (const tool of readOnlyTools) {
+      expect(
+        tool.annotations.destructiveHint,
+        `read-only tool ${tool.name} is not destructive`,
+      ).toBe(false);
+    }
+  });
+
+  it("destructive tools are not marked read-only (#552)", () => {
+    const destructiveTools = TOOL_DEFINITIONS.filter((tool) => tool.annotations.destructiveHint);
+    expect(destructiveTools.map((t) => t.name)).toEqual(
+      expect.arrayContaining(["mindvault_reset", "mindvault_restore_state"]),
+    );
+    for (const tool of destructiveTools) {
+      expect(tool.annotations.readOnlyHint, `destructive tool ${tool.name} is not read-only`).toBe(
+        false,
+      );
     }
   });
 
@@ -66,6 +70,16 @@ describe("MCP tool metadata", () => {
     };
 
     expect(searchSchema).toMatchSnapshot();
+  });
+
+  it("structured tools declare outputSchema and text-only tools do not (#553)", () => {
+    for (const tool of TOOL_DEFINITIONS) {
+      if ((TEXT_ONLY_TOOLS as readonly string[]).includes(tool.name)) {
+        expect(tool.outputSchema, `${tool.name} should stay text-only`).toBeUndefined();
+      } else {
+        expect(tool.outputSchema, `${tool.name} should advertise outputSchema`).toBeDefined();
+      }
+    }
   });
 
   it("mindvault_publish inputSchema", () => {

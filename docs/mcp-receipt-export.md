@@ -29,7 +29,7 @@ Both read the same local store (`~/.mindvault/purchases.json`, or
 
 | Argument     | Type    | Meaning                                                             |
 | ------------ | ------- | ------------------------------------------------------------------- |
-| `format`     | enum    | `json` (default) or `csv`                                           |
+| `format`     | enum    | `json` (default), `csv`, or `ndjson`                                |
 | `resourceId` | string  | Only receipts for this resource                                     |
 | `network`    | string  | Only receipts settled on this x402 network (e.g. `stellar:testnet`) |
 | `since`      | string  | Inclusive lower bound, ISO-8601; a bare date means midnight UTC     |
@@ -93,6 +93,29 @@ The CSV travels **inside** the envelope rather than replacing it because the
 tool declares an `outputSchema`: a tool that declares one must return structured
 results conforming to it, so both formats share one shape.
 
+## NDJSON
+
+With `format: "ndjson"` each receipt is serialized as an independent JSON object
+on its own line in the envelope's `ndjson` field:
+
+```
+{"resourceId":"mock-1","title":"Intro to Stellar Smart Contracts","amount":"1.5","currency":"USDC","network":"stellar:testnet","purchasedAt":"2026-08-25T11:59:07.000Z","txHash":"abc123","receiptRef":"pay-1","explorerUrl":"https://stellar.expert/explorer/testnet/tx/abc123"}
+```
+
+An empty export produces an empty string — no trailing newline — consistent with
+how tools like `jq --raw-input` and line-oriented processors handle empty
+Newline-Delimited JSON files.
+
+NDJSON is designed for accounts with large receipt histories: each line is a
+complete, self-contained document that can be streamed or processed one row at a
+time without holding the entire array in memory. Unlike the `json` format, a
+consumer reading NDJSON does not need to parse the full response before it can
+act on the first receipt.
+
+Like CSV, the NDJSON document travels **inside** the envelope rather than
+replacing it, so the tool's `outputSchema` describes every format and the server
+can return the same object as `structuredContent` regardless of format.
+
 ## Structured content
 
 The tool advertises an `outputSchema`, and the server returns the envelope as
@@ -113,8 +136,9 @@ for the structured-content contract.
 ## Coverage
 
 - [`mcp/src/receipts.test.ts`](../mcp/src/receipts.test.ts) — argument
-  normalization, exact totals, CSV quoting, date bounds, and the advertised
-  schema matching what the tool returns
+  normalization, exact totals, CSV quoting, NDJSON line-per-row encoding, date
+  bounds, and the advertised schema matching what the tool returns for all three
+  formats
 - [`mcp/src/integration.test.ts`](../mcp/src/integration.test.ts) — the tool
   through `callTool`, including the advertised `outputSchema`
 - [`mcp/src/installSmoke.ts`](../mcp/src/installSmoke.ts) — a versioned export is

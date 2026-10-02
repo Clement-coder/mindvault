@@ -8,6 +8,7 @@ import {
   assertMainnetMutationAllowed,
   mainnetConfirmationRequiredError,
   formatMainnetDiagnostics,
+  formatMainnetBanner,
 } from "./mainnetGuardrails.js";
 
 describe("isMainnetNetwork", () => {
@@ -104,6 +105,9 @@ describe("assertMainnetMutationAllowed", () => {
     expect(() => assertMainnetMutationAllowed("mainnet", "mindvault_publish", {}, {})).toThrow(
       /confirmMainnet/,
     );
+    expect(() => assertMainnetMutationAllowed("mainnet", "mindvault_set_tags", {}, {})).toThrow(
+      /confirmMainnet/,
+    );
   });
 
   it("allows gated tools when confirmMainnet is true", () => {
@@ -146,5 +150,48 @@ describe("formatMainnetDiagnostics", () => {
     expect(text).toContain("stellar:pubnet");
     expect(text).toContain("CABC");
     expect(text).toContain("confirmMainnet");
+  });
+});
+
+describe("formatMainnetBanner", () => {
+  it("reassures on testnet — no confirmation instructions", () => {
+    const text = formatMainnetBanner({
+      stellarNetwork: "testnet",
+      x402Network: "stellar:testnet",
+      registryContractId: "CTEST",
+      allowMainnetEnv: false,
+    });
+    expect(text).toContain("testnet");
+    expect(text).toContain("not real funds");
+    expect(text).not.toContain("MAINNET");
+    expect(text).not.toContain("confirmMainnet: true");
+  });
+
+  it("warns prominently on mainnet and explains both confirmation paths", () => {
+    const text = formatMainnetBanner({
+      stellarNetwork: "mainnet",
+      x402Network: "stellar:pubnet",
+      registryContractId: "CLIVE",
+      allowMainnetEnv: false,
+    });
+    expect(text).toContain("MAINNET");
+    expect(text).toContain("real USDC");
+    expect(text).toContain("CLIVE");
+    expect(text).toContain("confirmMainnet: true");
+    expect(text).toContain("MINDVAULT_ALLOW_MAINNET=1");
+    for (const tool of MAINNET_GATED_TOOLS) {
+      expect(text).toContain(tool);
+    }
+    expect(text).not.toMatch(/secret|private key|password/i);
+  });
+
+  it("flags a missing registry contract on mainnet", () => {
+    const text = formatMainnetBanner({
+      stellarNetwork: "mainnet",
+      x402Network: "stellar:pubnet",
+      registryContractId: "",
+      allowMainnetEnv: false,
+    });
+    expect(text).toContain("unset");
   });
 });

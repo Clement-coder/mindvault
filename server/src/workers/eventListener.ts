@@ -6,6 +6,7 @@ import { db } from "../db/client.js";
 import { resources } from "../db/schema.js";
 import { config } from "../config.js";
 import { getLogger } from "../lib/logger.js";
+import { saveResourceTags } from "../services/resourceService.js";
 
 const POLL_INTERVAL_MS = 30_000;
 const EVENT_PAGE_LIMIT = 100;
@@ -47,25 +48,57 @@ function saveLastLedger(ledger: number): void {
   }
 }
 
-interface SorobanEvent {
+type EventValue = {
+  type?: string;
+  value?: string;
+  symbol?: string;
+  vec?: EventValue[] | (() => EventValue[] | undefined);
+  switch?: () => { name?: string };
+  str?: () => string;
+  sym?: () => string;
+  map?: Array<{ key: { type: string; symbol?: string }; val: { type: string; value?: string } }>;
+};
+
+export interface SorobanEvent {
   type: string;
   ledger: number;
   ledgerClosedAt: string;
   contractId: string;
   id: string;
   pagingToken: string;
-  topic: string[];
-  value: {
-    type: string;
-    value?: string;
-    vec?: Array<{ type: string; value?: string; symbol?: string; vec?: unknown[] }>;
-    map?: Array<{ key: { type: string; symbol?: string }; val: { type: string; value?: string } }>;
-  };
+  topic: Array<string | EventValue>;
+  value: EventValue;
 }
 
-function extractResourceId(topic: string[]): string | null {
+function eventValueType(value: EventValue | undefined): string | null {
+  if (!value) return null;
+  if (typeof value.type === "string") return value.type;
+  const name = value.switch?.()?.name;
+  return typeof name === "string" ? name.replace(/^scv/, "").toLowerCase() : null;
+}
+
+function eventVector(value: EventValue | undefined): EventValue[] | null {
+  if (eventValueType(value) !== "vec") return null;
+  if (typeof value?.vec === "function") return value.vec() ?? null;
+  return Array.isArray(value?.vec) ? value.vec : null;
+}
+
+function eventString(value: string | EventValue | undefined): string | null {
+  if (typeof value === "string") return value;
+  if (!value) return null;
+  const type = eventValueType(value);
+  if (type === undefined && typeof value.value === "string") return value.value;
+  if (type === undefined && typeof value.symbol === "string") return value.symbol;
+  if (type !== "string" && type !== "symbol") return null;
+  if (typeof value.str === "function") return value.str();
+  if (typeof value.sym === "function") return value.sym();
+  if (typeof value.value === "string") return value.value;
+  return typeof value.symbol === "string" ? value.symbol : null;
+}
+
+function extractResourceId(topic: Array<string | EventValue>): string | null {
   if (topic.length < 2) return null;
-  const raw = topic[1];
+  const raw = eventString(topic[1]);
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw);
@@ -79,9 +112,74 @@ function extractResourceId(topic: string[]): string | null {
   }
 }
 
-function extractAddress(val: { type: string; value?: string }): string | null {
+function extractTopicSymbol(topic: Array<string | EventValue>): string | null {
+  const raw = eventString(topic[0]);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return typeof parsed === "string"
+      ? parsed
+      : typeof parsed?.symbol === "string"
+        ? parsed.symbol
+        : null;
+  } catch {
+    return raw;
+  }
+}
+
+function extractAddress(val: { type?: string; value?: string }): string | null {
   if (val.type === "address") return val.value ?? null;
   return null;
+}
+
+function extractStringVector(value: EventValue | undefined): string[] | null {
+  const entries = eventVector(value);
+  if (!entries) return null;
+  const tags: string[] = [];
+  for (const entry of entries) {
+    const tag = eventString(entry);
+    if (tag === null) return null;
+    tags.push(tag);
+  }
+  return tags;
+}
+
+export function extractNextTags(event: SorobanEvent): string[] | null {
+  const values = eventVector(event.value);
+  if (!values || values.length < 2) return null;
+  return extractStringVector(values[1]);
+}
+
+export async function handleSetTagsEvent(event: SorobanEvent): Promise<void> {
+  const id = extractResourceId(event.topic);
+  if (!id) {
+    getLogger().warn(
+      { event: "event_settags_invalid", eventId: event.id },
+      "settags event missing resource id",
+    );
+    return;
+  }
+
+  const tags = extractNextTags(event);
+  if (tags === null) {
+    getLogger().warn(
+      { event: "event_settags_invalid", eventId: event.id, resourceId: id },
+      "settags event has an invalid payload",
+    );
+    return;
+  }
+
+  const saved = await saveResourceTags(id, tags);
+
+  if (!saved) {
+    getLogger().warn(
+      { event: "event_settags_unknown_resource", eventId: event.id, resourceId: id },
+      "settags event references an unknown resource",
+    );
+    return;
+  }
+
+  getLogger().info({ event: "event_settags", resourceId: id, tags }, "synced settags event");
 }
 
 async function handleRegisterEvent(event: SorobanEvent): Promise<void> {
@@ -196,18 +294,7 @@ async function pollEvents(): Promise<void> {
     for (const event of events) {
       if (event.ledger > maxLedger) maxLedger = event.ledger;
 
-      const topicSymbols = event.topic.map((t: string) => {
-        try {
-          const parsed = JSON.parse(t);
-          if (parsed?.symbol) return parsed.symbol;
-          if (typeof parsed === "string") return parsed;
-          return t;
-        } catch {
-          return t;
-        }
-      });
-
-      const eventType = topicSymbols[0];
+      const eventType = extractTopicSymbol(event.topic);
 
       try {
         switch (eventType) {
@@ -220,6 +307,7 @@ async function pollEvents(): Promise<void> {
           case EVENT_UPD_META:
             break;
           case EVENT_SET_TAGS:
+            await handleSetTagsEvent(event);
             break;
           case EVENT_TRANSFER:
             await handleTransferEvent(event);

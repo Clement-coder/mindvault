@@ -15,6 +15,8 @@
  * `index.ts` owns the wiring; nothing here performs I/O.
  */
 
+import { CLOCK_SKEW_WINDOW_MS, isClockSkewRejection } from "./requestSignature.js";
+
 /** Which subsystem produced the failure. */
 export type ErrorSource = "api" | "x402" | "horizon" | "soroban" | "registry" | "sponsored";
 
@@ -44,6 +46,35 @@ export interface MappedError {
   detail?: string;
   /** One-line, imperative next step for the agent. */
   action: string;
+}
+
+/**
+ * Stable payload returned in MCP tool-error `structuredContent`.
+ *
+ * The text rendering remains useful for humans and older clients, while this
+ * object lets agents branch on an error category without parsing prose.
+ */
+export interface TroubleshootingHint {
+  schema: "mindvault.troubleshooting/v1";
+  source: ErrorSource;
+  category: ErrorCategory;
+  status: number | null;
+  summary: string;
+  detail: string | null;
+  action: string;
+}
+
+/** Convert a mapped failure into the stable, machine-readable MCP payload. */
+export function troubleshootingHint(error: MappedError): TroubleshootingHint {
+  return {
+    schema: "mindvault.troubleshooting/v1",
+    source: error.source,
+    category: error.category,
+    status: error.status ?? null,
+    summary: error.summary,
+    detail: error.detail ?? null,
+    action: error.action,
+  };
 }
 
 /** Human label for a source, used in the summary. */
@@ -164,6 +195,16 @@ function revokedKeyAction(profile: string): string {
   );
 }
 
+/** Recovery step for a request signature rejected purely for clock skew. */
+function clockSkewAction(): string {
+  const minutes = Math.round(CLOCK_SKEW_WINDOW_MS / 60_000);
+  return (
+    `The request signature was rejected because its timestamp fell outside the accepted ` +
+    `${minutes}-minute window — the local clock is probably skewed, not the key. Sync the ` +
+    `system clock (e.g. enable NTP), then retry; the message disappears once the clocks agree.`
+  );
+}
+
 /** Recovery step for a key the server accepted but that lacks access here. */
 function forbiddenKeyAction(profile: string): string {
   return (
@@ -194,6 +235,24 @@ export function mapHttpError(input: {
   const category = categorizeStatus(input.status);
   const detail = extractDetail(input.data);
   const credential = input.credential;
+
+  // A 401 naming the signature timestamp window is a system-clock problem, not
+  // a credential problem. It nests inside the 401-with-credential case (a
+  // signed request always carries the publisher key), so it must be checked
+  // before the revoked-key branch or every skew rejection would be reported as
+  // a revoked key and an agent would replace a credential that never went bad.
+  if (isClockSkewRejection(input.status, detail)) {
+    return {
+      source: input.source,
+      category,
+      status: input.status,
+      detail,
+      summary:
+        `${input.operation}: ${detail} ` +
+        "(request signature timestamp rejected as outside the allowed window)",
+      action: clockSkewAction(),
+    };
+  }
 
   if (credential && isRevokedApiKey(input.status, credential)) {
     return {

@@ -121,6 +121,36 @@ backend, no funds, and no network. Details in
 Automated as `smoke:script` / `smoke:driver` (readiness) and `smoke:run` (the
 actual run, with `--smoke`).
 
+## 7b. Provenance
+
+- [ ] `pnpm --filter @mindvault/mcp provenance` has been run **after** the build
+- [ ] `provenance.json` records the version being published and a full commit SHA
+- [ ] The working tree was clean when it was generated
+- [ ] Publishing from CI, so `--provenance` can attest the tarball as well
+
+A published tarball otherwise says what it is but nothing about where it came
+from. `provenance.json` ships inside the package and records the source commit
+and ref, the repository, the build time, the builder (CI workflow or local),
+the toolchain, and a sha256 for every built file. For an MCP server that holds
+a Stellar secret key and signs payments, that is worth having.
+
+It is a lightweight record, not a signed attestation. npm's `--provenance` flag
+produces the cryptographically verifiable version and the two are
+complementary: the flag proves the tarball came from a CI run, this file says
+what that run was building.
+
+```
+pnpm --filter @mindvault/mcp build
+pnpm --filter @mindvault/mcp provenance
+pnpm --filter @mindvault/mcp prepublish:check
+```
+
+Order matters — the record digests `dist/`, so generating it before the build
+describes the previous one. The `provenance:*` checks catch a record that is
+present but stale, which is worse than none because it is believed.
+
+Details in [docs/mcp-provenance.md](mcp-provenance.md).
+
 ## 8. Docs
 
 - [ ] The [client configs](mcp-client-configs.md) match the shipped entrypoint
@@ -141,20 +171,29 @@ actual run, with `--smoke`).
 
 ## Check reference
 
-| Check                           | What it means when it fails                                       |
-| ------------------------------- | ----------------------------------------------------------------- |
-| `tests`                         | The vitest suite failed — fix before anything else                |
-| `build`                         | `tsc` reported errors                                             |
-| `manifest:*`                    | A required package.json field is missing or wrong                 |
-| `bin:declared` / `bin:built`    | No `bin`, or it points outside `dist/`                            |
-| `bin:exists`                    | The build has not been run                                        |
-| `bin:packed`                    | `files` excludes the entrypoint — the command would be missing    |
-| `bin:shebang`                   | The entrypoint cannot execute as a command                        |
-| `build:output`                  | `dist/` is empty                                                  |
-| `build:fresh`                   | `dist/` is older than `src/` — rebuild                            |
-| `contents:runtime`              | The tarball has no `dist/`                                        |
-| `contents:no-*`                 | Sources, tests, env files, state, or lockfiles would be published |
-| `deps:workspace`                | Informational — publish with `pnpm publish`                       |
-| `deps:resolvable`               | A workspace dependency is private and cannot be installed         |
-| `smoke:script` / `smoke:driver` | The smoke path is missing                                         |
-| `smoke:run`                     | The end-to-end mock run failed                                    |
+| Check                           | What it means when it fails                                           |
+| ------------------------------- | --------------------------------------------------------------------- |
+| `tests`                         | The vitest suite failed — fix before anything else                    |
+| `build`                         | `tsc` reported errors                                                 |
+| `manifest:*`                    | A required package.json field is missing or wrong                     |
+| `bin:declared` / `bin:built`    | No `bin`, or it points outside `dist/`                                |
+| `bin:exists`                    | The build has not been run                                            |
+| `bin:packed`                    | `files` excludes the entrypoint — the command would be missing        |
+| `bin:shebang`                   | The entrypoint cannot execute as a command                            |
+| `build:output`                  | `dist/` is empty                                                      |
+| `build:fresh`                   | `dist/` is older than `src/` — rebuild                                |
+| `contents:runtime`              | The tarball has no `dist/`                                            |
+| `contents:no-*`                 | Sources, tests, env files, state, or lockfiles would be published     |
+| `deps:workspace`                | Informational — publish with `pnpm publish`                           |
+| `deps:resolvable`               | A workspace dependency is private and cannot be installed             |
+| `provenance:packed`             | `provenance.json` is missing from the tarball — run `pnpm provenance` |
+| `provenance:present`            | The record is absent or unparseable                                   |
+| `provenance:schema`             | The record was written by an older tool — regenerate it               |
+| `provenance:version` / `:name`  | The record is stale — regenerate after bumping the version            |
+| `provenance:commit`             | No source commit recorded                                             |
+| `provenance:repository`         | The recorded repository disagrees with package.json                   |
+| `provenance:clean`              | Built from a dirty tree — the commit does not describe the build      |
+| `provenance:digest`             | The file list was edited by hand or written by an older tool          |
+| `provenance:coverage`           | The tarball carries built files the record does not know about        |
+| `smoke:script` / `smoke:driver` | The smoke path is missing                                             |
+| `smoke:run`                     | The end-to-end mock run failed                                        |

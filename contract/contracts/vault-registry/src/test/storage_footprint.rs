@@ -98,6 +98,18 @@ fn storage_footprint_report() {
 
     let max_id = register_max_size_resource(&env, &creator, &client);
     let typical_id = register_tagged(&env, &creator, &client, "typicalres", &["dataset"]);
+    let tag_fixture_creator = Address::generate(&env);
+    for i in 0..(TOP_TAGS_CAP - MAX_TAGS as u32) {
+        let tag = format!("{:02}{}", i, "t".repeat(MAX_TAG_LEN as usize - 2));
+        let id = format!("topfixture{:02}", i);
+        register_tagged(
+            &env,
+            &tag_fixture_creator,
+            &client,
+            &id,
+            &[tag.as_str()],
+        );
+    }
 
     let settler = Address::generate(&env);
     let verifier = Address::generate(&env);
@@ -118,6 +130,10 @@ fn storage_footprint_report() {
         royalty_bps: 250,
         fee_recipient: Some(admin.clone()),
     });
+    client.set_fee_destination(&FeeDestinationConfig {
+        bps: MAX_FEE_DESTINATION_BPS,
+        destination: FeeDestination::Burn,
+    });
     client.record_payment(
         &settler,
         &receipt_id,
@@ -127,12 +143,23 @@ fn storage_footprint_report() {
         &max_hash,
     );
     client.anchor_purchase_receipt(&verifier, &max_id, &buyer, &max_hash);
+    client.set_verification_status(
+        &typical_id,
+        &verifier,
+        &VerificationStatus::Verified,
+        &Some(String::from_str(
+            &env,
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )),
+    );
     client.flag_resource(&max_id, &moderator, &FlagReason::Copyright);
     client.set_flag_reason_hash(
         &max_id,
         &moderator,
         &String::from_str(&env, &"f".repeat(MAX_FLAG_REASON_HASH_LEN as usize)),
     );
+    env.ledger().set_timestamp(100);
+    client.set_paused_until(&admin, &200);
 
     let max_tag = client.get(&max_id).tags.get(0).unwrap();
     let specs: std::vec::Vec<(&'static str, DataKey, StorageKind, usize)> = std::vec![
@@ -155,6 +182,13 @@ fn storage_footprint_report() {
             96,
         ),
         ("Count", DataKey::Count, StorageKind::Instance, 48),
+        (
+            "TagCount (max-size tag)",
+            DataKey::TagCount(max_tag.clone()),
+            StorageKind::Instance,
+            160,
+        ),
+        ("TopTags", DataKey::TopTags, StorageKind::Instance, 2000),
         (
             "CreatorResources",
             DataKey::CreatorResources(creator.clone()),
@@ -203,7 +237,25 @@ fn storage_footprint_report() {
             StorageKind::Persistent,
             200,
         ),
+        (
+            "FlagModerator",
+            DataKey::FlagModerator(max_id.clone()),
+            StorageKind::Persistent,
+            160,
+        ),
+        (
+            "AttestationHash",
+            DataKey::AttestationHash(typical_id.clone()),
+            StorageKind::Persistent,
+            160,
+        ),
         ("FeeConfig", DataKey::FeeConfig, StorageKind::Instance, 192),
+        (
+            "FeeDestination",
+            DataKey::FeeDestination,
+            StorageKind::Instance,
+            192,
+        ),
         ("Admin", DataKey::Admin, StorageKind::Instance, 80),
         (
             "Verifier grant",
@@ -223,7 +275,13 @@ fn storage_footprint_report() {
             StorageKind::Instance,
             96,
         ),
-        ("Paused flag", DataKey::Paused, StorageKind::Instance, 32),
+        ("Paused flag", DataKey::Paused, StorageKind::Instance, 48),
+        (
+            "Pause deadline",
+            DataKey::PauseUntil,
+            StorageKind::Instance,
+            64,
+        ),
     ];
 
     let mut rows: std::vec::Vec<FootprintRow> = std::vec::Vec::new();
@@ -265,7 +323,10 @@ fn storage_footprint_report() {
         .filter(|r| {
             matches!(
                 r.label,
-                "Resource (max-size)" | "Index(u32) -> id" | "TagIndex (max-size tag)"
+                "Resource (max-size)"
+                    | "Index(u32) -> id"
+                    | "TagIndex (max-size tag)"
+                    | "TagCount (max-size tag)"
             )
         })
         .map(FootprintRow::total)
@@ -276,7 +337,7 @@ fn storage_footprint_report() {
         .map(FootprintRow::total)
         .sum();
     std::println!(
-        "\nPer max-size registration (Resource + Index + one TagIndex): {per_resource} bytes"
+        "\nPer max-size registration (Resource + Index + one TagIndex + one TagCount): {per_resource} bytes"
     );
     std::println!("Per payment (PaymentReceipt + PaymentIndex): {per_payment} bytes\n");
 
@@ -295,7 +356,7 @@ fn storage_footprint_report() {
     assert!(
         per_resource <= 1_900,
         "a max-size registration now writes {per_resource} XDR bytes across its \
-         three entry classes, over the 1900-byte budget"
+         four entry classes, over the 1900-byte budget"
     );
     assert!(
         per_payment <= 850,

@@ -26,7 +26,7 @@ proptest! {
         body_len in 0usize..=(512usize - "https://".len()),
         ch       in r"[a-zA-Z0-9]",
     ) {
-        let env = env_without_snapshots();
+        let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register(VaultRegistry, ());
         let client = VaultRegistryClient::new(&env, &contract_id);
@@ -62,7 +62,7 @@ proptest! {
         id_str  in r"[a-z][a-z0-9]{0,10}",
         excess  in 1usize..=50usize,
     ) {
-        let env = env_without_snapshots();
+        let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register(VaultRegistry, ());
         let client = VaultRegistryClient::new(&env, &contract_id);

@@ -120,3 +120,49 @@ run as part of `pnpm --filter @mindvault/mcp test` and the root `pnpm test`.
 For SDK-level coverage of `listTools` / `callTool` against the real server
 handlers (with mocked fetch/registry), see
 [mcp-integration-harness.md](mcp-integration-harness.md).
+
+## Offline fixture generation
+
+The `MINDVAULT_MOCK=1` in-process fixtures live in
+[`mcp/src/mock.ts`](../mcp/src/mock.ts). A companion script serialises them to
+static JSON files under `mcp/fixtures/` so tests and tooling can load
+pre-generated data without booting any process:
+
+```bash
+pnpm --filter @mindvault/mcp generate-fixtures
+# or from mcp/
+pnpm generate-fixtures
+```
+
+Source: [`mcp/scripts/generate-fixtures.ts`](../mcp/scripts/generate-fixtures.ts).
+
+The command is **idempotent** — running it twice produces bit-for-bit identical
+output. Commit the generated files so CI and contributors always have them
+without needing to run the command first.
+
+### Output files
+
+| File                             | Contents                                              |
+| -------------------------------- | ----------------------------------------------------- |
+| `fixtures/catalog.json`          | Catalog resources (`GET /resources` shape)            |
+| `fixtures/registry.json`         | On-chain registry resources (Soroban `list` shape)    |
+| `fixtures/agent-status.json`     | Verification agent status (`GET /agent/status` shape) |
+| `fixtures/horizon-balances.json` | Horizon account balances (`GET /accounts/:pk` shape)  |
+
+Each file carries a `_meta.generatedBy` field so it is always clear where the
+data came from.
+
+### Keeping fixtures in sync
+
+The fixture files are derived from `MOCK_CATALOG_RESOURCES` and
+`MOCK_REGISTRY_RESOURCES` exported from `mock.ts`. If you edit those constants,
+regenerate the fixtures:
+
+```bash
+pnpm --filter @mindvault/mcp generate-fixtures
+git add mcp/fixtures/
+```
+
+The test suite enforces alignment: `src/generateFixtures.test.ts` loads the
+generated files and asserts their `resources` arrays match the in-memory
+constants exactly — so a stale `fixtures/` directory fails the tests.

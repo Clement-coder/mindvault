@@ -6,6 +6,7 @@ import {
   boolean,
   timestamp,
   pgEnum,
+  jsonb,
   index,
 } from "drizzle-orm/pg-core";
 import { createId } from "@paralleldrive/cuid2";
@@ -63,6 +64,7 @@ export const resources = pgTable(
     listed: boolean("listed").notNull().default(false),
     onchainStatus: onchainStatusEnum("onchain_status").notNull().default("none"),
     onchainTxHash: text("onchain_tx_hash"),
+    tags: jsonb("tags").$type<string[]>().notNull().default([]),
     createdAt: timestamp("created_at").defaultNow().notNull(),
   },
   (table) => ({

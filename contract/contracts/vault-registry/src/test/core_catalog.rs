@@ -1402,6 +1402,27 @@ fn list_page_limit_capped_at_20_with_next_cursor() {
     assert_eq!(page.next_cursor, Some(20u32));
 }
 
+/// `list_by_creator` silently caps the requested page size at `LIST_PAGE_CAP`
+/// (20). Registering 25 resources under a single creator and requesting 25
+/// must return exactly 20.
+///
+/// This mirrors the standalone cap regression tests for `list`, `list_listed`,
+/// and `list_page` but exercises the creator-index path specifically.
+#[test]
+fn list_by_creator_limit_capped_at_20() {
+    let (env, creator, client) = setup();
+    let ids = [
+        "c00", "c01", "c02", "c03", "c04", "c05", "c06", "c07", "c08", "c09", "c10", "c11",
+        "c12", "c13", "c14", "c15", "c16", "c17", "c18", "c19", "c20", "c21", "c22", "c23",
+        "c24",
+    ];
+    register_n(&env, &creator, &client, &ids);
+
+    // Requesting 25 items should be silently capped to 20.
+    let page = client.list_by_creator(&creator, &0u32, &25u32);
+    assert_eq!(page.len(), 20);
+}
+
 #[test]
 fn register_with_tags_stores_labels() {
     let (env, creator, client) = setup();

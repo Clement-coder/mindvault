@@ -37,6 +37,12 @@ import {
   type CheckResult,
   type PackageSnapshot,
 } from "../src/prepublish.js";
+import {
+  PROVENANCE_FILENAME,
+  checkProvenance,
+  checkProvenanceCoverage,
+  parseProvenance,
+} from "../src/provenance.js";
 
 const PACKAGE_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const WORKSPACE_DIR = resolve(PACKAGE_DIR, "..");
@@ -165,6 +171,14 @@ const snapshot: PackageSnapshot = {
 
 results.push(...runPackageChecks(snapshot));
 results.push(...checkDependencies(manifest, workspacePackages()));
+
+// 7b. Provenance record shipped with the artifact (#586).
+const provenancePath = join(PACKAGE_DIR, PROVENANCE_FILENAME);
+const provenance = existsSync(provenancePath)
+  ? parseProvenance(readFileSync(provenancePath, "utf-8"))
+  : null;
+results.push(...checkProvenance(provenance, manifest, pack.files));
+if (provenance) results.push(checkProvenanceCoverage(provenance, pack.files));
 
 // 8. Optional end-to-end smoke run against the offline mock backend.
 if (runSmoke) {

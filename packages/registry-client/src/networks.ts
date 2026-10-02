@@ -18,6 +18,7 @@ export interface NetworkPreset {
   networkPassphrase: string;
   sorobanRpcUrl: string;
   horizonUrl: string;
+  explorerBaseUrl: string;
   explorerNetwork: ExplorerNetwork;
   /** Soroban USDC Stellar Asset Contract (SEP-41) used by x402. */
   usdcSacContractId: string;
@@ -37,6 +38,7 @@ export const networks: Record<StellarDeploymentNetwork, NetworkPreset> = {
     networkPassphrase: Networks.TESTNET,
     sorobanRpcUrl: "https://soroban-testnet.stellar.org",
     horizonUrl: "https://horizon-testnet.stellar.org",
+    explorerBaseUrl: "https://stellar.expert",
     explorerNetwork: "testnet",
     usdcSacContractId: "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
     usdcClassicIssuer: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
@@ -48,6 +50,7 @@ export const networks: Record<StellarDeploymentNetwork, NetworkPreset> = {
     networkPassphrase: Networks.PUBLIC,
     sorobanRpcUrl: "https://soroban.stellar.org",
     horizonUrl: "https://horizon.stellar.org",
+    explorerBaseUrl: "https://stellar.expert",
     explorerNetwork: "public",
     usdcSacContractId: "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75",
     usdcClassicIssuer: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",

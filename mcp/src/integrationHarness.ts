@@ -30,6 +30,16 @@ export function harnessResultText(result: {
     .trim();
 }
 
+/** Machine-readable MCP `structuredContent` object, or undefined. */
+export function harnessStructuredContent(result: {
+  structuredContent?: unknown;
+}): Record<string, unknown> | undefined {
+  const payload = result.structuredContent;
+  return payload && typeof payload === "object" && !Array.isArray(payload)
+    ? (payload as Record<string, unknown>)
+    : undefined;
+}
+
 /** True when the MCP result is flagged as an error or carries the Error: marker. */
 export function harnessIsToolError(result: {
   isError?: boolean;
@@ -52,6 +62,14 @@ export interface IntegrationHarness {
     content?: Array<{ type: string; text?: string }>;
     isError?: boolean;
     [key: string]: unknown;
+  }>;
+  /** List catalog resources via the SDK request interface. */
+  listResources(): Promise<{
+    resources: Array<{ uri: string; name: string; description?: string; mimeType?: string }>;
+  }>;
+  /** Read one catalog resource via the SDK request interface. */
+  readResource(uri: string): Promise<{
+    contents: Array<{ uri: string; text?: string; mimeType?: string; blob?: string }>;
   }>;
   /** Close client and server transports. */
   close(): Promise<void>;
@@ -83,6 +101,8 @@ export async function startIntegrationHarness(server: Server): Promise<Integrati
         [key: string]: unknown;
       };
     },
+    listResources: () => client.listResources(),
+    readResource: (uri) => client.readResource({ uri }),
     close: async () => {
       await client.close().catch(() => {});
       // Server.close is optional on some SDK versions; ignore if absent.

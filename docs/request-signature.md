@@ -6,11 +6,11 @@ Publisher mutations (`POST` and `DELETE` on `/resources/*`) can require an HMAC-
 
 ## Headers
 
-| Header | Description |
-|--------|-------------|
-| `x-api-key` | Publisher API key (also the HMAC secret) |
-| `X-Timestamp` | Unix time in **seconds** when the request was signed |
-| `X-Signature` | Lowercase hex HMAC-SHA256 of the canonical string |
+| Header            | Description                                             |
+| ----------------- | ------------------------------------------------------- |
+| `x-api-key`       | Publisher API key (also the HMAC secret)                |
+| `X-Timestamp`     | Unix time in **seconds** when the request was signed    |
+| `X-Signature`     | Lowercase hex HMAC-SHA256 of the canonical string       |
 | `Idempotency-Key` | Optional; included in the canonical string when present |
 
 ## Canonical string
@@ -46,7 +46,7 @@ Use `crypto.timingSafeEqual` (or equivalent) when comparing on the server.
 Hash the **exact raw UTF-8 bytes** sent as the body:
 
 ```js
-bodyHash = sha256(rawBody).hex()
+bodyHash = sha256(rawBody).hex();
 ```
 
 For an empty body (e.g. `DELETE`, or `POST` with no payload):
@@ -128,11 +128,39 @@ curl -X POST "http://localhost:4021$PATH" \
 
 ## Error responses
 
-| Status | `error` field |
-|--------|----------------|
-| 401 | `Missing X-Timestamp header` |
-| 401 | `Missing X-Signature header` |
-| 401 | `Request timestamp outside allowed window` |
-| 401 | `Invalid request signature` |
+| Status | `error` field                              |
+| ------ | ------------------------------------------ |
+| 401    | `Missing X-Timestamp header`               |
+| 401    | `Missing X-Signature header`               |
+| 401    | `Request timestamp outside allowed window` |
+| 401    | `Invalid request signature`                |
 
 When `REQUIRE_REQUEST_SIGNATURE=false`, unsigned requests behave as before (API key only).
+
+## Client-side clock-skew diagnostics
+
+The MCP server does not reason about your clock at signing time — it cannot
+see the server's. But when the server does reject a signed request as stale,
+the rejection is a **delta**: the MCP server stamps `X-Timestamp` with its own
+`Date.now()`, and the server stamps it against its own. A 401 whose error says
+`Request timestamp outside allowed window` is therefore classified as a
+**system-clock problem**, not a credential problem.
+
+`mcp/src/errorMapping.ts` detects that message and returns a targeted next step
+instead of the "run `mindvault_register`" advice a revoked key would get:
+
+```text
+Publish failed: Request timestamp outside allowed window (request signature timestamp rejected as outside the allowed window)
+Source: MindVault API · Category: auth · HTTP 401
+Next: The request signature was rejected because its timestamp fell outside the accepted 5-minute window — the local clock is probably skewed, not the key. Sync the system clock (e.g. enable NTP), then retry; the message disappears once the clocks agree.
+```
+
+The other three signature 401s (`Missing X-Timestamp`, `Missing X-Signature`,
+`Invalid request signature`) are signing bugs, not clock problems, and are
+never mislabelled as skew. The recognition logic lives in
+[`mcp/src/requestSignature.ts`](../mcp/src/requestSignature.ts)
+(`isClockSkewRejection`), and the window it quotes
+(`CLOCK_SKEW_WINDOW_MS`, default **300000 ms / 5 minutes**) mirrors the
+server's `SIGNATURE_MAX_SKEW_MS` default so the advice always matches the
+server's actual tolerance. When you change the server window, set the same
+value on the client by keeping `CLOCK_SKEW_WINDOW_MS` in sync.

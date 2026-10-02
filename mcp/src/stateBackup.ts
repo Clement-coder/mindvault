@@ -15,13 +15,23 @@
  */
 
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "crypto";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "fs";
 import { homedir } from "os";
-import { join } from "path";
+import { dirname, join } from "path";
 import { STATE_VERSION, type ProfileState, type WalletProfile } from "./profiles.js";
 
 const STATE_DIR = join(homedir(), ".mindvault");
 const STATE_FILE = join(STATE_DIR, "state.json");
+const BACKUP_DIR = join(STATE_DIR, "backups");
 
 // scrypt cost params — tuned for interactive passphrase derivation (not hot path).
 // N=2^14 keeps OpenSSL maxmem happy in constrained CI/agent envs.
@@ -40,6 +50,38 @@ export class StateBackupError extends Error {
     super(message);
     this.name = "StateBackupError";
   }
+}
+
+export interface RestoreStateOptions {
+  expectedNetwork?: string;
+}
+
+export interface PersistedStateSecretMatch {
+  path: string;
+  kind: "wallet-secret-key" | "api-key";
+}
+
+/**
+ * Report secret-bearing fields in an unencrypted persisted-state backup before
+ * it is shared. Encrypted `exportState` output is safe to transport instead.
+ */
+export function scanPersistedStateSecrets(raw: unknown): PersistedStateSecretMatch[] {
+  if (!raw || typeof raw !== "object") return [];
+  const profiles = (raw as { profiles?: unknown }).profiles;
+  if (!profiles || typeof profiles !== "object") return [];
+
+  const matches: PersistedStateSecretMatch[] = [];
+  for (const [profileName, value] of Object.entries(profiles as Record<string, unknown>)) {
+    if (!value || typeof value !== "object") continue;
+    const profile = value as { apiKey?: unknown; wallet?: { secretKey?: unknown } };
+    if (typeof profile.wallet?.secretKey === "string" && profile.wallet.secretKey.length > 0) {
+      matches.push({ path: `profiles.${profileName}.wallet.secretKey`, kind: "wallet-secret-key" });
+    }
+    if (typeof profile.apiKey === "string" && profile.apiKey.length > 0) {
+      matches.push({ path: `profiles.${profileName}.apiKey`, kind: "api-key" });
+    }
+  }
+  return matches;
 }
 
 /**
@@ -87,6 +129,18 @@ export function exportState(passphrase: string): string {
   return `v1:${salt.toString("base64")}:${nonce.toString("base64")}:${blob.toString("base64")}`;
 }
 
+/** Encrypt the current state and write a private recovery file. */
+export function exportStateFile(
+  passphrase: string,
+  now: Date = new Date(),
+  directory: string = BACKUP_DIR,
+): string {
+  const stamp = now.toISOString().replace(/[:.]/g, "-");
+  const path = join(directory, `state-${stamp}.backup`);
+  writeAtomically(path, `${exportState(passphrase)}\n`, 0o600);
+  return path;
+}
+
 /**
  * Restore state from an encrypted backup string.
  *
@@ -98,6 +152,7 @@ export function restoreState(
   blob: string,
   passphrase: string,
   write: (state: ProfileState) => void,
+  options: RestoreStateOptions = {},
 ): string {
   if (!passphrase || passphrase.length < 8) {
     throw new StateBackupError("Passphrase must be at least 8 characters.");
@@ -143,6 +198,16 @@ export function restoreState(
   } catch {
     throw new StateBackupError("Backup contents are not valid state.");
   }
+  if (options.expectedNetwork) {
+    const mismatched = Object.entries(state.profiles).find(
+      ([, profile]) => profile.network && profile.network !== options.expectedNetwork,
+    );
+    if (mismatched) {
+      throw new StateBackupError(
+        `Backup belongs to network "${mismatched[1].network}" but the active profile uses "${options.expectedNetwork}".`,
+      );
+    }
+  }
   write(state);
   return `State restored: ${Object.keys(state.profiles).length} profile(s), active "${state.activeProfile}".`;
 }
@@ -179,6 +244,7 @@ function normalizePersisted(raw: unknown): ProfileState {
       }
     }
     if (typeof v.apiKey === "string" && v.apiKey.length > 0) profile.apiKey = v.apiKey;
+    if (v.network === "testnet" || v.network === "mainnet") profile.network = v.network;
     profiles[name] = profile;
   }
   const requested = typeof obj.activeProfile === "string" ? obj.activeProfile : "default";
@@ -187,15 +253,89 @@ function normalizePersisted(raw: unknown): ProfileState {
 }
 
 /**
+ * Write bytes to a temp file in the same directory and atomically rename it over
+ * the destination to avoid partial writes. The destination is never left half-
+ * written when the rename fails, and the file retains the requested mode.
+ */
+export function writeAtomically(
+  filePath: string,
+  data: string,
+  mode: number,
+  ops: Partial<typeof import("fs")> = {},
+): void {
+  const dir = dirname(filePath);
+  mkdirSync(dir, { recursive: true });
+
+  const tempPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+  const writeSync = ops.writeFileSync ?? writeFileSync;
+  const rename = ops.renameSync ?? renameSync;
+  const chmod = ops.chmodSync ?? chmodSync;
+  const pathExists = ops.existsSync ?? existsSync;
+  const remove = ops.unlinkSync ?? unlinkSync;
+
+  try {
+    writeSync(tempPath, data, { mode });
+    rename(tempPath, filePath);
+    chmod(filePath, mode);
+  } catch (err) {
+    try {
+      if (pathExists(tempPath)) remove(tempPath);
+    } catch {
+      // ignore cleanup errors; the caller already received the write failure
+    }
+    throw err;
+  }
+}
+
+/**
  * Persist a restored ProfileState to disk (mode 0600), mirroring saveState in
  * index.ts. Exposed for testability.
  */
 export function persistState(state: ProfileState): void {
   try {
-    mkdirSync(STATE_DIR, { recursive: true });
-    writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), { mode: 0o600 });
+    writeAtomically(STATE_FILE, JSON.stringify(state, null, 2), 0o600);
   } catch (err) {
     throw new StateBackupError(`Failed to persist restored state: ${err}`);
+  }
+}
+
+/**
+ * Preserve an unreadable or structurally invalid state file instead of letting
+ * the next `saveState()` overwrite the only copy of it.
+ *
+ * The corrupted file is moved aside to `<file>.corrupt-<now-ms>` (same owner
+ * and mode as the original) so the evidence is never lost and the live path is
+ * clean for a fresh start. Returns the quarantine path when it worked and
+ * throws otherwise.
+ */
+export function quarantineStateFile(
+  filePath: string = STATE_FILE,
+  now: number = Date.now(),
+): string {
+  const quarantinePath = `${filePath}.corrupt-${now}`;
+  try {
+    mkdirSync(dirname(filePath), { recursive: true });
+    renameSync(filePath, quarantinePath);
+    return quarantinePath;
+  } catch (err) {
+    throw new StateBackupError(`Failed to quarantine corrupted state file: ${err}`);
+  }
+}
+
+/**
+ * Snapshot the pre-migration legacy state before it is re-persisted, so a later
+ * migration cannot destroy the only record of the original format.
+ *
+ * The legacy JSON is written to `<file>.legacy` (mode 0600, like the state file
+ * itself). Throws when the snapshot could not be saved so the caller can decide
+ * whether to proceed with the migration.
+ */
+export function preserveLegacyState(raw: unknown, filePath: string = STATE_FILE): void {
+  try {
+    mkdirSync(dirname(filePath), { recursive: true });
+    writeFileSync(`${filePath}.legacy`, JSON.stringify(raw, null, 2), { mode: 0o600 });
+  } catch (err) {
+    throw new StateBackupError(`Failed to preserve legacy state before migration: ${err}`);
   }
 }
 

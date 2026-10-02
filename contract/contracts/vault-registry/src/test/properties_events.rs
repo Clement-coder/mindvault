@@ -273,7 +273,7 @@ fn set_verification_status_event_topic_holds_full_max_length_id() {
     let verifier = Address::generate(&env);
     client.add_verifier(&verifier);
 
-    client.set_verification_status(&id, &verifier, &VerificationStatus::Verified);
+    client.set_verification_status(&id, &verifier, &VerificationStatus::Verified, &None::<String>);
 
     let topic_id = last_event_id_topic(&env);
     assert_eq!(topic_id, id);

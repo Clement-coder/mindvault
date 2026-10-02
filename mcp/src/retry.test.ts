@@ -15,6 +15,7 @@ import {
   isRetryableError,
   isRetryableStatus,
   retryAfterDelay,
+  retryPolicyForTool,
   retryPolicyFromEnv,
   withRetry,
   type RetryAttemptInfo,
@@ -124,6 +125,31 @@ describe("retryPolicyFromEnv", () => {
   it("uses a zero base delay under Vitest so suites do not really sleep", () => {
     expect(retryPolicyFromEnv({ VITEST: "true" }).baseDelayMs).toBe(0);
     expect(retryPolicyFromEnv({ VITEST: "true" }).attempts).toBe(3);
+  });
+});
+
+describe("retryPolicyForTool", () => {
+  it("applies an override only to the named tool", () => {
+    const env = {
+      [RETRY_ENV_VARS.attempts]: "3",
+      MINDVAULT_RETRY_ATTEMPTS_MINDVAULT_BROWSE: "5",
+      MINDVAULT_RETRY_BASE_DELAY_MS_MINDVAULT_BROWSE: "10",
+    };
+    expect(retryPolicyForTool("mindvault_browse", env)).toEqual({
+      attempts: 5,
+      baseDelayMs: 10,
+      maxDelayMs: DEFAULT_RETRY_POLICY.maxDelayMs,
+    });
+    expect(retryPolicyForTool("mindvault_search", env).attempts).toBe(3);
+  });
+
+  it("falls back to the global policy for invalid tool overrides", () => {
+    expect(
+      retryPolicyForTool("mindvault_browse", {
+        [RETRY_ENV_VARS.attempts]: "4",
+        MINDVAULT_RETRY_ATTEMPTS_MINDVAULT_BROWSE: "0",
+      }),
+    ).toMatchObject({ attempts: 4 });
   });
 });
 
