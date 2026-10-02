@@ -4874,6 +4874,10 @@ impl VaultRegistry {
         resource: &mut Resource,
         next: ResourceState,
     ) -> Result<(), Error> {
+        // Check if resource is tombstoned first - tombstoned resources have no outgoing transitions
+        if resource.state == ResourceState::Tombstoned {
+            return Err(Error::ResourceTombstoned);
+        }
         let allowed = matches!(
             (resource.state, next),
             (ResourceState::Listed, ResourceState::Delisted)
