@@ -2441,7 +2441,10 @@ fn expired_admin_nomination_can_be_replaced() {
     env.ledger().set_sequence_number(expiry);
 
     assert_eq!(client.try_nominate_new_admin(&replacement), Ok(Ok(())));
-    assert_eq!(client.pending_admin(), Some(replacement));
+    assert_eq!(client.pending_admin(), Some(replacement.clone()));
+    assert!(client.pending_admin_expiry().unwrap() > expiry);
+    client.accept_admin(&replacement);
+    assert_eq!(client.admin(), Some(replacement));
 }
 
 #[test]
@@ -4170,6 +4173,33 @@ fn set_terms_hash_accepts_max_length() {
     assert_eq!(client.get_terms_hash(&creator), terms);
 }
 
+#[test]
+fn set_terms_hash_validates_byte_length_not_character_count() {
+    // The limit is 64 bytes (for hex-encoded hashes like SHA-256 = 64 hex chars).
+    // Multi-byte UTF-8 characters count as multiple bytes, so a 64-char
+    // multi-byte string exceeds the limit and is rejected.
+    let (env, creator, client) = setup();
+
+    // 64 ASCII chars = 64 bytes = valid (hex hash length)
+    let ascii_64 = String::from_str(&env, &"a".repeat(64));
+    client.set_terms_hash(&creator, &ascii_64);
+    assert_eq!(client.get_terms_hash(&creator), ascii_64);
+
+    // 64 multi-byte chars (e.g., emoji = 4 bytes each) = 256 bytes = rejected
+    let creator2 = Address::generate(&env);
+    let multibyte_64 = String::from_str(&env, &"😀".repeat(64));
+    assert_eq!(
+        client.try_set_terms_hash(&creator2, &multibyte_64),
+        Err(Ok(Error::TermsHashTooLong))
+    );
+
+    // 16 multi-byte chars = 64 bytes = valid (but not a typical hash)
+    let creator3 = Address::generate(&env);
+    let multibyte_16 = String::from_str(&env, &"😀".repeat(16));
+    client.set_terms_hash(&creator3, &multibyte_16);
+    assert_eq!(client.get_terms_hash(&creator3), multibyte_16);
+}
+
 // Admin bootstrap/uninitialized-state behavior is covered by
 // `admin_transfer_nominate_then_accept` (bootstrap via the first
 // `nominate_new_admin` call) — see the two-step admin model above.
@@ -4549,6 +4579,24 @@ fn full_workflow_emits_exactly_the_documented_events() {
     client.transfer_ownership(&r1, &bob);
     record(&env, &client, &mut observed);
 
+    // #808: transfer_ownership_with_terms — emits both `transfer` and `txfrterms`
+    let r1b = String::from_str(&env, "schemar1b");
+    client.register(
+        &alice,
+        &r1b,
+        &100i128,
+        &String::from_str(&env, "ipfs://mterms"),
+        &empty_tags(&env),
+    );
+    record(&env, &client, &mut observed);
+    client.transfer_ownership_with_terms(
+        &r1b,
+        &bob,
+        &Some(String::from_str(&env, "newtermshash")),
+        &false,
+    ); // -> "transfer", "txfrterms", "setterms"
+    record(&env, &client, &mut observed);
+
     let r2 = String::from_str(&env, "schemar2");
     client.register(
         &alice,
@@ -4570,6 +4618,18 @@ fn full_workflow_emits_exactly_the_documented_events() {
     // deadline round out the documented event schema (`setroyal`,
     // `pause_until`).
     client.set_royalty_recipient(&r1, &Some(bob.clone())); // -> "setroyal"
+    record(&env, &client, &mut observed);
+    client.set_metadata_pointers(
+        &r1,
+        &Vec::from_array(
+            &env,
+            [
+                String::from_str(&env, "ipfs://m"),
+                String::from_str(&env, "ar://mirror"),
+            ],
+        ),
+        &0,
+    ); // -> "setptrs"
     record(&env, &client, &mut observed);
 
     let admin1 = Address::generate(&env);
@@ -4622,6 +4682,19 @@ fn full_workflow_emits_exactly_the_documented_events() {
         &String::from_str(&env, "sha256anchor2"),
     )); // -> "anchrfail"
     record(&env, &client, &mut observed);
+    // Keep retrying past the back-off window until the pair's attempt cap is
+    // reached; the attempt that reaches it also emits "anchrxhst".
+    for _ in 1..MAX_ANCHOR_ATTEMPTS {
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + ANCHOR_RETRY_BACKOFF_LEDGERS);
+        assert!(!client.attempt_anchor_purchase_receipt(
+            &verifier,
+            &r0,
+            &buyer,
+            &String::from_str(&env, "sha256anchor2"),
+        )); // -> "anchrfail" (+ "anchrxhst" on the last one)
+        record(&env, &client, &mut observed);
+    }
     client.remove_verifier(&verifier); // -> "rmverif"
     record(&env, &client, &mut observed);
 
@@ -4647,6 +4720,9 @@ fn full_workflow_emits_exactly_the_documented_events() {
 
     let payer = Address::generate(&env);
     let workflow_receipt = String::from_str(&env, "wfrcpt1");
+    // Payments require a listed resource; r0 was delisted above.
+    client.set_listed(&r0, &true); // -> "setlisted"
+    record(&env, &client, &mut observed);
     client.record_payment(
         &settler,
         &workflow_receipt,
@@ -4657,6 +4733,20 @@ fn full_workflow_emits_exactly_the_documented_events() {
     ); // -> "payment"
     record(&env, &client, &mut observed);
     client.settle_payment(&settler, &workflow_receipt); // -> "settle"
+    record(&env, &client, &mut observed);
+    // Time-limited access leases: buy (pending), settle, revoke.
+    let lease_amount = client.lease_price(&r0, &LeaseTier::Hour);
+    client.buy_lease(
+        &bob,
+        &r0,
+        &LeaseTier::Hour,
+        &lease_amount,
+        &String::from_str(&env, "leasetx0"),
+    ); // -> "lease"
+    record(&env, &client, &mut observed);
+    client.settle_lease(&settler, &r0, &bob); // -> "leasesetl"
+    record(&env, &client, &mut observed);
+    client.revoke_lease(&r0, &bob); // -> "leaserevk"
     record(&env, &client, &mut observed);
     client.remove_settler(&settler); // -> "rmsettlr"
     record(&env, &client, &mut observed);
@@ -4687,6 +4777,13 @@ fn full_workflow_emits_exactly_the_documented_events() {
     client.unflag_resource(&r0, &moderator); // -> "unflag"
     record(&env, &client, &mut observed);
     client.remove_moderator(&moderator); // -> "rmmod"
+    record(&env, &client, &mut observed);
+
+    // Recovery admin (dual-key bootstrap path).
+    let recovery = Address::generate(&env);
+    client.set_recovery_admin(&Some(recovery.clone())); // -> "setrecov"
+    record(&env, &client, &mut observed);
+    client.recover_admin(&Address::generate(&env)); // -> "recover"
     record(&env, &client, &mut observed);
 
     observed.sort();
@@ -8308,8 +8405,8 @@ fn get_flag_reason_hash_missing_fails() {
 // instead of only surfacing off-chain.
 
 #[test]
-fn add_moderator_emits_address_and_true_payload() {
-    let (env, _creator, _admin, client) = setup_with_admin();
+fn add_moderator_emits_address_and_role_change_payload() {
+    let (env, _creator, admin, client) = setup_with_admin();
     let moderator = Address::generate(&env);
 
     client.add_moderator(&moderator);
@@ -8320,13 +8417,21 @@ fn add_moderator_emits_address_and_true_payload() {
     assert_eq!(sym, Symbol::new(&env, "addmod"));
     let topic_moderator: Address = Address::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
     assert_eq!(topic_moderator, moderator);
-    let flag: bool = bool::try_from_val(&env, &data).unwrap();
-    assert!(flag, "addmod payload must be `true`");
+    let payload: RoleChange = RoleChange::try_from_val(&env, &data).unwrap();
+    assert_eq!(
+        payload,
+        RoleChange {
+            admin: admin.clone(),
+            target: moderator.clone(),
+            granted: true,
+        },
+        "addmod payload must carry the admin actor and target"
+    );
 }
 
 #[test]
-fn remove_moderator_emits_address_and_false_payload() {
-    let (env, _creator, _admin, client) = setup_with_admin();
+fn remove_moderator_emits_address_and_role_change_payload() {
+    let (env, _creator, admin, client) = setup_with_admin();
     let moderator = Address::generate(&env);
     client.add_moderator(&moderator);
 
@@ -8338,8 +8443,16 @@ fn remove_moderator_emits_address_and_false_payload() {
     assert_eq!(sym, Symbol::new(&env, "rmmod"));
     let topic_moderator: Address = Address::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
     assert_eq!(topic_moderator, moderator);
-    let flag: bool = bool::try_from_val(&env, &data).unwrap();
-    assert!(!flag, "rmmod payload must be `false`");
+    let payload: RoleChange = RoleChange::try_from_val(&env, &data).unwrap();
+    assert_eq!(
+        payload,
+        RoleChange {
+            admin: admin.clone(),
+            target: moderator.clone(),
+            granted: false,
+        },
+        "rmmod payload must carry the admin actor and target"
+    );
 }
 
 #[test]
@@ -9235,7 +9348,8 @@ fn storage_key_variant(env: &Env, key: &DataKey) -> Symbol {
 /// Every `DataKey` variant, with the name and arity it must keep across
 /// upgrades. Adding a variant means adding a row here — the exhaustive match in
 /// `storage_key_migration_covers_every_variant` will not compile until you do.
-fn storage_key_wire_contract(env: &Env) -> [(DataKey, &'static str, u32); 32] {
+fn storage_key_wire_contract(env: &Env) -> [(DataKey, &'static str, u32); 37] {
+fn storage_key_wire_contract(env: &Env) -> [(DataKey, &'static str, u32); 31] {
     let id = String::from_str(env, "migkey");
     let who = Address::generate(env);
     [
@@ -9290,7 +9404,18 @@ fn storage_key_wire_contract(env: &Env) -> [(DataKey, &'static str, u32); 32] {
             2,
         ),
         (DataKey::MemoHash(id.clone()), "MemoHash", 2),
+        (DataKey::FeeDestination, "FeeDestination", 1),
+        (DataKey::RefundReceipt(id.clone()), "RefundReceipt", 2),
+        (DataKey::RefundedAmount(id.clone()), "RefundedAmount", 2),
+        (DataKey::RefundTxHash(id.clone()), "RefundTxHash", 2),
+        (DataKey::RefundDeadline(id.clone()), "RefundDeadline", 2),
+        (DataKey::RefundWindow, "RefundWindow", 1),
+        (DataKey::PaymentRecipient(id.clone()), "PaymentRecipient", 2),
+        (DataKey::TopTags, "TopTags", 1),
+        (DataKey::TagCount(id), "TagCount", 2),
         (DataKey::FlagModerator(id), "FlagModerator", 2),
+        (DataKey::CreatorEarnings(who.clone()), "CreatorEarnings", 2),
+        (DataKey::VerifierHistory(who.clone()), "VerifierHistory", 2),
     ]
 }
 
@@ -9332,7 +9457,8 @@ fn storage_key_migration_covers_every_variant() {
     let contract = storage_key_wire_contract(&env);
     assert_eq!(
         contract.len(),
-        32,
+        37,
+        31,
         "storage_key_wire_contract must list every DataKey variant"
     );
 
@@ -9370,7 +9496,17 @@ fn storage_key_migration_covers_every_variant() {
             DataKey::CreatorListedCount(_) => "CreatorListedCount",
             DataKey::MemoHash(_) => "MemoHash",
             DataKey::FeeDestination => "FeeDestination",
+            DataKey::RefundReceipt(_) => "RefundReceipt",
+            DataKey::RefundedAmount(_) => "RefundedAmount",
+            DataKey::RefundTxHash(_) => "RefundTxHash",
+            DataKey::RefundDeadline(_) => "RefundDeadline",
+            DataKey::RefundWindow => "RefundWindow",
+            DataKey::PaymentRecipient(_) => "PaymentRecipient",
+            DataKey::TopTags => "TopTags",
+            DataKey::TagCount(_) => "TagCount",
             DataKey::FlagModerator(_) => "FlagModerator",
+            DataKey::CreatorEarnings(_) => "CreatorEarnings",
+            DataKey::VerifierHistory(_) => "VerifierHistory",
         };
         assert_eq!(
             matched, *name,
@@ -9384,8 +9520,7 @@ fn same_string_addresses_a_different_entry_per_key_variant() {
     let (env, _creator, client) = setup();
     let shared = String::from_str(&env, "collide");
 
-    // Six variants take a bare String. If any two encoded to the same address,
-    // one would overwrite another and a resource id could clobber a tag index.
+    // String-keyed variants must remain distinct even when given identical ids.
     env.as_contract(&client.address, || {
         let keys = [
             DataKey::Resource(shared.clone()),
@@ -9394,6 +9529,12 @@ fn same_string_addresses_a_different_entry_per_key_variant() {
             DataKey::DisputeFlag(shared.clone()),
             DataKey::FlagReasonHash(shared.clone()),
             DataKey::MemoHash(shared.clone()),
+            DataKey::RefundReceipt(shared.clone()),
+            DataKey::RefundedAmount(shared.clone()),
+            DataKey::RefundTxHash(shared.clone()),
+            DataKey::RefundDeadline(shared.clone()),
+            DataKey::PaymentRecipient(shared.clone()),
+            DataKey::TagCount(shared.clone()),
         ];
         for (marker, key) in keys.iter().enumerate() {
             env.storage().persistent().set(key, &(marker as u32));
@@ -9833,6 +9974,10 @@ fn attempt_anchor_reports_empty_and_oversized_receipt_hash() {
         AnchorFailureReason::InvalidReceiptHash
     );
 
+    // The pair is now inside its back-off window; move past it before the
+    // second attempt so the oversized hash is judged on its own.
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + ANCHOR_RETRY_BACKOFF_LEDGERS);
     let too_long = String::from_str(&env, &"a".repeat(MAX_TX_HASH_LEN as usize + 1));
     assert!(!client.attempt_anchor_purchase_receipt(&service, &id, &buyer, &too_long));
     assert_eq!(
@@ -10848,6 +10993,65 @@ fn tag_popularity_counter_saturates_at_u32_max() {
     assert_eq!(top.get(0).unwrap().count, u32::MAX);
 }
 
+#[test]
+fn register_surfaces_count_overflow_when_count_is_max() {
+    let (env, creator, client) = setup();
+    env.as_contract(&client.address, || {
+        env.storage().instance().set(&DataKey::Count, &u32::MAX);
+    });
+
+    let res = client.try_register(
+        &creator,
+        &String::from_str(&env, "ovf1"),
+        &100i128,
+        &String::from_str(&env, "ipfs://m"),
+        &empty_tags(&env),
+    );
+    assert_eq!(res, Err(Ok(Error::CountOverflow)));
+}
+
+#[test]
+fn initialize_network_rejects_replay_even_with_mismatched_id() {
+    let (env, _creator, client) = setup();
+    let network_id = env.ledger().network_id();
+    client.initialize_network(&network_id);
+
+    let mut wrong = network_id.to_array();
+    wrong[0] ^= 1;
+    let wrong = BytesN::from_array(&env, &wrong);
+
+    // After network is initialized, duplicate call with wrong id fails with NetworkAlreadyInitialized
+    assert_eq!(
+        client.try_initialize_network(&wrong),
+        Err(Ok(Error::NetworkAlreadyInitialized))
+    );
+}
+
+#[test]
+fn differently_cased_tags_indexed_under_same_normalized_tag() {
+    let (env, creator, client) = setup();
+    let r1 = String::from_str(&env, "case1");
+    let r2 = String::from_str(&env, "case2");
+
+    client.register(
+        &creator,
+        &r1,
+        &100i128,
+        &String::from_str(&env, "ipfs://1"),
+        &tags(&env, &["RustLang"]),
+    );
+    client.register(
+        &creator,
+        &r2,
+        &200i128,
+        &String::from_str(&env, "ipfs://2"),
+        &tags(&env, &["rustlang"]),
+    );
+
+    let results = client.list_by_tag(&String::from_str(&env, "RUSTLANG"), &0, &10);
+    assert_eq!(results.len(), 2);
+}
+
 include!("test/lifecycle_events.rs");
 include!("test/storage_footprint.rs");
 
@@ -10857,3 +11061,4 @@ include!("test/creator_listed_count.rs");
 include!("test/memo_hash.rs");
 include!("test/flag_details.rs");
 include!("test/payment_idempotency.rs");
+include!("test/stellar_wave_804_805_806_808.rs");

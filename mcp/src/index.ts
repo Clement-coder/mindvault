@@ -226,12 +226,8 @@ import {
   recordCatalogSnapshot,
   recordPreviewSnapshot,
 } from "./catalogCache.js";
-import {
-  publishBatch,
-  type BatchPublishItem,
-  acceptTransfer,
-  cancelTransfer,
-} from "./tools/publish.js";
+import { publishBatch, type BatchPublishItem } from "./tools/publish.js";
+import { buyLease, leaseStatus } from "./tools/leases.js";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -320,7 +316,7 @@ function httpRetryOptions(label: string) {
 function sorobanRpcFetch(init: RequestInit, label: string): Promise<Response> {
   const initWithUA: RequestInit = {
     ...init,
-    headers: { "User-Agent": USER_AGENT, ...(init.headers as Record<string, string> | undefined) },
+    headers: { "User-Agent": USER_AGENT, ...correlationHeaders(init.headers as Record<string, string> | undefined) },
   };
   return withRetry(
     () => fetchWithTimeout(httpFetch, SOROBAN_RPC_URL, initWithUA, "soroban", TIMEOUTS.soroban),
@@ -545,7 +541,7 @@ async function checkDependency(
 ): Promise<DependencyStatus> {
   const initWithUA: RequestInit = {
     ...init,
-    headers: { "User-Agent": USER_AGENT, ...(init?.headers as Record<string, string> | undefined) },
+    headers: { "User-Agent": USER_AGENT, ...correlationHeaders(init?.headers as Record<string, string> | undefined) },
   };
   try {
     const res = await withRetry(
@@ -815,7 +811,7 @@ async function jsonFetch(url: string, init?: RequestInit): Promise<ApiResponse<a
   const baseHeaders: Record<string, string> = {
     "Content-Type": "application/json",
     "User-Agent": USER_AGENT,
-    ...(init?.headers as Record<string, string> | undefined),
+    ...correlationHeaders(init?.headers as Record<string, string> | undefined),
   };
   const headers = signMutatingHeaders(url, method, baseHeaders, body);
 
@@ -2072,8 +2068,35 @@ async function publish(args: {
   dryRun?: boolean;
 }): Promise<string> {
   if (args.dryRun) {
+    // Read live /agent/status and wallet balance for the dry run (best-effort).
+    // We do NOT call the paid /verify-content endpoint in a dry run.
+    const live: DryRunPublishLive = {};
+    try {
+      const statusRes = await jsonFetch(`${BASE_URL}/agent/status`);
+      if (statusRes.ok && statusRes.data?.agent?.pricePerVerification != null) {
+        live.verificationFee = statusRes.data.agent.pricePerVerification;
+      }
+    } catch (err) {
+      live.readError = safeErrorMessage(err);
+    }
+    const wallet = activeProfile().wallet;
+    if (wallet) {
+      try {
+        const bal = await getBalanceDetails(wallet.publicKey);
+        live.usdcBalance = bal.usdcBalance;
+      } catch (err) {
+        live.readError = live.readError ? `${live.readError}; ${safeErrorMessage(err)}` : safeErrorMessage(err);
+      }
+    }
     return JSON.stringify(
-      dryRunPublish(args, NETWORK, BASE_URL, !!activeProfile().wallet, !!currentApiKey()),
+      dryRunPublish(
+        args,
+        NETWORK,
+        BASE_URL,
+        !!wallet,
+        !!currentApiKey(),
+        live,
+      ),
       null,
       2,
     );
@@ -3782,6 +3805,7 @@ const STATE_MUTATING_TOOLS = new Set([
   "mindvault_publish",
   "mindvault_publish_batch",
   "mindvault_buy",
+  "mindvault_buy_lease",
   "mindvault_register_onchain",
   "mindvault_update_metadata",
   "mindvault_set_price",
@@ -3804,7 +3828,9 @@ const stateMutex = new Mutex();
 
 async function dispatchToolOutcome(
   name: string,
-  rawArgs: unknown,
+  args: ValidatedArgs,
+  dryRunArgs: ValidatedArgs,
+  rawRecord: Record<string, unknown>,
   onProgress?: (progress: number, total?: number, message?: string) => Promise<void>,
 ): Promise<ToolOutcome> {
   if (!isDispatchableTool(name)) {
@@ -3938,6 +3964,14 @@ async function dispatchToolOutcome(
           args.timeoutMs,
           args.intervalMs,
         );
+      case "mindvault_buy_lease":
+        return buyLease(requiredString(args, "resourceId"), requiredString(args, "tier"), {
+          dryRun: flag(args, "dryRun"),
+          maxAutoPayUsdc: optionalString(args, "maxAutoPayUsdc"),
+          onProgress,
+        });
+      case "mindvault_lease_status":
+        return leaseStatus(requiredString(args, "resourceId"), optionalString(args, "holder"));
       case "mindvault_purchase_history":
         return purchaseHistoryTool(rawRecord);
       case "mindvault_export_receipts":

@@ -37,8 +37,8 @@ baseline for comparing one revision of the contract against another.
 
 | Entry                      | Map        | Key | Value | Total | Budget |
 | -------------------------- | ---------- | --: | ----: | ----: | -----: |
-| Resource (max-size)        | persistent |  60 |  1488 |  1548 |   1700 |
-| Resource (typical)         | persistent |  48 |   528 |   576 |    640 |
+| Resource (max-size)        | persistent |  60 |  1552 |  1612 |   1700 |
+| Resource (typical)         | persistent |  48 |   592 |   640 |    640 |
 | Index(u32) -> id           | persistent |  36 |    32 |    68 |     96 |
 | Count                      | instance   |  28 |     8 |    36 |     48 |
 | TagCount (max-size tag)    | instance   |  68 |     8 |    76 |    160 |
@@ -47,9 +47,11 @@ baseline for comparing one revision of the contract against another.
 | CreatorCount               | instance   |  72 |     8 |    80 |     96 |
 | TagIndex (max-size tag)    | persistent |  68 |    44 |   112 |    160 |
 | CreatorTerms               | persistent |  72 |    72 |   144 |    200 |
-| PaymentReceipt             | persistent | 108 |   472 |   580 |    640 |
+| PaymentReceipt             | persistent | 108 |   496 |   604 |    640 |
 | PaymentIndex -> receipt id | persistent | 104 |    72 |   176 |    240 |
 | PurchaseReceipt (anchor)   | persistent | 108 |   300 |   408 |    480 |
+| AnchorAttempts             | persistent | 108 |    72 |   180 |    200 |
+| Lease (max-size)           | persistent | 100 |   460 |   560 |    640 |
 | FlagReasonHash             | persistent |  68 |    72 |   140 |    200 |
 | FlagModerator              | persistent |  68 |    40 |   108 |    160 |
 | AttestationHash            | persistent |  56 |    80 |   136 |    160 |
@@ -59,13 +61,15 @@ baseline for comparing one revision of the contract against another.
 | Verifier grant             | instance   |  68 |     8 |    76 |     96 |
 | Moderator grant            | instance   |  72 |     8 |    80 |     96 |
 | Settler grant              | instance   |  68 |     8 |    76 |     96 |
+| Paused flag                | instance   |  28 |     8 |    36 |     48 |
+| Pause deadline             | instance   |  32 |    12 |    44 |     64 |
 
 Aggregates, which are the numbers that scale with usage:
 
 | Operation                                                                          | Bytes | Budget |
 | ---------------------------------------------------------------------------------- | ----: | -----: |
 | One max-size registration (`Resource` + `Index` + one `TagIndex` + one `TagCount`) |  1868 |   1900 |
-| One payment (`PaymentReceipt` + `PaymentIndex`)                                    |   756 |    850 |
+| One payment (`PaymentReceipt` + `PaymentIndex`)                                    |   780 |    850 |
 
 A registration with all 8 tags writes 8 `TagIndex` and 8 `TagCount` entries, one
 per tag, plus the `CreatorResources` and `CreatorCount` updates — the aggregate
@@ -73,6 +77,14 @@ above counts one of each so the per-tag cost stays visible. `TopTags` is a
 shared bounded view and is not included in the per-registration aggregate.
 
 ## Notes on individual entries
+
+- **`AnchorAttempts`** is written only when `attempt_anchor_purchase_receipt`
+  rejects an anchor, holds two `u32`s, and is deleted as soon as an anchor is
+  written for the pair, so it never outlives a successful settlement.
+- **`Lease (max-size)`** is one time-limited access lease keyed by
+  `(resource_id, holder)`. The 128-byte `tx_hash` dominates the value; a
+  holder holds at most one lease per resource, and a new purchase overwrites
+  an expired or revoked one rather than adding an entry.
 
 - **`Resource`** dominates the per-registration cost, and `metadata` (up to 512
   bytes) dominates `Resource`. Storing a content pointer rather than content is

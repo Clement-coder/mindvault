@@ -5,7 +5,7 @@
 
 This file is a generated, human-readable summary of the MCP tool surface (ListTools). It is scoped to the `mcp/` package and intended as a quick reference for integrators and reviewers.
 
-Generated from `mcp/src/tools.ts` (55 tools).
+Generated from `mcp/src/tools.ts` (40 tools).
 
 ## Tools
 
@@ -20,8 +20,10 @@ Generated from `mcp/src/tools.ts` (55 tools).
 - `mindvault_preview`: Get details and price for a specific resource before purchasing. Returns title, description, price, type, verification status, and access URL.
 - `mindvault_register`: Register as a publisher using the agent wallet. The API key is persisted to ~/.mindvault/state.json (mode 0600, key not shown in output) and reloaded on restart so mindvault_publish works across sessions.
 - `mindvault_publish`: Publish a link resource to the MindVault catalog. The resource undergoes AI verification (agent wallet pays ~$0.10 USDC via x402) and is automatically registered on-chain if verified. Returns resource ID, access URL, verification result, and on-chain registration status. Pass dryRun: true to validate inputs without submitting payment.
-- `mindvault_buy`: Pay USDC via x402 and access a resource. Payments above MINDVAULT_MAX_AUTO_PAY_USDC (10 USDC by default) require maxAutoPayUsdc set to at least the resource price. On mainnet, pass confirmMainnet: true (or set MINDVAULT_ALLOW_MAINNET=1). Pass dryRun: true to validate the resource and show intended payment flow without submitting payment. Pass wait: true to poll the payment transaction until it settles on-chain before returning.
-- `mindvault_export_receipts`: Export receipts for resources this agent has purchased as a schema-versioned document (JSON, RFC 4180 CSV in the envelope's csv field, or Newline-Delimited JSON in the envelope's ndjson field). Filter by resource, network, and date range. Reports a row count and the summed USDC total, so an agent can reconcile spend without re-reading each purchase.
+- `mindvault_buy`: Pay USDC via x402 and access a resource. Payments above MINDVAULT_MAX_AUTO_PAY_USDC (10 USDC by default) require maxAutoPayUsdc set to at least the resource price. On mainnet, pass confirmMainnet: true (or set MINDVAULT_ALLOW_MAINNET=1). Pass dryRun: true to validate the resource and show intended payment flow without submitting payment.
+- `mindvault_buy_lease`: Buy a time-limited access lease on a resource instead of paying per request: pay the creator in USDC directly (hour, day, or week tier priced from the on-chain lease_price), then record the lease on the vault registry contract with the payment hash. The lease is Pending until a settler confirms the payment. Payments above MINDVAULT_MAX_AUTO_PAY_USDC require maxAutoPayUsdc. On mainnet, pass confirmMainnet: true (or set MINDVAULT_ALLOW_MAINNET=1). Pass dryRun: true to see the quote and steps without paying.
+- `mindvault_lease_status`: Read the access lease recorded on the vault registry contract for a resource and holder (defaults to the agent wallet): tier, state, start and expiry ledgers, and whether it currently grants access. Read-only; no payment.
+- `mindvault_export_receipts`: Export receipts for resources this agent has purchased as a schema-versioned document (JSON, or RFC 4180 CSV in the envelope's csv field). Filter by resource, network, and date range. Reports a row count and the summed USDC total, so an agent can reconcile spend without re-reading each purchase.
 - `mindvault_register_onchain`: Register an already-published, verified resource on the vault registry contract. Use this to retry on-chain registration after mindvault_publish reports the on-chain step failed. Prepares the unsigned transaction, signs it with the agent wallet (which must be the resource creator), submits it, and returns the registry status and on-chain tx hash.
 - `mindvault_agent_status`: Check the verification agent's earnings and activity. Returns total verifications, pass/fail counts, total USDC earned, average confidence score, and recent verification history with resource titles.
 - `mindvault_registry_info`: Return the on-chain vault-registry contract ID, network passphrase, RPC URL, and the resource fields available for direct Soroban queries. Use this to verify ownership, price, and listing state directly from Stellar without trusting the MindVault API.
