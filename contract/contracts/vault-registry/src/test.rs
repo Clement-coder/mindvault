@@ -363,6 +363,57 @@ fn register_batch_with_content_hashes() {
     assert_eq!(r1.content_hash, None);
 }
 
+// ─── register_batch listing-default parity (#773) ─────────────────────────
+
+#[test]
+fn register_batch_contract_paused_aborts_entire_batch() {
+    // ContractPaused must be a hard abort for register_batch, identical to the
+    // single-register path.  It must NOT be silently swallowed as a per-item
+    // failure, which would diverge from the single-register contract.
+    let (env, creator, admin, client) = setup_with_admin();
+
+    // Pre-register one item so the batch has something before the paused item.
+    client.register(
+        &creator,
+        &String::from_str(&env, "before-pause"),
+        &100i128,
+        &String::from_str(&env, "ipfs://m"),
+        &empty_tags(&env),
+    );
+
+    // Pause the contract after the pre-registration.
+    client.set_paused(&admin, &true);
+
+    let mut items = Vec::new(&env);
+    items.push_back(BatchRegisterItem {
+        id: String::from_str(&env, "paused0"),
+        price: 100i128,
+        metadata: String::from_str(&env, "ipfs://QmBatch"),
+        tags: empty_tags(&env),
+        content_hash: None,
+    });
+    items.push_back(BatchRegisterItem {
+        id: String::from_str(&env, "paused1"),
+        price: 100i128,
+        metadata: String::from_str(&env, "ipfs://QmBatch"),
+        tags: empty_tags(&env),
+        content_hash: None,
+    });
+
+    // The batch itself is rejected immediately with ContractPaused, not a
+    // partial result with per-item failures.
+    let res = client.try_register_batch(&creator, &items);
+    assert_eq!(
+        res,
+        Err(Ok(Error::ContractPaused)),
+        "register_batch must abort with ContractPaused, not return a partial result"
+    );
+
+    // Neither item was registered.
+    assert!(!client.exists(&String::from_str(&env, "paused0")));
+    assert!(!client.exists(&String::from_str(&env, "paused1")));
+}
+
 #[test]
 fn zero_or_negative_price_rejected() {
     let (env, creator, client) = setup();
