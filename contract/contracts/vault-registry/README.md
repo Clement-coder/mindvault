@@ -286,6 +286,11 @@ stellar contract invoke \
   --id $CONTRACT --rpc-url $RPC --network-passphrase "Test SDF Network ; September 2015" \
   -- list_by_dispute_status --flagged true --start 0 --limit 20
 
+# One resource's moderation state: dispute flag, reason hash, last moderator
+stellar contract invoke \
+  --id $CONTRACT --rpc-url $RPC --network-passphrase "Test SDF Network ; September 2015" \
+  -- flag_details --id swcn98besxpp6t1u8e77fqz3
+
 # How many resources does a creator currently own?
 stellar contract invoke \
   --id $CONTRACT --rpc-url $RPC --network-passphrase "Test SDF Network ; September 2015" \

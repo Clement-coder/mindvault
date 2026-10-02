@@ -6,12 +6,15 @@ import {
   normalizeIntervalMs,
   normalizeTimeoutMs,
   normalizeWaitFlag,
+  currentVerificationStatus,
   pollPublishStatus,
   publishProgressMessage,
+  publishStatusFromResponses,
   DEFAULT_POLL_INTERVAL_MS,
   DEFAULT_POLL_TIMEOUT_MS,
   MAX_POLL_TIMEOUT_MS,
   type PublishStatusFetch,
+  type PublishStatusResponse,
 } from "./publishStatus.js";
 
 describe("publishStatus helpers", () => {
@@ -303,5 +306,105 @@ describe("progress helpers", () => {
     expect(publishProgressMessage({ ...base, wait: false, attempt: 1 })).toBe(
       "Verification pending — single check, pass wait: true to poll.",
     );
+  });
+});
+
+// ── Combining /meta and /verification when one of them fails (#840) ─────────
+
+function ok(data: unknown): PublishStatusResponse {
+  return { ok: true, status: 200, data };
+}
+
+function failed(status: number): PublishStatusResponse {
+  return { ok: false, status, data: { error: "unavailable" } };
+}
+
+const metaWith = (status: string) => ok({ id: "res-1", verificationStatus: status });
+const verificationWith = (status: string) => ok({ resourceId: "res-1", status });
+
+describe("publishStatusFromResponses", () => {
+  it("keeps both bodies when both requests succeed", () => {
+    const data = publishStatusFromResponses(
+      "res-1",
+      metaWith("pending"),
+      verificationWith("verified"),
+    );
+    expect(data.meta).toEqual({ id: "res-1", verificationStatus: "pending" });
+    expect(data.verification).toEqual({ resourceId: "res-1", status: "verified" });
+    expect(currentVerificationStatus(data)).toBe("verified");
+  });
+
+  it("returns a terminal status from /meta when /verification fails", () => {
+    for (const status of ["verified", "rejected", "skipped"]) {
+      const data = publishStatusFromResponses("res-1", metaWith(status), failed(503));
+      expect(data.verification).toBeNull();
+      expect(currentVerificationStatus(data)).toBe(status);
+    }
+  });
+
+  it("returns a terminal status from /verification when /meta fails", () => {
+    const data = publishStatusFromResponses("res-1", failed(502), verificationWith("rejected"));
+    expect(data.meta).toBeNull();
+    expect(currentVerificationStatus(data)).toBe("rejected");
+  });
+
+  it("fails the poll when the answering endpoint is not terminal", () => {
+    expect(() => publishStatusFromResponses("res-1", metaWith("pending"), failed(503))).toThrow(
+      /Publish status verification failed \[503\]/,
+    );
+    expect(() =>
+      publishStatusFromResponses("res-1", failed(500), verificationWith("pending")),
+    ).toThrow(/Publish status meta failed \[500\]/);
+  });
+
+  it("reports a missing resource and ignores a single 404", () => {
+    expect(() => publishStatusFromResponses("res-1", failed(404), failed(404))).toThrow(
+      /Resource "res-1" not found/,
+    );
+    expect(() => publishStatusFromResponses("res-1", failed(404), failed(503))).toThrow(
+      /verification failed \[503\]/,
+    );
+    const data = publishStatusFromResponses("res-1", failed(404), verificationWith("pending"));
+    expect(currentVerificationStatus(data)).toBe("pending");
+  });
+});
+
+describe("pollPublishStatus stops at a terminal status under retry (#840)", () => {
+  it("does not poll again once a rejection arrives beside a failed request", async () => {
+    const polls: Array<[PublishStatusResponse, PublishStatusResponse]> = [
+      [metaWith("pending"), verificationWith("pending")],
+      [metaWith("rejected"), failed(503)],
+    ];
+    let clock = 0;
+    const fetchStatus = vi.fn(async (resourceId: string) => {
+      const next = polls.shift();
+      if (!next) throw new Error("polled past the terminal state");
+      return publishStatusFromResponses(resourceId, ...next);
+    });
+    const messages: string[] = [];
+
+    const result = await pollPublishStatus({
+      resourceId: "res-1",
+      wait: true,
+      timeoutMs: 60_000,
+      intervalMs: 2_000,
+      fetchStatus,
+      sleep: async (ms: number) => {
+        clock += ms;
+      },
+      now: () => clock,
+      onProgress: async (_progress, _total, message) => {
+        messages.push(message ?? "");
+      },
+    });
+
+    expect(fetchStatus).toHaveBeenCalledTimes(2);
+    expect(result.attempts).toBe(2);
+    expect(result.timedOut).toBe(false);
+    expect(currentVerificationStatus(result.data)).toBe("rejected");
+    expect(messages).toEqual([
+      "Verification pending — poll 1, still waiting.",
+      "Verification rejected after 2 polls.",
+    ]);
   });
 });
