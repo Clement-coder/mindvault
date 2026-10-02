@@ -89,6 +89,17 @@ pub const MAX_TX_HASH_LEN: u32 = 128;
 /// Maximum byte length of a caller-assigned payment `receipt_id`.
 pub const MAX_RECEIPT_ID_LEN: u32 = 64;
 
+/// Prefix of the canonical settlement memo. A payment transaction settling a
+/// purchase of resource `id` should carry the `MEMO_TEXT` `mv:<id>`, which
+/// `record_payment_with_memo` checks so each receipt proves which resource
+/// the on-chain payment was for. `MAX_RESOURCE_ID_LEN` (24) plus this prefix
+/// fits within Stellar's 28-byte `MEMO_TEXT` limit.
+pub const PAYMENT_MEMO_PREFIX: &str = "mv:";
+
+/// Upper bound, in ledgers, on the admin-configurable flag resolution window
+/// (`set_flag_resolution_window`). Roughly 30 days at ~5s per ledger.
+pub const MAX_FLAG_RESOLUTION_WINDOW: u32 = 535_680;
+
 /// Canonical list of every exported method this contract exposes, paired with
 /// the required authorisation rule (who must sign the call). This is the
 /// single source of truth for the API surface: `contract/README.md`'s Methods
@@ -158,6 +169,7 @@ pub const METHOD_SCHEMA: &[(&str, &str)] = &[
     // ── Registry introspection ────────────────────────────────────────────
     ("registry_info", "—"),
     ("contract_version", "—"),
+    ("resource_schema_version", "—"),
     ("initialize_network", "—"),
     ("network_id", "—"),
     // ── Admin role ────────────────────────────────────────────────────────
@@ -179,6 +191,8 @@ pub const METHOD_SCHEMA: &[(&str, &str)] = &[
     ("pause_until", "—"),
     // ── Settler role ──────────────────────────────────────────────────────
     ("add_settler", "admin"),
+    ("record_payment_with_memo", "settler + payer"),
+    ("get_payment_memo", "—"),
     ("remove_settler", "admin"),
     ("is_settler", "—"),
     // ── Moderator role / dispute flags ───────────────────────────────────
@@ -189,6 +203,11 @@ pub const METHOD_SCHEMA: &[(&str, &str)] = &[
     ("unflag_resource", "moderator"),
     ("set_flag_reason_hash", "moderator"),
     ("get_flag_reason_hash", "—"),
+    ("set_flag_resolution_window", "admin"),
+    ("flag_resolution_window", "—"),
+    ("get_flag_deadline", "—"),
+    ("is_flag_overdue", "—"),
+    ("force_resolve_flag", "admin"),
     ("is_flagged", "—"),
     ("flag_details", "—"),
     // ── Terms hashes ──────────────────────────────────────────────────────
@@ -351,6 +370,9 @@ pub const EVENT_SCHEMA: &[(&str, &str)] = &[
     ("flag", "FlagEvent { id, moderator, reason }"),
     ("unflag", "resource id"),
     ("flagrsn", "(moderator: Address, reason_hash: String)"),
+    ("flagwin", "window_ledgers: u32"),
+    ("flagfrc", "(admin: Address, deadline: u32)"),
+    ("nomemo", "(receipt_id: String, tx_hash: String)"),
     ("retagidx", "new_count: u32"),
     ("reactive", "resource id"),
     (
@@ -2338,6 +2360,14 @@ impl VaultRegistry {
         }
     }
 
+    /// Return `RESOURCE_SCHEMA_VERSION` as a bare `u32`, so clients can do
+    /// feature detection (e.g. "does `Resource` carry `metadata_frozen_at`?")
+    /// with a single integer comparison instead of decoding
+    /// `contract_version` or `registry_info`. Always succeeds.
+    pub fn resource_schema_version(_env: Env) -> u32 {
+        RESOURCE_SCHEMA_VERSION
+    }
+
     /// Current contract admin.
     pub fn admin(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::Admin)
@@ -2947,6 +2977,11 @@ impl VaultRegistry {
     /// Emits a `payment` event whose data is the full [`PaymentReceipt`] so
     /// off-chain indexers can index the receipt without reading contract
     /// storage.
+    ///
+    /// Provenance: this entry point cannot prove which resource the settlement
+    /// transaction paid for, so it also emits a `nomemo` warning event. Prefer
+    /// `record_payment_with_memo`, which checks the canonical `mv:<resource_id>`
+    /// memo (see `PAYMENT_MEMO_PREFIX`).
     pub fn record_payment(
         env: Env,
         settler: Address,
@@ -3288,6 +3323,7 @@ impl VaultRegistry {
         }
         Self::validate_resource_id(&id)?;
         let mut resource = Self::load(&env, &id)?;
+        let was_flagged = resource.dispute_flag.is_flagged();
         resource.dispute_flag = DisputeFlag::Flagged(reason);
         Self::save(&env, &mut resource);
         Self::record_flag_moderator(&env, &id, &moderator);
