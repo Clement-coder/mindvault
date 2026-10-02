@@ -17,6 +17,7 @@
 import { catalogFilterInputProperties } from "./catalogFilters.js";
 import {
   AGENT_STATUS_OUTPUT_SCHEMA,
+  ATTESTATION_VERIFICATION_OUTPUT_SCHEMA,
   BATCH_CATALOG_LOOKUP_OUTPUT_SCHEMA,
   CATALOG_LIST_OUTPUT_SCHEMA,
   CONSISTENCY_OUTPUT_SCHEMA,
@@ -1626,7 +1627,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     // was invisible to the generated docs and the schema snapshots (#596).
     name: "mindvault_purchase_history",
     description:
-      "List locally persisted purchase receipts from successful mindvault_buy calls (~/.mindvault/purchases.json). Read-only. Filter by resourceId and network (exact match), or search resource ids and titles with a case-insensitive query. Filters can be combined. Returns newest first.",
+      "List locally persisted purchase receipts from successful mindvault_buy calls (~/.mindvault/purchases.json). Read-only. Filter by resourceId and network (exact match), or search resource ids and titles with a case-insensitive query. Filters can be combined. Returns newest first. Each receipt includes a pre-resolved explorerUrl for the settlement transaction (null when no txHash was recorded) — no external join is needed. To check live on-chain settlement status, pass the receipt's txHash to mindvault_tx_status.",
     inputSchema: {
       type: "object",
       properties: {

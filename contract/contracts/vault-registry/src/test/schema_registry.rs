@@ -365,6 +365,8 @@ fn full_workflow_emits_exactly_the_documented_events() {
     let admin2 = Address::generate(&env);
     client.nominate_new_admin(&admin2); // rotation -> "nomadmin"
     record(&env, &client, &mut observed);
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + ADMIN_NOMINATION_MIN_GAP);
     client.accept_admin(&admin2);
     record(&env, &client, &mut observed);
 

@@ -391,7 +391,35 @@ export const PURCHASE_HISTORY_OUTPUT_SCHEMA = {
   type: "object",
   properties: {
     count: { type: "integer" },
-    purchases: { type: "array" },
+    purchases: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          resourceId: { type: "string" },
+          amount: { type: "string" },
+          network: { type: "string" },
+          txHash: { type: ["string", "null"] },
+          timestamp: { type: "string" },
+          receiptRef: { type: ["string", "null"] },
+          title: { type: "string" },
+          profile: { type: "string" },
+          // Pre-resolved Stellar Expert URL for the settlement transaction.
+          // Null when txHash was not recorded. Pass txHash to mindvault_tx_status
+          // to check live on-chain settlement status.
+          explorerUrl: { type: ["string", "null"] },
+        },
+        required: [
+          "resourceId",
+          "amount",
+          "network",
+          "txHash",
+          "timestamp",
+          "receiptRef",
+          "explorerUrl",
+        ],
+      },
+    },
     message: { type: "string" },
   },
   required: ["count", "purchases"],
@@ -698,3 +726,62 @@ export const TEXT_ONLY_TOOLS = [
   "mindvault_resource_provenance",
   "mindvault_resource_change_log",
 ] as const;
+
+/** Output schema for mindvault_pending_transfer. */
+export const PENDING_TRANSFER_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    resourceId: { type: "string" },
+    pendingOwner: { type: ["string", "null"] },
+    found: { type: "boolean" },
+    message: { type: "string" },
+  },
+  required: ["resourceId", "found", "message"],
+} as const;
+
+/** Output schema for mindvault_batch_catalog_lookup. */
+export const BATCH_CATALOG_LOOKUP_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    requested: { type: "integer" },
+    found: { type: "integer" },
+    missing: { type: "integer" },
+    items: { type: "array" },
+    message: { type: "string" },
+  },
+  required: ["requested", "found", "missing", "items"],
+} as const;
+
+/** Output schema for mindvault_preview_metadata_hash. */
+export const METADATA_HASH_PREVIEW_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    resourceId: { type: "string" },
+    pointer: { type: ["string", "null"] },
+    report: { type: "object" },
+    message: { type: "string" },
+  },
+  required: ["resourceId"],
+} as const;
+
+/** Output schema for mindvault_publish_template. */
+export const PUBLISH_TEMPLATE_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    resourceType: { type: "string" },
+    template: { type: "object" },
+    message: { type: "string" },
+  },
+  required: ["resourceType", "template"],
+} as const;
+
+/** Output schema for mindvault_subscribe_resource. */
+export const RESOURCE_SUBSCRIPTION_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    resourceId: { type: "string" },
+    snapshot: { type: "object" },
+    message: { type: "string" },
+  },
+  required: ["resourceId"],
+} as const;

@@ -223,7 +223,11 @@ its transaction evidence separately.
 - `royalty_bps ≤ MAX_FEE_BPS` (else `FeeBpsTooHigh`)
 - `platform_fee_bps + royalty_bps ≤ MAX_FEE_BPS` (else `TotalFeeTooHigh`)
 
-This guarantees a creator always receives at least 50 % of any sale price.
+`validate_price` (called on every `register` / `set_price` / `set_price_many`) enforces:
+
+- `price > platform_fee_bps + royalty_bps` (else `InvalidPrice`)
+
+This two-layer invariant — a fee ceiling in `set_fee_config` and a price floor in `validate_price` — guarantees the creator always receives a **positive** remainder of at least `MIN_CREATOR_SHARE_BPS` (50 %) on every sale.
 The contract does **not** collect fees itself — it stores the agreed split so
 off-chain settlement (x402 facilitator, future settlement contracts) can read
 and apply it.
@@ -414,15 +418,19 @@ Caller (new_admin) ──nominate_new_admin(A)──► Admin = A
 Once an admin exists, all subsequent nominations follow a two-step protocol:
 
 ```
-Admin ──nominate_new_admin(B)──► PendingAdmin = B
-B      ──accept_admin(B)──────► Admin = B, PendingAdmin cleared
+Admin ──nominate_new_admin(B)──► PendingAdmin = B  (ledger N)
+B      ──accept_admin(B)──────► Admin = B, PendingAdmin cleared  (ledger ≥ N + ADMIN_NOMINATION_MIN_GAP)
 ```
 
 - **Step 1 (nominate)**: Only the current admin may call. Emits `nomadmin`. Errors
   `SameAdmin` if `B` is already the current admin. Errors `PendingAdminAlreadySet`
   if a previous nomination is still pending (no overlapping nominations).
-- **Step 2 (accept)**: Only the pending admin may call. Emits `accadmin`. Errors
-  `PendingAdminNotSet` if the caller does not match the pending nomination.
+- **Step 2 (accept)**: Only the pending admin may call. Must be submitted at least
+  `ADMIN_NOMINATION_MIN_GAP` ledgers (~1 day) after step 1 — this prevents a
+  single compromised admin from batching both steps atomically. Errors
+  `AdminNominationExpired` if the gap has not yet elapsed or the nomination has
+  expired. Errors `PendingAdminNotSet` if the caller does not match the pending
+  nomination.
 
 #### Optional dual-key bootstrap
 
@@ -586,7 +594,7 @@ if (page.next_cursor !== null) {
 | ---- | ------------------------------- | --------------------------------------------------------------------------------------- |
 | `1` | `AlreadyRegistered` | A resource with the given `id` or the target verifier already exists, or the holder already has a pending or unexpired active lease on the resource (`buy_lease` / `record_lease`). |
 | `2`  | `NotFound`                      | No resource (or terms hash, receipt, or old verifier) matches the given key.            |
-| `3`  | `InvalidPrice`                  | Price is `<= 0`, exceeds `MAX_PRICE`, or is not strictly greater than the active `royalty_bps`. |
+| `3`  | `InvalidPrice`                  | Price is `<= 0`, exceeds `MAX_PRICE`, or is not strictly greater than the combined active `platform_fee_bps + royalty_bps` (creator-share invariant). |
 | `4`  | `MetadataTooLong`               | Metadata pointer exceeds `MAX_METADATA_POINTER_LEN` (512 bytes).                        |
 | `5`  | `InvalidTag`                    | Tag validation failed (too many tags, empty/overlong tag, or duplicate normalized tag). |
 | `6`  | `Unauthorized`                  | Caller is unauthorized, including a refund recipient mismatch.                           |
@@ -1089,6 +1097,8 @@ must require an explicit deployment guard.
 | `MAX_FEE_BPS`              | `5_000`                      | Maximum fee in basis points (50 %). Neither `platform_fee_bps` nor `royalty_bps` may exceed this individually, and their sum may not either. |
 | `FEE_BPS_DENOM`            | `10_000`                     | Basis-point denominator. `amount * fee_bps / FEE_BPS_DENOM` converts a fee to a USDC stroop amount.                                          |
 | `MAX_FEE_DESTINATION_BPS`  | `10_000`                     | Maximum share of the platform fee routed to a burn or charity destination.                                                                         |
+| `MIN_CREATOR_SHARE_BPS`    | `5_000`                      | Minimum creator payout share (50 %). `validate_price` requires `price > platform_fee_bps + royalty_bps`, guaranteeing the creator always receives a positive remainder of at least 50 % of each sale. |
+| `ADMIN_NOMINATION_MIN_GAP` | `17_280` (≈1 day)            | Minimum ledger distance between `nominate_new_admin` and `accept_admin`. Prevents a compromised admin from batching both steps in a single transaction. |
 
 `price` is an `i128` in **USDC stroops** (7 decimal places).
 Examples: `1_000_000` = 0.10 USDC, `10_000_000` = 1.00 USDC, `500_000` = 0.05 USDC.

@@ -145,6 +145,20 @@ import {
   writeAtomically,
 } from "./stateBackup.js";
 import { provenanceChain, recordResourceHistory, resourceChangeLog } from "./resourceHistory.js";
+import { logger } from "./logger.js";
+import {
+  buildSettlementSnapshot,
+  estimateSettlementSteps,
+  normalizeSettlementIntervalMs,
+  normalizeSettlementTimeoutMs,
+  normalizeSettlementWaitFlag,
+  pollSettlement,
+  type SettlementSnapshot,
+  type TransactionLookup,
+} from "./settlement.js";
+import { publisherTerms } from "./tools/state.js";
+import { batchCatalogLookupOutcome, previewMetadataHashOutcome } from "./tools/registry.js";
+import { mockVerifyAttestation } from "./mock.js";
 import { formatResetPreview, isResetConfirmed, type ResetScope } from "./resetGuard.js";
 import { verifyInstall, formatVerifyInstall } from "./verifyInstall.js";
 import {
@@ -231,6 +245,7 @@ let REGISTRY_NETWORK_PASSPHRASE = initialConfig.registryNetworkPassphrase;
 const SPONSORED_ACCOUNT_URL = initialConfig.sponsoredAccountUrl;
 let HORIZON_URL = initialConfig.horizonUrl;
 let SOROBAN_RPC_URL = initialConfig.sorobanRpcUrl;
+const PLATFORM_WALLET_ADDRESS = initialConfig.platformWalletAddress;
 
 function applyNetworkConfig(network: "testnet" | "mainnet"): void {
   process.env.STELLAR_NETWORK = network;
@@ -322,7 +337,7 @@ function activeProfile(): WalletProfile {
 }
 
 function bindActiveProfileToNetwork(): void {
-  activeProfile().network ??= NETWORK;
+  activeProfile().network ??= NETWORK as "testnet" | "mainnet";
 }
 
 function currentWallet(): AgentWallet | null {
@@ -3109,7 +3124,9 @@ export async function pendingTransfer(resourceId: string): Promise<string> {
           if (addr.switch().value === xdr.ScAddressType.scAddressTypeAccount().value) {
             proposedNewOwner = StrKey.encodeEd25519PublicKey(addr.accountId().ed25519());
           } else {
-            proposedNewOwner = StrKey.encodeContract(addr.contractId());
+            proposedNewOwner = StrKey.encodeContract(
+              Buffer.from(addr.contractId() as unknown as Uint8Array),
+            );
           }
         }
       }

@@ -19,10 +19,7 @@ import {
   resolveStellarNetwork,
   validateNetworkConfig,
 } from "@mindvault/registry-client";
-import {
-  isExplicitMainnetDenial,
-  unsafeMainnetAllow,
-} from "./mainnetGuardrails.js";
+import { isExplicitMainnetDenial, unsafeMainnetAllow } from "./mainnetGuardrails.js";
 
 export type DiagnosticSeverity = "error" | "warning";
 

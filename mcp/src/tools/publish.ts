@@ -16,6 +16,7 @@ import {
   requireApiKey,
   requireWallet,
   saveState,
+  sorobanRpcFetch,
   SOROBAN_RPC_URL,
   STATE_FILE,
 } from "../runtime.js";
@@ -31,8 +32,27 @@ import {
 import { dryRunPublish, dryRunBuy } from "../dryRun.js";
 import { safeErrorMessage } from "../redaction.js";
 import { recordPurchase } from "../purchaseHistory.js";
-import { mockSetListed, mockSetPrice, mockTransferOwnership, mockUpdateMetadata, mockPublishBatch } from "../mock.js";
-
+import {
+  mockSetListed,
+  mockSetPrice,
+  mockTransferOwnership,
+  mockUpdateMetadata,
+  mockPublishBatch,
+  mockAcceptTransfer,
+  mockCancelTransfer,
+} from "../mock.js";
+import {
+  buildSettlementSnapshot,
+  estimateSettlementSteps,
+  normalizeSettlementIntervalMs,
+  normalizeSettlementTimeoutMs,
+  normalizeSettlementWaitFlag,
+  pollSettlement,
+  type SettlementSnapshot,
+  type TransactionLookup,
+} from "../settlement.js";
+import { assertTransactionFeeWithinCeiling } from "../paymentCeiling.js";
+import { usdcToStroops as toStroops } from "../usdcAmount.js";
 /**
  * Decimal USDC as on-chain stroops, throwing on an amount the shared converter
  * will not accept — a price that cannot be expressed exactly must not be
@@ -904,7 +924,7 @@ export async function publishBatch(
       price: usdcToStroops(item.price),
       metadata: resource.accessUrl ?? item.externalUrl,
       tags: [],
-      content_hash: null,
+      content_hash: undefined,
     });
     results.push({
       index,

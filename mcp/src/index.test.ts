@@ -2629,7 +2629,8 @@ describe("pendingTransfer", () => {
 
 describe("setListed", () => {
   beforeEach(() => {
-    _resetProfiles();  });
+    _resetProfiles();
+  });
 
   it("throws when no wallet is set up", async () => {
     await expect(setListed("res-001", false)).rejects.toThrow("No wallet");

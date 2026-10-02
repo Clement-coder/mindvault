@@ -281,11 +281,23 @@ export function applyClientCatalogFilters<T extends Record<string, unknown>>(
       if (!hay.includes(q)) return false;
     }
     if (skippedOnly && r.verificationStatus !== "skipped") return false;
+
+    // The server's public catalog only returns listed=true resources. When a
+    // resource is tombstoned or delisted its `listed` flag is set to false and
+    // it is removed from the live catalog. Stale cache snapshots may still
+    // carry such entries, so we always exclude them from tag-based results
+    // unless the caller explicitly requested unlisted items (filters.listed ===
+    // false). This mirrors the server-side WHERE listed = true guard and fixes
+    // tombstoned resources leaking through tag queries.
+    const isListed = typeof r.listed === "boolean" ? r.listed : true;
     if (filters.listed !== undefined) {
-      // Public catalog rows are listed; treat missing `listed` as true.
-      const isListed = typeof r.listed === "boolean" ? r.listed : true;
       if (isListed !== filters.listed) return false;
+    } else if (wantedTags.length > 0 && !isListed) {
+      // When filtering by tag without an explicit listed filter, tombstoned /
+      // delisted entries must not surface — they are dead catalog entries.
+      return false;
     }
+
     if (wantedTags.length > 0) {
       const have = normalizeTagList(r.tags);
       if (!wantedTags.every((t) => have.includes(t))) return false;

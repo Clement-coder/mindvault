@@ -2417,6 +2417,10 @@ fn admin_transfer_nominate_then_accept() {
         Some(env.ledger().sequence() + ADMIN_NOMINATION_DURATION)
     );
 
+    // Advance past the mandatory gap before accepting.
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + ADMIN_NOMINATION_MIN_GAP);
+
     // Accept admin nomination
     client.accept_admin(&new_admin);
     assert_eq!(client.admin(), Some(new_admin));
@@ -2472,6 +2476,11 @@ fn accept_admin_rejects_wrong_caller() {
     client.nominate_new_admin(&admin);
     client.nominate_new_admin(&pending);
 
+    // Advance past the gap so the wrong-caller check, not the too-soon check,
+    // is what fires.
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + ADMIN_NOMINATION_MIN_GAP);
+
     assert_eq!(
         client.try_accept_admin(&wrong),
         Err(Ok(Error::PendingAdminNotSet))
@@ -2489,6 +2498,105 @@ fn accept_admin_without_pending_returns_not_set() {
         client.try_accept_admin(&caller),
         Err(Ok(Error::AdminNominationExpired))
     );
+}
+
+// ─── Ledger-gap enforcement (#ledger-gap) ───────────────────────────────────
+
+#[test]
+fn accept_admin_before_gap_returns_nomination_expired() {
+    let (env, _creator, client) = setup();
+    let admin = Address::generate(&env);
+    let pending = Address::generate(&env);
+
+    client.nominate_new_admin(&admin);
+    client.nominate_new_admin(&pending);
+
+    // One ledger short of the required gap must still be rejected.
+    let nominated_at = env.ledger().sequence();
+    env.ledger()
+        .set_sequence_number(nominated_at + ADMIN_NOMINATION_MIN_GAP - 1);
+
+    assert_eq!(
+        client.try_accept_admin(&pending),
+        Err(Ok(Error::AdminNominationExpired)),
+        "accept_admin must be rejected before ADMIN_NOMINATION_MIN_GAP ledgers have elapsed"
+    );
+    // Admin unchanged.
+    assert_eq!(client.admin(), Some(admin));
+    assert_eq!(client.pending_admin(), Some(pending));
+}
+
+#[test]
+fn accept_admin_at_exact_gap_succeeds() {
+    let (env, _creator, client) = setup();
+    let admin = Address::generate(&env);
+    let pending = Address::generate(&env);
+
+    client.nominate_new_admin(&admin);
+    client.nominate_new_admin(&pending);
+
+    let nominated_at = env.ledger().sequence();
+    // Exactly at the gap boundary: nominated_at + MIN_GAP is the first valid ledger.
+    env.ledger()
+        .set_sequence_number(nominated_at + ADMIN_NOMINATION_MIN_GAP);
+
+    assert_eq!(client.try_accept_admin(&pending), Ok(Ok(())));
+    assert_eq!(client.admin(), Some(pending));
+    assert_eq!(client.pending_admin(), None);
+}
+
+#[test]
+fn accept_admin_same_ledger_as_nominate_is_rejected() {
+    let (env, _creator, client) = setup();
+    let admin = Address::generate(&env);
+    let pending = Address::generate(&env);
+
+    client.nominate_new_admin(&admin);
+    client.nominate_new_admin(&pending);
+
+    // No ledger advance — same block as the nomination.
+    assert_eq!(
+        client.try_accept_admin(&pending),
+        Err(Ok(Error::AdminNominationExpired)),
+        "nominate + accept in the same ledger must be rejected"
+    );
+    assert_eq!(client.admin(), Some(admin));
+}
+
+#[test]
+fn nominated_at_is_cleared_after_successful_accept() {
+    let (env, _creator, client) = setup();
+    let admin = Address::generate(&env);
+    let first_pending = Address::generate(&env);
+    let second_pending = Address::generate(&env);
+
+    client.nominate_new_admin(&admin);
+    client.nominate_new_admin(&first_pending);
+
+    let first_nominated_at = env.ledger().sequence();
+    env.ledger()
+        .set_sequence_number(first_nominated_at + ADMIN_NOMINATION_MIN_GAP);
+    client.accept_admin(&first_pending);
+    assert_eq!(client.admin(), Some(first_pending.clone()));
+
+    // New admin nominates again; the gap is measured from this new nomination,
+    // not from the previous one.
+    client.nominate_new_admin(&second_pending);
+    let second_nominated_at = env.ledger().sequence();
+
+    // One ledger short of gap from second nomination — must be rejected.
+    env.ledger()
+        .set_sequence_number(second_nominated_at + ADMIN_NOMINATION_MIN_GAP - 1);
+    assert_eq!(
+        client.try_accept_admin(&second_pending),
+        Err(Ok(Error::AdminNominationExpired))
+    );
+
+    // Advance to the exact gap boundary — must now succeed.
+    env.ledger()
+        .set_sequence_number(second_nominated_at + ADMIN_NOMINATION_MIN_GAP);
+    assert_eq!(client.try_accept_admin(&second_pending), Ok(Ok(())));
+    assert_eq!(client.admin(), Some(second_pending));
 }
 
 #[test]
@@ -2537,7 +2645,10 @@ fn bootstrap_followed_by_second_nominate_uses_two_step_path() {
     assert_eq!(client.admin(), Some(initial_admin.clone())); // admin unchanged
     assert_eq!(client.pending_admin(), Some(second.clone())); // pending set
 
-    // The pending admin must accept before becoming admin.
+    // The pending admin must accept before becoming admin, and only after
+    // the mandatory ledger gap has elapsed.
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + ADMIN_NOMINATION_MIN_GAP);
     client.accept_admin(&second);
     assert_eq!(client.admin(), Some(second));
     assert_eq!(client.pending_admin(), None);
@@ -2577,7 +2688,10 @@ fn bootstrap_cannot_overwrite_existing_admin() {
     assert_eq!(client.admin(), Some(first_admin.clone())); // still first_admin
     assert_eq!(client.pending_admin(), Some(hijacker.clone()));
 
-    // Only accept_admin by the pending admin finalizes the transfer.
+    // Only accept_admin by the pending admin finalizes the transfer, and only
+    // after the mandatory ledger gap has elapsed.
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + ADMIN_NOMINATION_MIN_GAP);
     client.accept_admin(&hijacker);
     assert_eq!(client.admin(), Some(hijacker));
 }
@@ -4524,6 +4638,8 @@ fn full_workflow_emits_exactly_the_documented_events() {
     let admin2 = Address::generate(&env);
     client.nominate_new_admin(&admin2); // rotation -> "nomadmin"
     record(&env, &client, &mut observed);
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + ADMIN_NOMINATION_MIN_GAP);
     client.accept_admin(&admin2);
     record(&env, &client, &mut observed);
 
@@ -9275,6 +9391,11 @@ fn storage_key_wire_contract(env: &Env) -> [(DataKey, &'static str, u32); 31] {
         (DataKey::PaymentTxHash(id.clone()), "PaymentTxHash", 2),
         (DataKey::AttestationHash(id.clone()), "AttestationHash", 2),
         (DataKey::PendingAdminExpiry, "PendingAdminExpiry", 1),
+        (
+            DataKey::PendingAdminNominatedAt,
+            "PendingAdminNominatedAt",
+            1,
+        ),
         (DataKey::TagCount(id.clone()), "TagCount", 2),
         (DataKey::TopTags, "TopTags", 1),
         (
@@ -9369,6 +9490,7 @@ fn storage_key_migration_covers_every_variant() {
             DataKey::PaymentTxHash(_) => "PaymentTxHash",
             DataKey::AttestationHash(_) => "AttestationHash",
             DataKey::PendingAdminExpiry => "PendingAdminExpiry",
+            DataKey::PendingAdminNominatedAt => "PendingAdminNominatedAt",
             DataKey::TagCount(_) => "TagCount",
             DataKey::TopTags => "TopTags",
             DataKey::CreatorListedCount(_) => "CreatorListedCount",
