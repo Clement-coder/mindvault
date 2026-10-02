@@ -15,6 +15,7 @@
 
 import { Keypair } from "@stellar/stellar-sdk";
 import { explorerTxUrl } from "./stellarExplorer.js";
+import { stroopsToUsdc } from "./usdcAmount.js";
 
 const TRUTHY = new Set(["1", "true", "yes", "on"]);
 
@@ -430,10 +431,7 @@ export function mockCancelTransfer(resourceId: string): string {
 export function mockPendingTransfer(resourceId: string): string {
   // Deterministic mock: derive a stable proposed-owner address from the resource id.
   const mockProposedOwner = Keypair.fromRawEd25519Seed(
-    Buffer.from(
-      `mock-proposed-owner-${resourceId}`.padEnd(32, "\0").slice(0, 32),
-      "utf8",
-    ),
+    Buffer.from(`mock-proposed-owner-${resourceId}`.padEnd(32, "\0").slice(0, 32), "utf8"),
   ).publicKey();
 
   return JSON.stringify(
@@ -652,4 +650,98 @@ export function mockRegistryCount(creator: string | undefined, contractId: strin
   }
 
   return JSON.stringify(payload, null, 2);
+}
+
+// ── Access leases (#803) ─────────────────────────────────────────────────────
+
+/** Deterministic lease purchase: one hour costs the mock price, no chain call. */
+export function mockBuyLease(resourceId: string, tier: string, dryRun: boolean): string {
+  const multiplier = tier === "week" ? 20n : tier === "day" ? 5n : 1n;
+  const priceStroops = 5_000_000n * multiplier;
+  const priceUsdc = stroopsToUsdc(priceStroops);
+  const txHash = `MOCK_TX_LEASE_${resourceId}_${tier}`;
+  if (dryRun) {
+    return JSON.stringify(
+      {
+        mode: "dry-run",
+        operation: "buy-lease",
+        validation: { resourceId: { valid: true }, tier: { valid: true } },
+        intentions: { resourceId, tier, priceUsdc, source: "on-chain (mock)" },
+        steps: [
+          "Transfer USDC to the creator (mock)",
+          "Call buy_lease with the payment hash (mock)",
+        ],
+      },
+      null,
+      2,
+    );
+  }
+  return JSON.stringify(
+    {
+      status: "success",
+      resourceId,
+      tier,
+      priceStroops: priceStroops.toString(),
+      priceUsdc,
+      paymentTxHash: txHash,
+      paymentExplorerUrl: explorerTxUrl(txHash),
+      lease: {
+        resourceId,
+        holder: "GMOCKHOLDER",
+        tier,
+        state: "Pending",
+        startLedger: 1000,
+        expiryLedger: 1000 + (tier === "week" ? 120_960 : tier === "day" ? 17_280 : 720),
+        amountStroops: priceStroops.toString(),
+        amountUsdc: priceUsdc,
+        txHash,
+        recordedAt: 1000,
+      },
+      source: "on-chain (mock)",
+    },
+    null,
+    2,
+  );
+}
+
+/** Deterministic lease lookup: resources whose id ends in "0" have no lease. */
+export function mockLeaseStatus(resourceId: string, holder: string): string {
+  if (resourceId.endsWith("0")) {
+    return JSON.stringify(
+      {
+        source: "on-chain (mock)",
+        resourceId,
+        holder,
+        found: false,
+        active: false,
+        message: `No lease recorded for ${holder} on "${resourceId}".`,
+      },
+      null,
+      2,
+    );
+  }
+  return JSON.stringify(
+    {
+      source: "on-chain (mock)",
+      resourceId,
+      holder,
+      found: true,
+      active: true,
+      lease: {
+        resourceId,
+        holder,
+        tier: "day",
+        state: "Active",
+        startLedger: 1000,
+        expiryLedger: 18_280,
+        amountStroops: "25000000",
+        amountUsdc: "2.5000000",
+        txHash: `MOCK_TX_LEASE_${resourceId}_day`,
+        recordedAt: 1000,
+      },
+      message: "Lease active until ledger 18280.",
+    },
+    null,
+    2,
+  );
 }

@@ -41,6 +41,7 @@ tests keep passing as fixtures evolve.
 ## Development
 
 See the repository root for build and test instructions.
+
 # MCP
 
 Model Context Protocol (MCP) integration for the project.

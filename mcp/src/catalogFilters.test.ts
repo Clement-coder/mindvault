@@ -140,6 +140,41 @@ describe("applyClientCatalogFilters", () => {
     expect(result.map((r) => r.id)).toEqual(["1"]);
   });
 
+  it("excludes tombstoned/delisted entries when filtering by tag", () => {
+    // A stale cache snapshot may contain a resource that was tombstoned on-chain
+    // (listed=false). It must not surface in a tag-based query even if its tags
+    // still match.
+    const withTombstoned = [
+      ...rows,
+      {
+        id: "3",
+        title: "Dead entry",
+        description: "",
+        tags: ["dataset", "stellar"],
+        listed: false,
+        verificationStatus: "verified",
+      },
+    ];
+    const result = applyClientCatalogFilters(withTombstoned, { tags: ["dataset", "stellar"] });
+    expect(result.map((r) => r.id)).toEqual(["1"]);
+  });
+
+  it("returns unlisted entries when listed=false is explicitly requested alongside tags", () => {
+    const withUnlisted = [
+      ...rows,
+      {
+        id: "3",
+        title: "Unlisted entry",
+        description: "",
+        tags: ["notes"],
+        listed: false,
+        verificationStatus: "verified",
+      },
+    ];
+    const result = applyClientCatalogFilters(withUnlisted, { tags: ["notes"], listed: false });
+    expect(result.map((r) => r.id)).toEqual(["2", "3"]);
+  });
+
   it("filters by listed state", () => {
     expect(applyClientCatalogFilters(rows, { listed: false }).map((r) => r.id)).toEqual(["2"]);
   });

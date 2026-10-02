@@ -465,7 +465,9 @@ fn attempt_anchor_still_reverts_for_a_malformed_resource_id() {
 
 #[test]
 fn override_purchase_receipt_anchor_updates_existing_anchor() {
-    let (env, creator, service, client) = setup_with_anchor_service();
+    let (env, creator, admin, client) = setup_with_admin();
+    let service = Address::generate(&env);
+    client.add_verifier(&service);
     let id = register_default(&env, &creator, &client, "ovrride1");
     let buyer = Address::generate(&env);
     
@@ -473,7 +475,7 @@ fn override_purchase_receipt_anchor_updates_existing_anchor() {
     client.anchor_purchase_receipt(&service, &id, &buyer, &original);
     
     let replacement = String::from_str(&env, "replacementhash");
-    client.override_purchase_receipt_anchor(&service, &id, &buyer, &replacement);
+    client.override_purchase_receipt_anchor(&admin, &id, &buyer, &replacement);
     
     let anchor = client.get_purchase_receipt(&id, &buyer);
     assert_eq!(anchor.receipt_hash, replacement);
@@ -482,20 +484,22 @@ fn override_purchase_receipt_anchor_updates_existing_anchor() {
 
 #[test]
 fn override_purchase_receipt_anchor_fails_if_not_found() {
-    let (env, creator, service, client) = setup_with_anchor_service();
+    let (env, creator, admin, client) = setup_with_admin();
     let id = register_default(&env, &creator, &client, "ovrride2");
     let buyer = Address::generate(&env);
     
     let hash = String::from_str(&env, "somehash");
     assert_eq!(
-        client.try_override_purchase_receipt_anchor(&service, &id, &buyer, &hash),
+        client.try_override_purchase_receipt_anchor(&admin, &id, &buyer, &hash),
         Err(Ok(Error::NotFound))
     );
 }
 
 #[test]
-fn override_purchase_receipt_anchor_reverts_for_non_verifier() {
-    let (env, creator, service, client) = setup_with_anchor_service();
+fn override_purchase_receipt_anchor_reverts_for_non_admin() {
+    let (env, creator, _admin, client) = setup_with_admin();
+    let service = Address::generate(&env);
+    client.add_verifier(&service);
     let id = register_default(&env, &creator, &client, "ovrride3");
     let buyer = Address::generate(&env);
     let stranger = Address::generate(&env);
@@ -505,7 +509,11 @@ fn override_purchase_receipt_anchor_reverts_for_non_verifier() {
     
     let hash = String::from_str(&env, "newhash");
     assert_eq!(
+        client.try_override_purchase_receipt_anchor(&service, &id, &buyer, &hash),
+        Err(Ok(Error::Unauthorized))
+    );
+    assert_eq!(
         client.try_override_purchase_receipt_anchor(&stranger, &id, &buyer, &hash),
-        Err(Ok(Error::NotVerifier))
+        Err(Ok(Error::Unauthorized))
     );
 }

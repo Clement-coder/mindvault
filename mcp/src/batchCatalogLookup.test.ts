@@ -11,6 +11,7 @@ import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { IntegrationHarness } from "./integrationHarness.js";
 
 // Isolate state persistence from the developer machine and pin the network
 // preset before index.js loads (same as the other tool tests).
@@ -21,9 +22,7 @@ process.env.USERPROFILE = harnessHome;
 
 const { server } = await import("./index.js");
 const { _clearCatalogCache, recordPreviewSnapshot } = await import("./catalogCache.js");
-const { startIntegrationHarness, type IntegrationHarness } = await import(
-  "./integrationHarness.js"
-);
+const { startIntegrationHarness } = await import("./integrationHarness.js");
 
 function mockResponse(data: unknown, ok = true, status = 200): Response {
   const body = JSON.stringify(data);

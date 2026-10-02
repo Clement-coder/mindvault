@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_MAX_AUTO_PAY_USDC, assertAutoPaymentWithinCeiling, assertTransactionFeeWithinCeiling } from "./paymentCeiling.js";
+import {
+  DEFAULT_MAX_AUTO_PAY_USDC,
+  assertAutoPaymentWithinCeiling,
+  assertTransactionFeeWithinCeiling,
+} from "./paymentCeiling.js";
 import { MIN_USDC_BALANCE, MIN_NATIVE_XLM, assertMinimumBalance } from "./paymentPreflight.js";
 
 const env = { MINDVAULT_MAX_AUTO_PAY_USDC: "5" } as NodeJS.ProcessEnv;
@@ -29,11 +33,21 @@ describe("automatic x402 payment ceiling", () => {
 
 describe("transaction fee ceiling", () => {
   it("allows fees at or below the configured ceiling", () => {
-    expect(() => assertTransactionFeeWithinCeiling({ feeStroops: "100", env: { MINDVAULT_MAX_AUTO_FEE_STROOPS: "100" } })).not.toThrow();
+    expect(() =>
+      assertTransactionFeeWithinCeiling({
+        feeStroops: "100",
+        env: { MINDVAULT_MAX_AUTO_FEE_STROOPS: "100" },
+      }),
+    ).not.toThrow();
   });
 
   it("blocks an oversized registry mutation fee", () => {
-    expect(() => assertTransactionFeeWithinCeiling({ feeStroops: "101", env: { MINDVAULT_MAX_AUTO_FEE_STROOPS: "100" } })).toThrow(/exceeds/);
+    expect(() =>
+      assertTransactionFeeWithinCeiling({
+        feeStroops: "101",
+        env: { MINDVAULT_MAX_AUTO_FEE_STROOPS: "100" },
+      }),
+    ).toThrow(/exceeds/);
   });
 });
 
