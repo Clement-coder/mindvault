@@ -4059,6 +4059,33 @@ fn set_terms_hash_accepts_max_length() {
     assert_eq!(client.get_terms_hash(&creator), terms);
 }
 
+#[test]
+fn set_terms_hash_validates_byte_length_not_character_count() {
+    // The limit is 64 bytes (for hex-encoded hashes like SHA-256 = 64 hex chars).
+    // Multi-byte UTF-8 characters count as multiple bytes, so a 64-char
+    // multi-byte string exceeds the limit and is rejected.
+    let (env, creator, client) = setup();
+
+    // 64 ASCII chars = 64 bytes = valid (hex hash length)
+    let ascii_64 = String::from_str(&env, &"a".repeat(64));
+    client.set_terms_hash(&creator, &ascii_64);
+    assert_eq!(client.get_terms_hash(&creator), ascii_64);
+
+    // 64 multi-byte chars (e.g., emoji = 4 bytes each) = 256 bytes = rejected
+    let creator2 = Address::generate(&env);
+    let multibyte_64 = String::from_str(&env, &"😀".repeat(64));
+    assert_eq!(
+        client.try_set_terms_hash(&creator2, &multibyte_64),
+        Err(Ok(Error::TermsHashTooLong))
+    );
+
+    // 16 multi-byte chars = 64 bytes = valid (but not a typical hash)
+    let creator3 = Address::generate(&env);
+    let multibyte_16 = String::from_str(&env, &"😀".repeat(16));
+    client.set_terms_hash(&creator3, &multibyte_16);
+    assert_eq!(client.get_terms_hash(&creator3), multibyte_16);
+}
+
 // Admin bootstrap/uninitialized-state behavior is covered by
 // `admin_transfer_nominate_then_accept` (bootstrap via the first
 // `nominate_new_admin` call) — see the two-step admin model above.

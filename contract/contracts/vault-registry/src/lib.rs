@@ -2674,8 +2674,13 @@ impl VaultRegistry {
     }
 
     /// Return the ledger sequence at which the pending admin nomination expires.
+    /// Bumps the instance storage TTL to keep the entry alive for active monitors.
     pub fn pending_admin_expiry(env: Env) -> Option<u32> {
-        env.storage().instance().get(&DataKey::PendingAdminExpiry)
+        let expiry = env.storage().instance().get(&DataKey::PendingAdminExpiry);
+        if expiry.is_some() {
+            Self::bump_instance(&env);
+        }
+        expiry
     }
 
     /// Nominate a new contract admin. Only the current admin may call this.
@@ -2907,11 +2912,17 @@ impl VaultRegistry {
     }
 
     /// The active scheduled pause deadline, if one exists.
+    /// Bumps the instance storage TTL to keep the entry alive for active monitors.
     pub fn pause_until(env: Env) -> Option<u64> {
-        env.storage()
+        let pause_until = env
+            .storage()
             .instance()
             .get::<DataKey, u64>(&DataKey::PauseUntil)
-            .filter(|pause_until| *pause_until > env.ledger().timestamp())
+            .filter(|pause_until| *pause_until > env.ledger().timestamp());
+        if pause_until.is_some() {
+            Self::bump_instance(&env);
+        }
+        pause_until
     }
 
     /// Grant the verifier role to `verifier`, authorizing `set_verification_status`.
@@ -5332,21 +5343,30 @@ impl VaultRegistry {
     /// Return whether the registry is paused after applying any scheduled
     /// deadline. Expired deadlines are treated as resumed without requiring a
     /// separate transaction to clear the stored state.
+    /// Bumps the instance storage TTL to keep pause entries alive for active monitors.
     fn pause_is_active(env: &Env) -> bool {
-        if !env
+        let paused = env
             .storage()
             .instance()
             .get::<DataKey, bool>(&DataKey::Paused)
-            .unwrap_or(false)
-        {
+            .unwrap_or(false);
+
+        if !paused {
+            // Still bump TTL on read to keep the entry alive
+            Self::bump_instance(env);
             return false;
         }
 
-        env.storage()
+        let result = env
+            .storage()
             .instance()
             .get::<DataKey, u64>(&DataKey::PauseUntil)
             .map(|pause_until| pause_until > env.ledger().timestamp())
-            .unwrap_or(true)
+            .unwrap_or(true);
+
+        // Bump TTL on read to keep pause entries alive for active monitors
+        Self::bump_instance(env);
+        result
     }
 
     /// Normalize a tag for storage and index keying: trim ASCII whitespace and
