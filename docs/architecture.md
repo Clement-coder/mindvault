@@ -18,7 +18,7 @@ Two distinct concerns sit at the heart of MindVault: **who gets paid and how**, 
 │  Resource {               │
 │    id       string        │
 │    creator  Address       │  owner, enforced by require_auth
-│    price    i128          │  USDC stroops (7 decimals)
+│    price    i128          │  USDC base units (7 decimals)
 │    metadata string        │  IPFS URI / content hash
 │    listed   bool          │
 │    tags     Vec<String>   │  discovery labels
@@ -89,7 +89,7 @@ The vault-registry is a Soroban smart contract deployed on Stellar. It is the **
 | Property   | Meaning                                                                                   |
 | ---------- | ----------------------------------------------------------------------------------------- |
 | `creator`  | Stellar address that owns the resource; the only key allowed to mutate it                 |
-| `price`    | Current access price in USDC stroops (1 USDC = 10 000 000 stroops)                        |
+| `price`    | Current access price in USDC base units (1 USDC = 10 000 000 base units)                  |
 | `metadata` | Content pointer — typically an IPFS URI or SHA-256 content hash                           |
 | `listed`   | Whether the resource is publicly discoverable                                             |
 | `verified` | On-chain mirror of the server's verification result: `Pending`, `Verified`, or `Rejected` |
