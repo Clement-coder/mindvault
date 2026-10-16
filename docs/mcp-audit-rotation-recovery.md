@@ -1,7 +1,9 @@
 # Audit rotation restart recovery
 
-Audit logging uses numbered JSONL generations (`audit.jsonl`, `.1`, `.2`, etc.). A process may stop after the live file is renamed to `.1` but before the next append. On restart, a missing live file is a valid state: the writer creates a new live file without copying `.1` back, avoiding duplicate entries.
+The synchronous JSONL writer now journals each size-triggered rotation in `audit.jsonl.rotation-journal`. It moves the live log and numbered generations to `.rotation-stage-N` files before publishing the next generation names. On restart, the writer detects a journal and resumes the remaining steps before appending another event.
 
-Focused regression tests simulate restart after moving the live file, after shifting an older generation, and after a normal append. They verify records in those scenarios remain distinct.
+A staging journal is replayed by moving only sources that have not already been staged. A publishing journal is replayed by moving remaining staged files into numbered generation slots. This avoids treating a missing live file as missing history and prevents completed renames from being repeated.
 
-**Limitation:** These scenarios do not yet prove crash safety at every rotation boundary, especially when removing the oldest generation or during multi-step generation shifts. A fully crash-safe scheme needs an explicit recovery protocol or durable rotation journal. This branch should not be merged as a complete resolution of #1043 until those cases are implemented and verified.
+Fault-injection tests model restarts at each rename boundary in both phases, as well as ordinary restarts. The generation limit still intentionally discards the oldest record generation. The file sink remains optional and does not change MCP client schemas.
+
+**Durability caveat:** The implementation uses synchronous file operations and rename, but does not fsync files or directories; sudden power loss or filesystem corruption can still affect durability. CI tests are pending.
