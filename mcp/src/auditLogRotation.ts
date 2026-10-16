@@ -167,8 +167,23 @@ export class RotatingJsonlWriter {
 
     // Resuming an existing file rather than truncating it: a restart must not
     // destroy the audit trail of the session before it.
+    this.recoverInterruptedRotation();
     this.size = existsSync(this.config.path) ? statSync(this.config.path).size : 0;
     this.ready = true;
+  }
+
+  /**
+   * A restart after moving the live file to .1 must not mistake the absence
+   * of the live path for an empty history and rotate .1 again.
+   * The next append creates a fresh live file; existing generations remain.
+   */
+  private recoverInterruptedRotation(): void {
+    const { path, maxFiles } = this.config;
+    if (existsSync(path) || maxFiles < 1) return;
+    // A missing live file is a valid post-rotation state. Leave the rotated
+    // generations untouched so no entries are duplicated or discarded.
+    // In particular, do not rename .1 back to the live path: doing so could
+    // cause a later size-triggered rotation to overwrite an older generation.
   }
 
   /**
