@@ -2599,7 +2599,9 @@ async function publish(args: {
         ].join("\n");
       }
     }
-    throw mcpError(mapTransportError({ operation: "Publish verification failed", source: "x402", error: err }));
+    throw mcpError(
+      mapTransportError({ operation: "Publish verification failed", source: "x402", error: err }),
+    );
   }
   metrics.recordPayment(verifyRes.ok);
 
@@ -2650,7 +2652,9 @@ async function publish(args: {
         ].join("\n");
       }
     }
-    throw mcpError(mapTransportError({ operation: "On-chain registration failed", source: "api", error: err }));
+    throw mcpError(
+      mapTransportError({ operation: "On-chain registration failed", source: "api", error: err }),
+    );
   }
 
   const onchainStatus: string = registerRes.ok
