@@ -1796,7 +1796,6 @@ impl VaultRegistry {
         }
 
         for (id, mut resource, metadata) in pending {
-            let revision = Self::bump_listing_revision(&env, &id)?;
             let old_metadata = resource.metadata.clone();
             resource.metadata = metadata.clone();
             Self::save(&env, &mut resource);

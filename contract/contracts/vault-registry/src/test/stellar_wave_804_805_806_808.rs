@@ -33,7 +33,7 @@ fn add_verifier_helper<'a>(
 
 #[test]
 fn creator_earnings_estimate_returns_zero_for_new_creator() {
-    let (env, creator, client) = setup();
+    let (_env, creator, client) = setup();
     let est = client.creator_earnings_estimate(&creator);
     assert_eq!(est.creator, creator);
     assert_eq!(est.total_settled, 0i128);
