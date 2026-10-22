@@ -358,6 +358,8 @@ See [`docs/adr-fee-config.md`](../docs/adr-fee-config.md) for the full design ra
 | `set_fee_recipient(recipient)`                                                | `admin`                                                  | `recipient: Option<Address>`                                                                                                                                                                                                                        | `Result<(), Error>`                    | Update only the configured fee recipient while preserving existing fee rates. Errors `FeeConfigNotSet` if no config exists. Emits `setfee`.                                                                                                                                                              |
 | `set_fee_destination(config)`                                                | `admin`                                                  | `config: FeeDestinationConfig` — `bps` share of the platform fee (0–10 000) and `destination` (`None`, `Burn`, or `Charity(address)`)                                                                                                                       | `Result<(), Error>`                    | Set or clear the burn/charity route without changing the base fee config. Emits `setdest`; the event records policy, not token movement.                                                                                                                                                         |
 | `get_fee_destination()`                                                      | —                                                        | —                                                                                                                                                                                                                                                    | `FeeDestinationConfig`                 | Fetch the current fee-destination policy, defaulting to `None` with zero bps.                                                                                                                                                                                                                              |
+| `claim_fees()`                                                               | `admin`                                                  | —                                                                                                                                                                                                                                                    | `Result<i128, Error>`                  | Acknowledge receipt of all accrued platform fees and reset the counter to zero. Required before rotating fee recipient/destination when fees are outstanding. Emits `claimfee`.                                                                                                                          |
+| `get_accrued_fees()`                                                         | —                                                        | —                                                                                                                                                                                                                                                    | `i128`                                 | Read the total accrued platform-fee amount (USDC stroops) settled but not yet claimed.                                                                                                                                                                                                                      |
 | `repair_index(ids)`                                                          | `admin`                                                  | `ids: Vec<String>` — authoritative ordered id list                                                                                                                                                                                                   | `Result<(), Error>`                    | Compatibility full-list repair of the pagination index and `Count`. Rejects duplicates with `DuplicateInRepair`. Emits `reindex`; use only when the complete list fits one transaction.                                                                                                                                                                          |
 | `repair_tag_index(ids)`                                                      | `admin`                                                  | `ids: Vec<String>` — authoritative ordered id list                                                                                                                                                                                                   | `Result<(), Error>`                    | Rebuild tag indexes from registered resources. Emits `retagidx`.                                                                                                                                                                                                                                         |
 | `check_tag_index(ids)` | — | `ids: Vec<String>` — capped at `MAX_TAG_INDEX_CHECK` (20) | `Result<TagIndexReport, Error>` | Read-only tag-index integrity check. Reports `missing` (resource carries the tag, index omits the id) and `stale` (index lists the id under a tag the resource lacks) separately. Never writes storage. |
@@ -679,12 +681,13 @@ if (page.next_cursor !== null) {
 | `53` | `RecoveryAdminNotSet`            | `recover_admin` was called but no recovery admin is configured.                          |
 | `54` | `UnsupportedResourceSchema`      | A resource uses a schema version this deployment cannot safely read or upgrade.          |
 | `55` | `RevisionOverflow`               | A listing revision increment would exceed `u32::MAX`; the mutation is rejected without changing resource state. |
+| `56` | `UnclaimedFees`                 | A fee-recipient or fee-destination change was attempted while accrued fees remain unclaimed. Call `claim_fees` first, then retry. |
 
 #### Error budget
 
 This enum is declared with `#[contracterror(export = false)]`. The protocol
 caps a *spec-exported* contract error enum at 50 cases
-(`ScSpecUdtErrorEnumV0.cases` is `VecM<_, 50>`), and codes `1`–`55` are all
+(`ScSpecUdtErrorEnumV0.cases` is `VecM<_, 50>`), and codes `1`–`56` are all
 allocated, so a spec-exported `#[contracterror]` would fail to compile with
 `LengthExceedsMax` on a `51` variant. Disabling the spec export keeps the
 contract buildable; the discriminants and names below remain the on-wire
@@ -696,6 +699,10 @@ recovery features landed: `InvalidMetadataPointers` (51), `AdminAlreadySet`
 (52), `RecoveryAdminNotSet` (53), `UnsupportedResourceSchema` (54), and
 `RevisionOverflow` (55). They are distinct failure modes, so folding them
 into a broader existing code would hide the cause from callers.
+
+Code `56` (`UnclaimedFees`) was added for the accrued-fee guard (#985):
+it blocks fee-recipient/destination rotation while settled fees remain
+unclaimed, with `claim_fees` as the safe migration path.
 
 Plan new validation around an existing code where the semantics genuinely fit,
 or prefer a behavior that needs no new code (a documented no-op, or folding the
@@ -790,6 +797,7 @@ apart, so update all three together.
 | `reactive`  | `resource id`                                                                             | `reactivate_resource()` succeeds                           |
 | `setfee`    | `FeeConfigUpdated { old_config, new_config }`                                            | `set_fee_config()` or `set_fee_recipient()` succeeds       |
 | `setdest`   | `FeeDestinationUpdated { old_destination, new_destination, ledger }`                    | `set_fee_destination()` succeeds                          |
+| `claimfee`  | `FeesClaimed { claimed_amount, remaining_amount }`                                      | `claim_fees()` succeeds                                   |
 | `ttlext`    | `()`                                                                                     | `extend_resource_ttl()` succeeds                           |
 | `txfrterms` | `TransferWithTermsEvent { id, previous_owner, new_owner, terms_hash, attestation_reset }` | `transfer_ownership_with_terms()` succeeds                |
 

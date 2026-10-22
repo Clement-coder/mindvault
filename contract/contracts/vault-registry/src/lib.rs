@@ -292,6 +292,8 @@ pub const METHOD_SCHEMA: &[(&str, &str)] = &[
     ("set_fee_recipient", "admin"),
     ("set_fee_destination", "admin"),
     ("get_fee_destination", "—"),
+    ("claim_fees", "admin"),
+    ("get_accrued_fees", "—"),
     // ── Index repair ──────────────────────────────────────────────────────
     ("repair_index", "admin"),
     ("repair_tag_index", "admin"),
@@ -397,6 +399,7 @@ pub const ERROR_SCHEMA: &[(u32, &str, &str)] = &[
     (53, "RecoveryAdminNotSet", "`recover_admin` was called but no recovery admin is configured."),
     (54, "UnsupportedResourceSchema", "A resource uses a schema version this deployment cannot safely read or upgrade."),
     (55, "RevisionOverflow", "A listing revision increment would exceed `u32::MAX`; the mutation is rejected without changing resource state."),
+    (56, "UnclaimedFees", "A fee-recipient or fee-destination change was attempted while accrued fees remain unclaimed. Call `claim_fees` first, then retry."),
 ];
 
 /// Canonical list of every event topic this contract emits, paired with a
@@ -490,6 +493,7 @@ pub const EVENT_SCHEMA: &[(&str, &str)] = &[
         "setdest",
         "FeeDestinationUpdated { old_destination, new_destination, ledger }",
     ),
+    ("claimfee", "(claimed_amount: i128, remaining_amount: i128)"),
     ("ttlext", "()"),
     (
         "txfrterms",
@@ -1021,6 +1025,11 @@ pub enum DataKey {
     /// mutated; `None` for resources registered through the other entry points.
     MemoHash(String),
     FeeDestination,
+    /// Accumulated platform-fee amounts (in USDC stroops) that have been
+    /// settled but not yet acknowledged via `claim_fees`. When non-zero,
+    /// fee-recipient and fee-destination changes are blocked until the
+    /// current recipient calls `claim_fees` to reset the counter.
+    AccruedFees,
     /// Redundant metadata pointers set via `set_metadata_pointers`. The
     /// entry at `primary` always mirrors `Resource.metadata`.
     MetadataPointers(String),
@@ -1195,6 +1204,17 @@ pub struct FeeDestinationUpdated {
     pub old_destination: FeeDestinationConfig,
     pub new_destination: FeeDestinationConfig,
     pub ledger: u32,
+}
+
+/// Event payload for `claimfee`. Carries the amount acknowledged and the
+/// remaining accrued balance after the claim.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct FeesClaimed {
+    /// Amount acknowledged by the fee recipient in this claim (stroops).
+    pub claimed_amount: i128,
+    /// Accrued balance remaining after this claim (always 0 in v1).
+    pub remaining_amount: i128,
 }
 
 /// On-chain record of a single x402/Soroban payment settlement for a resource.
@@ -1497,6 +1517,10 @@ pub enum Error {
     /// A listing revision increment would exceed `u32::MAX`. The mutation is
     /// rejected without changing resource state.
     RevisionOverflow = 55,
+    /// A fee-recipient or fee-destination change was attempted while accrued
+    /// fees remain unclaimed. Call `claim_fees` first to acknowledge receipt
+    /// of outstanding fees, then retry the change.
+    UnclaimedFees = 56,
 }
 
 #[contract]
@@ -4051,10 +4075,16 @@ impl VaultRegistry {
         let destination = Self::load_fee_destination(&env);
         Self::validate_fee_destination_for_fee_config(&config, &destination)?;
 
-        let old_config: OptFeeConfig = env
-            .storage()
-            .instance()
-            .get::<DataKey, FeeConfig>(&DataKey::FeeConfig)
+        // Reject fee-recipient rotation when accrued fees are unclaimed.
+        let existing: Option<FeeConfig> =
+            env.storage().instance().get(&DataKey::FeeConfig);
+        if let Some(ref old) = existing {
+            if old.fee_recipient != config.fee_recipient {
+                Self::require_no_unclaimed_fees(&env)?;
+            }
+        }
+
+        let old_config: OptFeeConfig = existing
             .map(OptFeeConfig::Some)
             .unwrap_or(OptFeeConfig::None);
         env.storage().instance().set(&DataKey::FeeConfig, &config);
@@ -4094,6 +4124,12 @@ impl VaultRegistry {
             .instance()
             .get::<DataKey, FeeConfig>(&DataKey::FeeConfig)
             .ok_or(Error::FeeConfigNotSet)?;
+
+        // Reject rotation when accrued fees are unclaimed.
+        if config.fee_recipient != recipient {
+            Self::require_no_unclaimed_fees(&env)?;
+        }
+
         let destination = Self::load_fee_destination(&env);
         let old_config = OptFeeConfig::Some(config.clone());
         config.fee_recipient = recipient;
@@ -4124,6 +4160,9 @@ impl VaultRegistry {
             .ok_or(Error::FeeConfigNotSet)?;
         Self::validate_fee_destination_for_fee_config(&fee_config, &config)?;
 
+        // Reject destination rotation when accrued fees are unclaimed.
+        Self::require_no_unclaimed_fees(&env)?;
+
         let old_destination = Self::load_fee_destination(&env);
         env.storage()
             .instance()
@@ -4144,6 +4183,46 @@ impl VaultRegistry {
         Self::load_fee_destination(&env)
     }
 
+    /// Acknowledge receipt of all accrued platform fees and reset the
+    /// accumulated counter to zero. Only the admin may call this.
+    ///
+    /// This is the **safe migration path** required before rotating the fee
+    /// recipient or fee destination: `set_fee_recipient`,
+    /// `set_fee_destination`, and `set_fee_config` reject changes while
+    /// accrued fees are non-zero (`UnclaimedFees`). The admin calls
+    /// `claim_fees` to confirm that the current fee recipient has received
+    /// all outstanding amounts, then retries the configuration change.
+    ///
+    /// Returns the amount that was claimed (and reset to zero).
+    ///
+    /// Emits a `claimfee` event with `(claimed_amount, remaining_amount)`.
+    pub fn claim_fees(env: Env) -> Result<i128, Error> {
+        let admin = Self::require_admin(&env)?;
+        admin.require_auth();
+        Self::require_not_paused(&env)?;
+
+        let claimed = Self::load_accrued_fees(&env);
+        if claimed > 0 {
+            env.storage().instance().set(&DataKey::AccruedFees, &0i128);
+            Self::bump_instance(&env);
+        }
+
+        env.events().publish(
+            (symbol_short!("claimfee"),),
+            FeesClaimed {
+                claimed_amount: claimed,
+                remaining_amount: 0,
+            },
+        );
+        Ok(claimed)
+    }
+
+    /// Read the total accrued platform-fee amount (in USDC stroops) that has
+    /// been settled but not yet acknowledged via `claim_fees`.
+    pub fn get_accrued_fees(env: Env) -> i128 {
+        Self::load_accrued_fees(&env)
+    }
+
     fn default_fee_destination() -> FeeDestinationConfig {
         FeeDestinationConfig {
             bps: 0,
@@ -4156,6 +4235,38 @@ impl VaultRegistry {
             .instance()
             .get(&DataKey::FeeDestination)
             .unwrap_or_else(Self::default_fee_destination)
+    }
+
+    /// Read the accumulated platform-fee balance. Defaults to 0 when no
+    /// fees have accrued.
+    fn load_accrued_fees(env: &Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::AccruedFees)
+            .unwrap_or(0i128)
+    }
+
+    /// Add `fee_amount` to the accrued platform-fee counter. Called when a
+    /// payment receipt transitions to `Settled`.
+    fn accrue_fees(env: &Env, fee_amount: i128) {
+        if fee_amount <= 0 {
+            return;
+        }
+        let current = Self::load_accrued_fees(env);
+        env.storage()
+            .instance()
+            .set(&DataKey::AccruedFees, &(current + fee_amount));
+    }
+
+    /// Reject the call with `UnclaimedFees` if accrued platform fees are
+    /// non-zero. This guard runs before any fee-recipient or fee-destination
+    /// mutation, ensuring the current recipient always has a chance to claim
+    /// before the destination is rotated.
+    fn require_no_unclaimed_fees(env: &Env) -> Result<(), Error> {
+        if Self::load_accrued_fees(env) > 0 {
+            return Err(Error::UnclaimedFees);
+        }
+        Ok(())
     }
 
     fn validate_fee_destination(destination: &FeeDestinationConfig) -> Result<(), Error> {
@@ -4466,6 +4577,19 @@ impl VaultRegistry {
         let recipient_key = DataKey::PaymentRecipient(receipt_id.clone());
         if env.storage().persistent().has(&recipient_key) {
             Self::bump_persistent(&env, &recipient_key);
+        }
+
+        // Accrue platform fees for the current fee recipient. The fee
+        // amount is `amount * platform_fee_bps / FEE_BPS_DENOM`, computed
+        // in integer arithmetic (truncation is fine — leftover sub-stroop
+        // dust is not tracked). Only non-zero fees are accrued so the
+        // guard is inactive when no platform fee is configured.
+        if let Some(fee_config) = env.storage().instance().get::<DataKey, FeeConfig>(&DataKey::FeeConfig) {
+            if fee_config.platform_fee_bps > 0 && fee_config.fee_recipient.is_some() {
+                let fee_amount = receipt.amount * i128::from(fee_config.platform_fee_bps)
+                    / i128::from(FEE_BPS_DENOM);
+                Self::accrue_fees(&env, fee_amount);
+            }
         }
 
         env.events()
