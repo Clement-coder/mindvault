@@ -516,7 +516,3 @@ export async function listCatalogPaginated(
     .limit(limit)
     .offset(offset);
 }
-
-export async function listCatalog(params: { limit?: number; offset?: number } = {}) {
-  return listCatalogPaginated(params);
-}
