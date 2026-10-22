@@ -22,7 +22,14 @@
  */
 
 import type { ErrorCategory, ErrorSource, MappedError } from "./errorMapping.js";
-import type { RegistryErrorName } from "@mindvault/registry-client";
+import { Errors as RegistryErrors } from "@mindvault/registry-client";
+
+/**
+ * The name of a vault-registry contract error, derived from the installed
+ * bindings' `Errors` table. Defined locally because the installed package
+ * version may not export `RegistryErrorName` directly.
+ */
+export type RegistryErrorName = (typeof RegistryErrors)[keyof typeof RegistryErrors]["message"];
 
 /**
  * Every failure the server can report.
@@ -787,6 +794,38 @@ export const REGISTRY_ERROR_MAP: Record<RegistryErrorName, RegistryErrorMapEntry
     name: "AdminNominationExpired",
     code: "MV_CONTRACT_ERROR",
     message: "The pending admin nomination is missing or has expired.",
+  },
+  InvalidMetadataPointers: {
+    discriminant: 51,
+    name: "InvalidMetadataPointers",
+    code: "MV_ARGUMENT_INVALID",
+    message:
+      "set_metadata_pointers received zero, too many, or duplicate pointers, or an out-of-range primary index.",
+  },
+  AdminAlreadySet: {
+    discriminant: 52,
+    name: "AdminAlreadySet",
+    code: "MV_CONFLICT",
+    message: "bootstrap_dual_admin was called after an admin was already set.",
+  },
+  RecoveryAdminNotSet: {
+    discriminant: 53,
+    name: "RecoveryAdminNotSet",
+    code: "MV_CONTRACT_ERROR",
+    message: "recover_admin was called but no recovery admin is configured.",
+  },
+  UnsupportedResourceSchema: {
+    discriminant: 54,
+    name: "UnsupportedResourceSchema",
+    code: "MV_CONTRACT_ERROR",
+    message:
+      "Resource uses a schema version this contract deployment cannot read or migrate. Update the contract or the registry-client bindings.",
+  },
+  RevisionOverflow: {
+    discriminant: 55,
+    name: "RevisionOverflow",
+    code: "MV_CONTRACT_ERROR",
+    message: "Listing revision counter would overflow; the resource cannot be mutated further.",
   },
 };
 

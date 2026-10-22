@@ -119,3 +119,25 @@ check a transaction it never made.
 
 - [`mcp/src/errorCodes.test.ts`](../mcp/src/errorCodes.test.ts) — the catalog's
   own invariants, local and HTTP classification, and the failure payload
+- [`mcp/src/registryErrorMap.test.ts`](../mcp/src/registryErrorMap.test.ts) —
+  the versioned registry error map: exhaustiveness against the TypeScript
+  bindings, discriminant agreement, valid MV\_ codes, and stable messages
+
+## Registry contract errors
+
+On-chain failures from the `vault-registry` contract arrive as
+`Error(Contract, #N)` where `N` is the numeric discriminant. These are
+surfaced as `MV_CONTRACT_ERROR` in the general case, but the MCP server also
+carries a versioned mapping (`REGISTRY_ERROR_MAP` in
+[`mcp/src/errorCodes.ts`](../mcp/src/errorCodes.ts)) from each discriminant
+name to a stable `MV_` code and a human-readable message SDKs can present
+verbatim.
+
+The mapping is checked against the TypeScript bindings
+(`@mindvault/registry-client`'s `Errors` table) by
+`mcp/src/registryErrorMap.test.ts`. When the contract adds new error codes,
+updating the bindings causes the test to fail, prompting a map update.
+
+Version: `REGISTRY_ERROR_MAP_VERSION = 1`. The version increments only when an
+existing entry's `code` or `message` changes in a breaking way; adding entries
+is non-breaking.
