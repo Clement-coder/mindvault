@@ -44,6 +44,33 @@ describe("catalog snapshot (#556)", () => {
     recordCatalogSnapshot([{ id: "b" }, { id: "c" }]);
     expect(getCatalogSnapshot()!.resources).toEqual([{ id: "b" }, { id: "c" }]);
   });
+
+  it("keeps identical resource ids isolated across cache contexts", () => {
+    const testnet = {
+      profile: "buyer",
+      network: "testnet",
+      contractId: "C1",
+      apiOrigin: "https://a",
+    };
+    const mainnet = { ...testnet, network: "mainnet", contractId: "C2" };
+    recordCatalogSnapshot([{ id: "same-id", title: "Testnet" }], "page", testnet);
+    recordCatalogSnapshot([{ id: "same-id", title: "Mainnet" }], "page", mainnet);
+    expect(getCatalogSnapshot(Date.now(), "page", testnet)?.resources).toEqual([
+      { id: "same-id", title: "Testnet" },
+    ]);
+    expect(getCatalogSnapshot(Date.now(), "page", mainnet)?.resources).toEqual([
+      { id: "same-id", title: "Mainnet" },
+    ]);
+  });
+
+  it("keeps preview metadata isolated across cache contexts", () => {
+    const first = { profile: "a", network: "testnet", contractId: "C1", apiOrigin: "https://a" };
+    const second = { ...first, profile: "b" };
+    recordPreviewSnapshot("same-id", { title: "A" }, first);
+    recordPreviewSnapshot("same-id", { title: "B" }, second);
+    expect(getPreviewSnapshot("same-id", Date.now(), first)?.meta).toEqual({ title: "A" });
+    expect(getPreviewSnapshot("same-id", Date.now(), second)?.meta).toEqual({ title: "B" });
+  });
 });
 
 describe("preview snapshot (#556)", () => {

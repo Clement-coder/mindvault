@@ -1,16 +1,14 @@
-#!/usr/bin/env node
-/**
- * MindVault MCP Server
- * Exposes vault tools to AI agents via the Model Context Protocol.
- */
-
+import { randomUUID } from "node:crypto";
 import {
   checkContractBindings,
   createRegistryClient,
   getAttestationHash,
   Errors as RegistryErrors,
   listResources,
+  type CatalogPage,
+  type IdPage,
   type Resource,
+  type ResourceState,
 } from "@mindvault/registry-client";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -32,6 +30,7 @@ import {
   signAndSendTracked,
   submittedUnconfirmedResult,
 } from "./submittedTransaction.js";
+import { txPhaseFields } from "./txPhases.js";
 import {
   SERVER_STATUS_URI,
   createServerStatusWatcher,
@@ -82,8 +81,10 @@ import {
   createMockFetch,
   mockEnabledFromEnv,
   mockRegistryCount,
+  mockRegistryCreatorPage,
   mockRegistryLookup,
   mockRegistryList,
+  mockRegistryTagSearch,
   mockUpdateMetadata,
   mockSetPrice,
   mockTransferOwnership,
@@ -96,26 +97,39 @@ import { purchaseHistoryTool, recordPurchase, loadPurchaseHistory } from "./purc
 import { Mutex } from "./mutex.js";
 import { exportReceiptsTool } from "./receipts.js";
 import { debugBundleTool } from "./debugBundle.js";
+import { onchainPreflightTool } from "./onchainPreflight.js";
+import { applyMigratedState, migrationPreviewTool } from "./stateMigrationPreview.js";
+import { supportBundleTool } from "./supportBundle.js";
+import { applyRetentionPolicies } from "./retention.js";
 import { exportReceiptsToolWithTimeout } from "./receipts.js";
 import { normalizeToolResult, outcomeText, type ToolOutcome } from "./toolResult.js";
 import { advertisedTools, hasOutputSchema, outputSchemaFor } from "./toolSurface.js";
 import { enforceOutputContract } from "./outputValidation.js";
-import { dryRunPublish, dryRunBuy } from "./dryRun.js";
+import { dryRunPublish, dryRunBuy, type DryRunPublishLive } from "./dryRun.js";
+import { correlationHeaders } from "./correlation.js";
 import { initAuditLogging } from "./auditLog.js";
 import { REGISTRY_LIST_DEFAULT_LIMIT, REGISTRY_LIST_DEFAULT_START } from "./registryPagination.js";
 import {
+  assertToolTimeoutOverridesWithinDeadline,
+  resolveTransportTimeoutMax,
+} from "./toolTimeoutOverrides.js";
+import { decodeIdCursor, encodeIdCursor, type IdCursor } from "./registryIdCursor.js";
+import {
   flag,
+  optionalFlag,
   optionalInt,
   optionalString,
   requiredString,
   requiredTagArray,
   TOOL_ARGUMENT_SPECS,
   TOOLS_WITHOUT_ARG_VALIDATION,
+  ToolValidationError,
   UnknownToolError,
   requiredStringArray,
   validateToolArgs,
   type ValidatedArgs,
 } from "./validation.js";
+import { explainRegistryError } from "./registryErrorGuidance.js";
 import {
   DEFAULT_PROFILE,
   isValidProfileName,
@@ -147,11 +161,13 @@ import {
 } from "./resourceSubscriptionTool.js";
 import { type ApiResponse } from "./apiResponse.js";
 import { readBoundedResponse, resolveMaxResponseBytes } from "./responseSize.js";
+import { parseUpstreamErrorBody, responseHeaderBag } from "./malformedResponse.js";
 import { safeErrorMessage, safeLog } from "./redaction.js";
 import {
   assertAutoPaymentWithinCeiling,
   assertTransactionFeeWithinCeiling,
-  DEFAULT_MAX_AUTO_PAY_USDC,
+  assertChallengePriceWithinCeiling,
+  PriceChangedCeilingError,
 } from "./paymentCeiling.js";
 import {
   compareUsdc,
@@ -160,6 +176,7 @@ import {
   trimUsdc,
   usdcToStroops as toStroops,
 } from "./usdcAmount.js";
+import { findCanonicalUsdc } from "./usdcIdentity.js";
 import { signMutatingHeaders } from "./requestSignature.js";
 import {
   exportStateFile,
@@ -181,7 +198,11 @@ import {
   type TransactionLookup,
 } from "./settlement.js";
 import { publisherTerms } from "./tools/state.js";
-import { batchCatalogLookupOutcome, previewMetadataHashOutcome } from "./tools/registry.js";
+import {
+  batchCatalogLookupOutcome,
+  metadataDiff,
+  previewMetadataHashOutcome,
+} from "./tools/registry.js";
 import { mockVerifyAttestation } from "./mock.js";
 import { formatResetPreview, isResetConfirmed, type ResetScope } from "./resetGuard.js";
 import { verifyInstall, formatVerifyInstall } from "./verifyInstall.js";
@@ -194,6 +215,7 @@ import {
   type TimeoutService,
 } from "./httpTimeout.js";
 import { resolveToolTimeouts, timeoutForTool } from "./toolTimeoutOverrides.js";
+import { describeProxyConfig, resolveProxyConfig, withProxy } from "./proxy.js";
 import {
   describeRetryPolicy,
   formatRetryLog,
@@ -250,9 +272,23 @@ import {
   getPreviewSnapshot,
   recordCatalogSnapshot,
   recordPreviewSnapshot,
+  type CatalogCacheContext,
 } from "./catalogCache.js";
-import { publishBatch, type BatchPublishItem } from "./tools/publish.js";
+import { createCatalogCursor, resolveCatalogCursor } from "./catalogCursor.js";
+import {
+  acceptTransfer,
+  cancelTransfer,
+  publishBatch,
+  type BatchPublishItem,
+} from "./tools/publish.js";
 import { buyLease, leaseStatus } from "./tools/leases.js";
+import {
+  _setAgentWallet as _setAgentWalletRuntime,
+  _setAgentApiKey as _setAgentApiKeyRuntime,
+  _resetProfiles as _resetProfilesRuntime,
+} from "./runtime.js";
+
+export { acceptTransfer, cancelTransfer };
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -271,6 +307,19 @@ const SPONSORED_ACCOUNT_URL = initialConfig.sponsoredAccountUrl;
 let HORIZON_URL = initialConfig.horizonUrl;
 let SOROBAN_RPC_URL = initialConfig.sorobanRpcUrl;
 const PLATFORM_WALLET_ADDRESS = initialConfig.platformWalletAddress;
+
+function catalogCacheContext(): CatalogCacheContext {
+  return {
+    profile: activeProfileName,
+    network: STELLAR_NETWORK,
+    contractId: REGISTRY_CONTRACT_ID,
+    apiOrigin: new URL(BASE_URL).origin,
+  };
+}
+
+function catalogCacheKey(url: string): string {
+  return url;
+}
 
 function applyNetworkConfig(network: "testnet" | "mainnet"): void {
   process.env.STELLAR_NETWORK = network;
@@ -311,12 +360,15 @@ export function _setMockMode(on: boolean): void {
   if (on) process.env.MINDVAULT_MOCK = "1";
   else delete process.env.MINDVAULT_MOCK;
 }
+const PROXY_CONFIG = resolveProxyConfig(process.env);
 const httpFetch: typeof fetch = MOCK
   ? createMockFetch(() => currentWallet()?.publicKey)
-  : (input, init) => fetch(input as RequestInfo | URL, init);
+  : withProxy((input, init) => fetch(input as RequestInfo | URL, init), PROXY_CONFIG);
 
 const TIMEOUTS = resolveTimeouts(process.env);
-const TOOL_TIMEOUTS = resolveToolTimeouts(process.env).overrides;
+const toolTimeoutsResult = resolveToolTimeouts(process.env);
+const TOOL_TIMEOUTS = toolTimeoutsResult.overrides;
+assertToolTimeoutOverridesWithinDeadline(TOOL_TIMEOUTS, resolveTransportTimeoutMax(process.env));
 
 const RETRY_POLICY = retryPolicyFromEnv(process.env);
 
@@ -384,19 +436,27 @@ function currentApiKey(): string | null {
   return profiles[activeProfileName]?.apiKey ?? null;
 }
 
+// The profile store exists twice: index.ts keeps one copy for the handlers
+// defined here, runtime.ts keeps another for the tools in ./tools/* (which
+// read it through requireWallet). These test/state hooks therefore write to
+// both, so a wallet or API key set through this module is visible to every
+// tool regardless of which store it reads.
 export function _setAgentWallet(w: AgentWallet | null): void {
   if (w) {
     activeProfile().wallet = w;
     bindActiveProfileToNetwork();
   } else delete activeProfile().wallet;
+  _setAgentWalletRuntime(w);
 }
 export function _setAgentApiKey(k: string | null): void {
   if (k) activeProfile().apiKey = k;
   else delete activeProfile().apiKey;
+  _setAgentApiKeyRuntime(k);
 }
 export function _resetProfiles(): void {
   profiles = {};
   activeProfileName = DEFAULT_PROFILE;
+  _resetProfilesRuntime();
 }
 
 function applyRestoredState(state: ProfileState): void {
@@ -484,7 +544,24 @@ function loadState(): void {
         safeErrorMessage(err),
       );
     }
-    saveState();
+    // Apply the migration write with restore-on-failure (#1046): if the
+    // migrated state cannot be persisted, the exact prior bytes go back to
+    // the state file before the error is surfaced, so a failed upgrade never
+    // leaves a half-migrated or emptied state behind.
+    try {
+      applyMigratedState({
+        priorJson: raw,
+        write: () => {
+          if (!saveState()) throw new Error(`could not write migrated state to ${STATE_FILE}`);
+        },
+        restore: (priorJson) => writeAtomically(STATE_FILE, priorJson, 0o600),
+      });
+    } catch (err) {
+      console.error(
+        "MindVault MCP: failed to persist migrated state (prior state restored):",
+        safeErrorMessage(err),
+      );
+    }
   }
 }
 
@@ -652,6 +729,163 @@ async function registryHealth(): Promise<string> {
   return lines.join("\n");
 }
 
+// ── #1020: Profile-scoped RPC health checks ──────────────────────────────────
+
+interface RpcEndpointResult {
+  name: string;
+  url: string;
+  ok: boolean;
+  latencyMs: number | null;
+  networkId: string | null;
+  message: string;
+}
+
+/**
+ * Check the active profile's Horizon and Soroban RPC endpoints for reachability,
+ * latency, and reported network identity.
+ *
+ * Uses configured TIMEOUTS — never signs or submits transactions.
+ * Returns structured per-endpoint results with latency in milliseconds.
+ */
+async function rpcHealthOutcome(): Promise<ToolOutcome> {
+  const endpoints: RpcEndpointResult[] = [];
+
+  // Check Horizon (simple GET, expects JSON with network_passphrase)
+  const horizonStart = Date.now();
+  let horizonResult: RpcEndpointResult;
+  try {
+    const initWithUA: RequestInit = {
+      headers: { "User-Agent": USER_AGENT, Accept: "application/json" },
+    };
+    const res = await fetchWithTimeout(
+      httpFetch,
+      HORIZON_URL,
+      initWithUA,
+      "horizon",
+      TIMEOUTS.horizon,
+    );
+    const latencyMs = Date.now() - horizonStart;
+    if (res.ok) {
+      let networkId: string | null = null;
+      try {
+        const body = await res.json();
+        networkId =
+          (typeof body?.network_passphrase === "string" ? body.network_passphrase : null) ??
+          (typeof body?.network === "string" ? body.network : null);
+      } catch {
+        void 0;
+      }
+      horizonResult = {
+        name: "Horizon",
+        url: HORIZON_URL,
+        ok: true,
+        latencyMs,
+        networkId,
+        message: `Reachable (HTTP ${res.status}, ${latencyMs}ms)${networkId ? ` — network: ${networkId}` : ""}`,
+      };
+    } else {
+      horizonResult = {
+        name: "Horizon",
+        url: HORIZON_URL,
+        ok: false,
+        latencyMs,
+        message: `HTTP ${res.status} — check HORIZON_URL or Stellar testnet status`,
+        networkId: null,
+      };
+    }
+  } catch (err) {
+    horizonResult = {
+      name: "Horizon",
+      url: HORIZON_URL,
+      ok: false,
+      latencyMs: null,
+      networkId: null,
+      message: `Unreachable: ${safeErrorMessage(err)} — check HORIZON_URL or network connectivity`,
+    };
+  }
+  endpoints.push(horizonResult);
+
+  // Check Soroban RPC (POST getNetwork)
+  const sorobanStart = Date.now();
+  let sorobanResult: RpcEndpointResult;
+  try {
+    const initWithUA: RequestInit = {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "User-Agent": USER_AGENT },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getNetwork", params: {} }),
+    };
+    const res = await fetchWithTimeout(
+      httpFetch,
+      SOROBAN_RPC_URL,
+      initWithUA,
+      "soroban",
+      TIMEOUTS.soroban,
+    );
+    const latencyMs = Date.now() - sorobanStart;
+    if (res.ok) {
+      let networkId: string | null = null;
+      try {
+        const body = await res.json();
+        const result = body?.result;
+        networkId =
+          (typeof result?.networkPassphrase === "string" ? result.networkPassphrase : null) ??
+          (typeof result?.network === "string" ? result.network : null) ??
+          (typeof result?.friendbotUrl === "string" ? "has-friendbot" : null);
+      } catch {
+        void 0;
+      }
+      sorobanResult = {
+        name: "Soroban RPC",
+        url: SOROBAN_RPC_URL,
+        ok: true,
+        latencyMs,
+        networkId,
+        message: `Reachable (HTTP ${res.status}, ${latencyMs}ms)${networkId ? ` — network: ${networkId}` : ""}`,
+      };
+    } else {
+      sorobanResult = {
+        name: "Soroban RPC",
+        url: SOROBAN_RPC_URL,
+        ok: false,
+        latencyMs,
+        networkId: null,
+        message: `HTTP ${res.status} — check SOROBAN_RPC_URL or Stellar testnet status`,
+      };
+    }
+  } catch (err) {
+    sorobanResult = {
+      name: "Soroban RPC",
+      url: SOROBAN_RPC_URL,
+      ok: false,
+      latencyMs: null,
+      networkId: null,
+      message: `Unreachable: ${safeErrorMessage(err)} — check SOROBAN_RPC_URL or network connectivity`,
+    };
+  }
+  endpoints.push(sorobanResult);
+
+  const allOk = endpoints.every((e) => e.ok);
+
+  const summaryLines = endpoints.map((e) => {
+    const icon = e.ok ? "✓" : "✗";
+    return `${icon} ${e.name} (${e.url}): ${e.message}`;
+  });
+  const summary = allOk ? "All RPC endpoints healthy." : "One or more RPC endpoints are unhealthy.";
+  const text = [`Profile: ${activeProfileName}`, summary, "", ...summaryLines].join("\n");
+
+  return {
+    text,
+    structured: {
+      profile: activeProfileName,
+      horizonUrl: HORIZON_URL,
+      sorobanRpcUrl: SOROBAN_RPC_URL,
+      allOk,
+      endpoints,
+      summary,
+    },
+  };
+}
+
 // ── #882: Catalog cache pre-warm ─────────────────────────────────────────────
 // browseOutcome() already records a fresh snapshot into catalogCache.ts on
 // every successful call and falls back to the last snapshot on a transport
@@ -665,7 +899,7 @@ export async function prewarmCatalogCache(): Promise<string> {
   try {
     await browseOutcome({});
     const elapsedMs = Date.now() - startedAt;
-    const snapshot = getCatalogSnapshot();
+    const snapshot = getCatalogSnapshot(Date.now(), "catalog", catalogCacheContext());
     const count = snapshot && Array.isArray(snapshot.resources) ? snapshot.resources.length : 0;
     return `Catalog pre-warmed: ${count} resource(s) cached in ${elapsedMs}ms.`;
   } catch (err) {
@@ -708,13 +942,19 @@ async function assertApiReachableFor(toolName: string): Promise<void> {
   });
 }
 
+/** Whether an importWallet call carries explicit confirmation (same vocabulary as the reset guard). */
+function isImportConfirmed(value: unknown): boolean {
+  if (value === true || value === 1) return true;
+  if (typeof value !== "string") return false;
+  return ["true", "1", "yes"].includes(value.trim().toLowerCase());
+}
+
 async function importWallet(args: {
   secretKey?: string;
   profile?: string;
-  persist?: boolean;
+  confirm?: unknown;
 }): Promise<ToolOutcome> {
   const target = resolveProfileName(args.profile);
-  const persist = args.persist !== false;
 
   let secretKey = args.secretKey;
   if (!secretKey) {
@@ -739,29 +979,36 @@ async function importWallet(args: {
     throw new Error(`Failed to derive public key: ${safeErrorMessage(err)}`);
   }
 
-  if (persist) {
-    activeProfileName = target;
-    activeProfile().wallet = { publicKey, secretKey };
-    bindActiveProfileToNetwork();
-    saveState();
+  const confirmed = isImportConfirmed(args.confirm);
+
+  if (!confirmed) {
     return {
       text: [
-        `Wallet imported.`,
-        `Profile: ${target}`,
-        `Address: ${publicKey}`,
-        `Wallet persisted to ${STATE_FILE} (mode 0600).`,
+        `Wallet NOT imported — confirmation required.`,
+        `Derived address: ${publicKey}`,
+        `Target profile:  ${target}`,
+        `Network:         ${NETWORK} (${STELLAR_NETWORK})`,
+        ``,
+        `Verify the address above belongs to the intended wallet.`,
+        `To save it, call mindvault_import_wallet again with confirm: true.`,
       ].join("\n"),
-      structured: { profile: target, address: publicKey, persisted: true },
+      structured: { profile: target, address: publicKey, persisted: false },
     };
   }
 
+  activeProfileName = target;
+  activeProfile().wallet = { publicKey, secretKey };
+  bindActiveProfileToNetwork();
+  saveState();
   return {
     text: [
-      `Wallet validated (not persisted).`,
+      `Wallet imported.`,
+      `Profile: ${target}`,
       `Address: ${publicKey}`,
-      `Pass persist: true to save to the state file.`,
+      `Network: ${NETWORK} (${STELLAR_NETWORK})`,
+      `Wallet persisted to ${STATE_FILE} (mode 0600).`,
     ].join("\n"),
-    structured: { profile: target, address: publicKey, persisted: false },
+    structured: { profile: target, address: publicKey, persisted: true },
   };
 }
 
@@ -882,6 +1129,17 @@ async function jsonFetch(url: string, init?: RequestInit): Promise<ApiResponse<a
     responseHeaders[key.toLowerCase()] = value;
   });
   const text = await readBoundedResponse(res, resolveMaxResponseBytes());
+  // A failure body that is not JSON becomes a typed marker instead of a wall
+  // of markup: the status and the upstream's request id survive, and the raw
+  // body does not travel any further (#1019).
+  if (!res.ok) {
+    return {
+      ok: res.ok,
+      status: res.status,
+      data: parseUpstreamErrorBody({ status: res.status, headers: responseHeaders, body: text }),
+      headers: responseHeaders,
+    };
+  }
   try {
     return { ok: res.ok, status: res.status, data: JSON.parse(text), headers: responseHeaders };
   } catch {
@@ -951,11 +1209,38 @@ function requireApiKey(): string {
   return apiKey;
 }
 
-function makePaidFetch(wallet: AgentWallet) {
+function makePaidFetch(wallet: AgentWallet, baseFetch?: typeof fetch) {
   const signer = createEd25519Signer(wallet.secretKey, NETWORK);
   const scheme = new ExactStellarScheme(signer);
   const client = new x402Client().register(NETWORK, scheme);
-  return wrapFetchWithPayment(withTimeout(httpFetch, "payment", TIMEOUTS.payment), client);
+  const resolvedFetch = baseFetch ?? httpFetch;
+  return wrapFetchWithPayment(withTimeout(resolvedFetch, "payment", TIMEOUTS.payment), client);
+}
+
+/**
+ * Wrap httpFetch so that a 402 response with a price that differs from the
+ * preview price and exceeds the auto-pay ceiling throws PriceChangedCeilingError
+ * BEFORE the x402 client signs anything (#1025).
+ *
+ * The x402 client calls `fetch(url)`, gets 402, reads PAYMENT-REQUIRED, and
+ * immediately constructs and signs the payment. By intercepting the 402 here —
+ * before it ever reaches the x402 client — we can validate the actual charged
+ * price against the ceiling without needing a pre-sign hook in the x402 library.
+ *
+ * When the header is absent or unparseable the response passes through
+ * unmodified; the x402 client proceeds normally and the facilitator will reject
+ * a mis-signed entry if the price truly changed.
+ */
+function makeCeilingInterceptFetch(previewPrice: string, maxAutoPayUsdc?: string): typeof fetch {
+  return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const res = await httpFetch(input, init);
+    if (res.status === 402) {
+      const headerValue =
+        res.headers.get("PAYMENT-REQUIRED") ?? res.headers.get("payment-required");
+      assertChallengePriceWithinCeiling({ headerValue, previewPrice, maxAutoPayUsdc });
+    }
+    return res;
+  };
 }
 
 interface BalanceDetails {
@@ -1007,7 +1292,11 @@ async function getBalanceDetails(publicKey: string): Promise<BalanceDetails> {
       operation: `Horizon error ${res.status}`,
       source: "horizon",
       status: res.status,
-      data: await res.text().catch(() => null),
+      data: parseUpstreamErrorBody({
+        status: res.status,
+        headers: responseHeaderBag(res),
+        body: await res.text().catch(() => ""),
+      }),
     });
   }
 
@@ -1023,9 +1312,7 @@ async function getBalanceDetails(publicKey: string): Promise<BalanceDetails> {
   const reserve = baseReserve + subentryCount * entryReserve;
   const available = Math.max(0, parseFloat(xlm) - reserve);
 
-  const usdcBalance = balances.find(
-    (b: any) => b.asset_type === "credit_alphanum4" && b.asset_code === "USDC",
-  );
+  const usdcBalance = findCanonicalUsdc(balances, networkPreset.usdcClassicIssuer);
 
   if (!usdcBalance) {
     return {
@@ -1103,7 +1390,7 @@ async function getAccountBalances(
   if (!res.ok) return { usdc: "0", native: "0", funded: false };
   const data: any = await res.json();
   const balances: any[] = data.balances ?? [];
-  const usdc = balances.find((b) => b.asset_type === "credit_alphanum4" && b.asset_code === "USDC");
+  const usdc = findCanonicalUsdc(balances, networkPreset.usdcClassicIssuer);
   const native = balances.find((b) => b.asset_type === "native");
   return { usdc: usdc?.balance ?? "0", native: native?.balance ?? "0", funded: true };
 }
@@ -1134,7 +1421,12 @@ function catalogItemStructured(r: any): {
   };
 }
 
-function catalogOutcome(items: any[], body: string, notice: string | null): ToolOutcome {
+function catalogOutcome(
+  items: any[],
+  body: string,
+  notice: string | null,
+  options: { cacheStatus?: "live" | "bypassed" | "offline"; nextCursor?: string | null } = {},
+): ToolOutcome {
   const full = notice ? `${body}\n\n${notice}` : body;
   const text = truncateResponse(full);
   return {
@@ -1142,6 +1434,8 @@ function catalogOutcome(items: any[], body: string, notice: string | null): Tool
     structured: {
       items: items.map(catalogItemStructured),
       notice,
+      cacheStatus: options.cacheStatus ?? (notice ? "offline" : "live"),
+      nextCursor: options.nextCursor ?? null,
       truncated: text !== full,
     },
   };
@@ -1204,7 +1498,11 @@ export async function txStatus(txHash: string): Promise<string> {
       operation: `Soroban RPC error: ${res.status}`,
       source: "soroban",
       status: res.status,
-      data: await res.text().catch(() => null),
+      data: parseUpstreamErrorBody({
+        status: res.status,
+        headers: responseHeaderBag(res),
+        body: await res.text().catch(() => ""),
+      }),
     });
   const data: any = await res.json();
   if (data.error)
@@ -1271,7 +1569,11 @@ async function fetchTransactionLookup(txHash: string): Promise<TransactionLookup
       operation: `Soroban RPC error: ${res.status}`,
       source: "soroban",
       status: res.status,
-      data: await res.text().catch(() => null),
+      data: parseUpstreamErrorBody({
+        status: res.status,
+        headers: responseHeaderBag(res),
+        body: await res.text().catch(() => ""),
+      }),
     });
   const data: any = await res.json();
   if (data.error)
@@ -1380,7 +1682,16 @@ async function setupWallet(profileArg?: string): Promise<ToolOutcome> {
 async function repairSponsoredAccount(secretKey: string, profileArg?: string): Promise<string> {
   const target = resolveProfileName(profileArg);
   const { Keypair } = await import("@stellar/stellar-sdk");
-  const publicKey = Keypair.fromSecret(secretKey).publicKey();
+  let publicKey: string;
+  try {
+    publicKey = Keypair.fromSecret(secretKey).publicKey();
+  } catch (err) {
+    // Never echo the secret key in error messages — describe the shape problem instead.
+    throw new Error(
+      `Invalid Stellar secret key: could not derive public key. ` +
+        `Expected S followed by 55 base32 characters (${safeErrorMessage(err)}).`,
+    );
+  }
   const details = await getBalanceDetails(publicKey);
 
   if (details.status === "missing") {
@@ -1894,7 +2205,10 @@ export function exportProfilesOutcome(): ToolOutcome {
     activeProfile: activeProfileName,
     profiles,
   });
-  return { text: JSON.stringify(payload, null, 2), structured: payload };
+  return {
+    text: JSON.stringify(payload, null, 2),
+    structured: payload as unknown as Record<string, unknown>,
+  };
 }
 
 export function importProfilesOutcome(data: string): ToolOutcome {
@@ -1945,10 +2259,14 @@ function catalogFallbackFor(err: unknown): CatalogFallbackReason | null {
 }
 
 /** Resolve a failed catalog read to a snapshot, or rethrow when it must surface. */
-function catalogSnapshotFor(err: unknown): { resources: unknown[]; notice: string } | null {
+function catalogSnapshotFor(
+  err: unknown,
+  key = "catalog",
+  context = catalogCacheContext(),
+): { resources: unknown[]; notice: string } | null {
   const reason = catalogFallbackFor(err);
   if (!reason) return null;
-  const snapshot = getCatalogSnapshot();
+  const snapshot = getCatalogSnapshot(Date.now(), key, context);
   if (!snapshot) return null;
   return {
     resources: snapshot.resources,
@@ -1957,10 +2275,19 @@ function catalogSnapshotFor(err: unknown): { resources: unknown[]; notice: strin
 }
 
 async function browseOutcome(filters: CatalogFilters = {}): Promise<ToolOutcome> {
-  const qs = buildCatalogQueryString(filters);
+  const context = catalogCacheContext();
+  const cursorResult = filters.cursor
+    ? resolveCatalogCursor(filters.cursor, filters, context)
+    : { ok: true as const, offset: filters.offset };
+  if (!cursorResult.ok) return catalogOutcome([], cursorResult.error, null);
+  const requestFilters =
+    cursorResult.offset === undefined ? filters : { ...filters, offset: cursorResult.offset };
+  const qs = buildCatalogQueryString(requestFilters);
   const url = qs ? `${BASE_URL}/resources?${qs}` : `${BASE_URL}/resources`;
   let raw: any[] = [];
   let notice: string | null = null;
+  let nextOffset: number | null = null;
+  let fromCache = false;
   try {
     const res = await jsonFetch(url);
     if (!res.ok) {
@@ -1974,13 +2301,29 @@ async function browseOutcome(filters: CatalogFilters = {}): Promise<ToolOutcome>
       );
     }
     raw = Array.isArray(res.data) ? res.data : [];
-    recordCatalogSnapshot(raw);
+    recordCatalogSnapshot(raw, catalogCacheKey(url), context);
     notice = cacheStalenessNotice(res.headers);
+    const header = res.headers["x-next-offset"];
+    nextOffset = header === undefined ? null : Number(header);
   } catch (err) {
-    const fallback = catalogSnapshotFor(err);
+    const fallback = filters.bypassCache
+      ? null
+      : (() => {
+          const reason = catalogFallbackFor(err);
+          const snapshot = reason
+            ? getCatalogSnapshot(Date.now(), catalogCacheKey(url), context)
+            : null;
+          return snapshot && reason
+            ? {
+                resources: snapshot.resources,
+                notice: catalogCacheLabel(snapshot.savedAtMs, Date.now(), reason),
+              }
+            : null;
+        })();
     if (!fallback) throw err;
     raw = Array.isArray(fallback.resources) ? (fallback.resources as any[]) : [];
     notice = fallback.notice;
+    fromCache = true;
   }
   const items: any[] = applyCatalogSort(applyClientCatalogFilters(raw, filters), filters.sort);
   const body =
@@ -1996,7 +2339,14 @@ async function browseOutcome(filters: CatalogFilters = {}): Promise<ToolOutcome>
         ? `No resources match ${describeCatalogFilters(filters)}.`
         : "No resources listed yet."
       : items.map(formatResource).join("\n\n");
-  return catalogOutcome(items, body, notice);
+  const nextCursor =
+    nextOffset !== null && Number.isInteger(nextOffset)
+      ? createCatalogCursor(nextOffset, filters, context)
+      : null;
+  return catalogOutcome(items, body, notice, {
+    cacheStatus: fromCache ? "offline" : filters.bypassCache ? "bypassed" : "live",
+    nextCursor,
+  });
 }
 
 export async function browse(filters: CatalogFilters = {}): Promise<string> {
@@ -2018,7 +2368,8 @@ async function searchOutcome(filtersOrQuery: string | CatalogFilters): Promise<T
     filters.limit !== undefined ||
     filters.offset !== undefined ||
     (filters.tags && filters.tags.length > 0) ||
-    filters.listed !== undefined,
+    filters.listed !== undefined ||
+    filters.cursor,
   );
   if (!hasCriteria) {
     return catalogOutcome([], "Provide a search query or at least one catalog filter.", null);
@@ -2028,8 +2379,19 @@ async function searchOutcome(filtersOrQuery: string | CatalogFilters): Promise<T
   const url = qs ? `${BASE_URL}/resources?${qs}` : `${BASE_URL}/resources`;
   let raw: any[] = [];
   let notice: string | null = null;
+  let nextOffset: number | null = null;
+  let fromCache = false;
+  const context = catalogCacheContext();
+  const cursorResult = filters.cursor
+    ? resolveCatalogCursor(filters.cursor, filters, context)
+    : { ok: true as const, offset: filters.offset };
+  if (!cursorResult.ok) return catalogOutcome([], cursorResult.error, null);
+  const requestFilters =
+    cursorResult.offset === undefined ? filters : { ...filters, offset: cursorResult.offset };
+  const requestQs = buildCatalogQueryString(requestFilters);
+  const requestUrl = requestQs ? `${BASE_URL}/resources?${requestQs}` : `${BASE_URL}/resources`;
   try {
-    const res = await jsonFetch(url);
+    const res = await jsonFetch(requestUrl);
     if (!res.ok) {
       throw mcpError(
         mapHttpError({
@@ -2041,13 +2403,18 @@ async function searchOutcome(filtersOrQuery: string | CatalogFilters): Promise<T
       );
     }
     raw = Array.isArray(res.data) ? res.data : [];
-    recordCatalogSnapshot(raw);
+    recordCatalogSnapshot(raw, catalogCacheKey(requestUrl), context);
     notice = cacheStalenessNotice(res.headers);
+    const header = res.headers["x-next-offset"];
+    nextOffset = header === undefined ? null : Number(header);
   } catch (err) {
-    const fallback = catalogSnapshotFor(err);
+    const fallback = filters.bypassCache
+      ? null
+      : catalogSnapshotFor(err, catalogCacheKey(requestUrl), context);
     if (!fallback) throw err;
     raw = Array.isArray(fallback.resources) ? (fallback.resources as any[]) : [];
     notice = fallback.notice;
+    fromCache = true;
   }
 
   // Client-side keyword / tags / listed / skipped for unit-test compatibility
@@ -2055,9 +2422,21 @@ async function searchOutcome(filtersOrQuery: string | CatalogFilters): Promise<T
   const items = applyCatalogSort(applyClientCatalogFilters(raw, filters), filters.sort);
 
   if (items.length === 0) {
-    return catalogOutcome([], `No resources match ${describeCatalogFilters(filters)}.`, notice);
+    return catalogOutcome([], `No resources match ${describeCatalogFilters(filters)}.`, notice, {
+      cacheStatus: fromCache ? "offline" : filters.bypassCache ? "bypassed" : "live",
+      nextCursor:
+        nextOffset !== null && Number.isInteger(nextOffset)
+          ? createCatalogCursor(nextOffset, filters, context)
+          : null,
+    });
   }
-  return catalogOutcome(items, items.map(formatResource).join("\n\n"), notice);
+  return catalogOutcome(items, items.map(formatResource).join("\n\n"), notice, {
+    cacheStatus: fromCache ? "offline" : filters.bypassCache ? "bypassed" : "live",
+    nextCursor:
+      nextOffset !== null && Number.isInteger(nextOffset)
+        ? createCatalogCursor(nextOffset, filters, context)
+        : null,
+  });
 }
 
 export async function search(filtersOrQuery: string | CatalogFilters): Promise<string> {
@@ -2070,7 +2449,10 @@ export async function search(filtersOrQuery: string | CatalogFilters): Promise<s
  * reachable-but-error response is surfaced verbatim — the cache only covers the
  * unreachable case.
  */
-async function previewData(resourceId: string): Promise<{ r: any; label: string | null }> {
+async function previewData(
+  resourceId: string,
+  bypassCache = false,
+): Promise<{ r: any; label: string | null; cacheStatus: "live" | "bypassed" | "offline" }> {
   try {
     const res = await jsonFetch(`${BASE_URL}/resources/${resourceId}/meta`);
     if (!res.ok)
@@ -2080,22 +2462,28 @@ async function previewData(resourceId: string): Promise<{ r: any; label: string 
         status: res.status,
         data: res.data,
       });
-    recordPreviewSnapshot(resourceId, res.data);
-    return { r: res.data, label: null };
+    recordPreviewSnapshot(resourceId, res.data, catalogCacheContext());
+    return { r: res.data, label: null, cacheStatus: bypassCache ? "bypassed" : "live" };
   } catch (err) {
     // Same rule as browse/search: a snapshot answers for a catalog that could
     // not answer, never for a 404 on an id the agent got wrong (#837).
-    const reason = catalogFallbackFor(err);
-    const snap = reason ? getPreviewSnapshot(resourceId) : null;
+    const reason = bypassCache ? null : catalogFallbackFor(err);
+    const snap = reason ? getPreviewSnapshot(resourceId, Date.now(), catalogCacheContext()) : null;
     if (!snap || !reason) throw err;
-    return { r: snap.meta as any, label: catalogCacheLabel(snap.savedAtMs, Date.now(), reason) };
+    return {
+      r: snap.meta as any,
+      label: catalogCacheLabel(snap.savedAtMs, Date.now(), reason),
+      cacheStatus: "offline",
+    };
   }
 }
 
-export async function preview(resourceId: string): Promise<string> {
-  const { r, label } = await previewData(resourceId);
+export async function preview(resourceId: string, bypassCache = false): Promise<string> {
+  const { r, label, cacheStatus } = await previewData(resourceId, bypassCache);
   // Publisher-supplied title/description are unbounded at the source, so cap
   // them before serializing rather than truncating the JSON afterwards (#582).
+  // Every advertised field is required (#1065): a value the API left out is
+  // reported as null rather than dropped by JSON.stringify.
   const out: Record<string, unknown> = applyPreviewLimits({
     id: r.id,
     title: r.title,
@@ -2104,6 +2492,7 @@ export async function preview(resourceId: string): Promise<string> {
     type: r.resourceType,
     verificationStatus: r.verificationStatus,
     accessUrl: r.accessUrl,
+    cacheStatus,
   });
   if (label) out.offlineCache = label;
   return serializePreview(out);
@@ -2284,14 +2673,38 @@ async function publish(args: {
 
   const paidFetch = makePaidFetch(wallet);
 
-  const verifyRes = await paidFetch(`${BASE_URL}/verify-content`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      content: `Title: ${args.title}\nDescription: ${args.description ?? ""}\nURL: ${args.externalUrl}`,
-      resourceId: resource.id,
-    }),
-  });
+  let verifyRes: Response;
+  try {
+    verifyRes = await paidFetch(`${BASE_URL}/verify-content`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content: `Title: ${args.title}\nDescription: ${args.description ?? ""}\nURL: ${args.externalUrl}`,
+        resourceId: resource.id,
+      }),
+    });
+  } catch (err) {
+    if (isTimeoutError(err)) {
+      try {
+        const snapshot = await publishStatus({ resourceId: resource.id });
+        return [
+          `Resource created (id: ${resource.id}) but verification timed out (ambiguous).`,
+          `The server may have committed the verification despite the lost response; no duplicate publish was attempted by the client.`,
+          `Resolved status (check before retrying):`,
+          snapshot,
+          `Retry only after confirming the verification status with mindvault_publish_status. Do not resubmit this publish blindly.`,
+        ].join("\n");
+      } catch {
+        return [
+          `Resource created (id: ${resource.id}) but verification timed out (ambiguous).`,
+          `Status could not be resolved automatically. Run mindvault_publish_status with resourceId "${resource.id}" before retrying — do not blindly re-publish (it may already be verified/registered).`,
+        ].join("\n");
+      }
+    }
+    throw mcpError(
+      mapTransportError({ operation: "Publish verification failed", source: "x402", error: err }),
+    );
+  }
   metrics.recordPayment(verifyRes.ok);
 
   const verifyData = await verifyRes.json().catch(() => null);
@@ -2317,10 +2730,34 @@ async function publish(args: {
       .join("\n");
   }
 
-  const registerRes = await jsonFetch(`${BASE_URL}/resources/${resource.id}/register`, {
-    method: "POST",
-    headers: { "x-api-key": apiKey },
-  });
+  let registerRes: ApiResponse<any>;
+  try {
+    registerRes = await jsonFetch(`${BASE_URL}/resources/${resource.id}/register`, {
+      method: "POST",
+      headers: { "x-api-key": apiKey },
+    });
+  } catch (err) {
+    if (isTimeoutError(err)) {
+      try {
+        const snapshot = await publishStatus({ resourceId: resource.id });
+        return [
+          `Resource created and verification attempted for "${resource.id}"; on-chain registration timed out (ambiguous).`,
+          `The server may have already registered it despite the lost response.`,
+          `Resolved status (check before retrying):`,
+          snapshot,
+          `Retry registration only after confirming status with mindvault_publish_status / mindvault_registry_lookup. Do not submit blindly.`,
+        ].join("\n");
+      } catch {
+        return [
+          `Resource created and verification attempted for "${resource.id}"; on-chain registration timed out (ambiguous).`,
+          `Status could not be resolved automatically. Run mindvault_publish_status with resourceId "${resource.id}" before retrying registration — avoid duplicate registration.`,
+        ].join("\n");
+      }
+    }
+    throw mcpError(
+      mapTransportError({ operation: "On-chain registration failed", source: "api", error: err }),
+    );
+  }
 
   const onchainStatus: string = registerRes.ok
     ? (registerRes.data.onchainStatus ?? "registered")
@@ -2451,12 +2888,21 @@ export async function buy(
     : null;
 
   const paidFetch = makePaidFetch(wallet);
+  const clientIdempotencyKey = `buy:${resourceId}:${randomUUID()}`;
   let res: Response;
   try {
     await onProgress?.(2, 4, "Submitting payment");
-    res = await paidFetch(`${BASE_URL}/resources/${resourceId}`);
+    res = await paidFetch(`${BASE_URL}/resources/${resourceId}`, {
+      headers: { "Idempotency-Key": clientIdempotencyKey },
+    });
   } catch (err) {
     metrics.recordPayment(false);
+    if (err instanceof PriceChangedCeilingError) {
+      // Price changed between preview and x402 challenge — the agent must
+      // re-authorize. Return a structured refusal (same shape as ceiling
+      // exceeded on preview) so the error is actionable without a stack trace.
+      return `Payment blocked: the server's price changed after the preview.\n` + err.message;
+    }
     throw mcpError(mapTransportError({ operation: "Buy failed", source: "x402", error: err }));
   }
   metrics.recordPayment(res.ok);
@@ -2466,7 +2912,11 @@ export async function buy(
       operation: `Buy failed [${res.status}]`,
       source: "x402",
       status: res.status,
-      data: text,
+      data: parseUpstreamErrorBody({
+        status: res.status,
+        headers: responseHeaderBag(res),
+        body: text,
+      }),
     });
   }
   const afterData = await res.json();
@@ -2489,6 +2939,7 @@ export async function buy(
       network: NETWORK,
       txHash,
       receiptRef: receipt?.paymentId != null ? String(receipt.paymentId) : null,
+      clientIdempotencyKey,
       ...(title ? { title } : {}),
     });
     recordResourceHistory({
@@ -2788,6 +3239,7 @@ export async function updateMetadata(resourceId: string, metadata: string): Prom
   return JSON.stringify(
     {
       status: "success",
+      ...txPhaseFields("settled"),
       resourceId,
       metadata,
       txHash,
@@ -2888,6 +3340,7 @@ export async function setPrice(resourceId: string, price: string): Promise<strin
   return JSON.stringify(
     {
       status: "success",
+      ...txPhaseFields("settled"),
       resourceId,
       price,
       txHash,
@@ -2986,6 +3439,7 @@ export async function transferOwnership(resourceId: string, newCreator: string):
   return JSON.stringify(
     {
       status: "success",
+      ...txPhaseFields("settled"),
       resourceId,
       newCreator,
       txHash,
@@ -3076,6 +3530,7 @@ export async function setListed(resourceId: string, listed: boolean): Promise<st
   return JSON.stringify(
     {
       status: "success",
+      ...txPhaseFields("settled"),
       resourceId,
       listed,
       txHash,
@@ -3459,6 +3914,174 @@ export async function registryList(start: number, limit: number): Promise<string
   );
 }
 
+/**
+ * Compact summary of an on-chain resource, as the registry read tools return
+ * it. `state` is the contract's lifecycle state, so a caller can tell a
+ * delisted resource from a frozen one without a second lookup.
+ */
+function registryResourceSummary(resource: Resource) {
+  const priceUsdc = stroopsToUsdc(BigInt(resource.price as unknown as bigint));
+  return {
+    id: resource.id,
+    creator: resource.creator,
+    price: `${priceUsdc} USDC`,
+    metadata: resource.metadata,
+    listed: resource.listed,
+    state: resource.state.tag,
+    tags: resource.tags,
+  };
+}
+
+/**
+ * One page of a creator's on-chain resources, filtered by listing and
+ * lifecycle state (contract `list_by_creator_page_filtered`).
+ *
+ * The cursor is an opaque token: the contract's `IdCursor` is encoded and
+ * handed back untouched, so an agent cannot corrupt its own pagination.
+ */
+export async function registryCreatorPage(
+  creator: string,
+  cursorToken: string | undefined,
+  limit: number,
+  listed: boolean | undefined,
+  state: string | undefined,
+): Promise<string> {
+  if (_isMock())
+    return mockRegistryCreatorPage(
+      creator,
+      cursorToken,
+      limit,
+      listed,
+      state,
+      REGISTRY_CONTRACT_ID,
+      currentWallet()?.publicKey,
+    );
+
+  const decoded =
+    cursorToken === undefined
+      ? ({ ok: true, cursor: { tag: "Start", values: undefined } } as const)
+      : decodeIdCursor(cursorToken);
+  if (!decoded.ok) {
+    throw mcpError({
+      source: "soroban",
+      category: "validation",
+      summary: `Creator page rejected: ${decoded.error}`,
+      action:
+        "Call mindvault_registry_creator_page again without a cursor to start from the first page.",
+    });
+  }
+
+  const client = createRegistryClient({
+    contractId: REGISTRY_CONTRACT_ID,
+    rpcUrl: SOROBAN_RPC_URL,
+    networkPassphrase: REGISTRY_NETWORK_PASSPHRASE,
+  });
+
+  let page: IdPage;
+  try {
+    const tx = await client.list_by_creator_page_filtered({
+      creator,
+      cursor: decoded.cursor as IdCursor,
+      limit,
+      listed,
+      state:
+        state === undefined
+          ? undefined
+          : ({ tag: state, values: undefined } as unknown as ResourceState),
+    });
+    page = tx.result;
+  } catch (err: unknown) {
+    throw mcpError(
+      mapTransportError({
+        operation: `On-chain creator page failed (contract ${REGISTRY_CONTRACT_ID}, RPC ${SOROBAN_RPC_URL}, creator ${creator}, limit ${limit})`,
+        source: "soroban",
+        error: err,
+      }),
+    );
+  }
+
+  const items = page.items.map(registryResourceSummary);
+  const nextCursor =
+    page.next_cursor.tag === "End" ? null : encodeIdCursor(page.next_cursor as IdCursor);
+
+  return JSON.stringify(
+    {
+      source: "on-chain",
+      creator,
+      count: items.length,
+      resources: items,
+      nextCursor,
+      message:
+        items.length === 0
+          ? `No on-chain resources matched for creator ${creator}. The filters may exclude everything the creator owns; try mindvault_registry_creator_page without a state or listed filter.`
+          : undefined,
+      contract: REGISTRY_CONTRACT_ID,
+      network: REGISTRY_NETWORK_PASSPHRASE,
+      rpc: SOROBAN_RPC_URL,
+    },
+    null,
+    2,
+  );
+}
+
+/**
+ * Bounded search over the on-chain catalog for resources whose tag starts
+ * with a prefix (contract `search_by_tag_prefix`).
+ *
+ * The cursor is a catalog index, not a match count: it names the slot the
+ * scan resumes at, so a page that matched nothing still advances.
+ */
+export async function registryTagSearch(
+  prefix: string,
+  cursor: number,
+  limit: number,
+): Promise<string> {
+  if (_isMock()) return mockRegistryTagSearch(prefix, cursor, limit, REGISTRY_CONTRACT_ID);
+
+  const client = createRegistryClient({
+    contractId: REGISTRY_CONTRACT_ID,
+    rpcUrl: SOROBAN_RPC_URL,
+    networkPassphrase: REGISTRY_NETWORK_PASSPHRASE,
+  });
+
+  let page: CatalogPage;
+  try {
+    const tx = await client.search_by_tag_prefix({ prefix, cursor, limit });
+    page = tx.result;
+  } catch (err: unknown) {
+    throw mcpError(
+      mapTransportError({
+        operation: `On-chain tag search failed (contract ${REGISTRY_CONTRACT_ID}, RPC ${SOROBAN_RPC_URL}, prefix ${prefix}, cursor ${cursor}, limit ${limit})`,
+        source: "soroban",
+        error: err,
+      }),
+    );
+  }
+
+  const items = page.items.map(registryResourceSummary);
+
+  return JSON.stringify(
+    {
+      source: "on-chain",
+      prefix,
+      cursor,
+      limit,
+      count: items.length,
+      resources: items,
+      nextCursor: page.next_cursor ?? null,
+      message:
+        items.length === 0
+          ? `No on-chain resources carry a tag starting with "${prefix}". The scan may have passed the matching entries; continue with nextCursor, or use mindvault_registry_list to see the whole catalog.`
+          : undefined,
+      contract: REGISTRY_CONTRACT_ID,
+      network: REGISTRY_NETWORK_PASSPHRASE,
+      rpc: SOROBAN_RPC_URL,
+    },
+    null,
+    2,
+  );
+}
+
 export async function registryCount(creator?: string): Promise<string> {
   if (_isMock()) return mockRegistryCount(creator, REGISTRY_CONTRACT_ID);
 
@@ -3591,6 +4214,42 @@ function registryInfo(): string {
     }),
   };
   return JSON.stringify(info, null, 2);
+}
+
+/**
+ * Explain a vault-registry contract error code (#1021).
+ *
+ * A failed Soroban invocation reports a number, and the number alone does not
+ * say whether to look the resource up, wait out a pause, or stop. This turns
+ * it into the contract's own description, the retry verdict, and the one
+ * step that recovers.
+ *
+ * Neither or both identifiers is an argument error, not an unknown code: the
+ * caller has not said which failure they mean.
+ */
+export function explainErrorCode(code?: number, name?: string): string {
+  if (code === undefined && name === undefined) {
+    throw new ToolValidationError("mindvault_explain_error_code", [
+      {
+        field: "code",
+        code: "missing_required",
+        message:
+          'exactly one of "code" or "name" is required — pass the on-chain error number or the contract error name.',
+      },
+    ]);
+  }
+  if (code !== undefined && name !== undefined) {
+    throw new ToolValidationError("mindvault_explain_error_code", [
+      {
+        field: "code",
+        code: "unknown_argument",
+        message:
+          'pass either "code" or "name", not both — a code and a name that disagree cannot both be right.',
+      },
+    ]);
+  }
+  const explanation = explainRegistryError({ code: code ?? null, name: name ?? null });
+  return JSON.stringify(explanation, null, 2);
 }
 
 export async function checkConsistency(
@@ -3830,6 +4489,7 @@ export function networkProfile(): string {
     usdcContractId,
     timeouts: describeTimeouts(TIMEOUTS),
     retries: describeRetryPolicy(RETRY_POLICY),
+    proxy: describeProxyConfig(PROXY_CONFIG),
     warnings,
   };
 
@@ -4061,7 +4721,10 @@ async function dispatchToolOutcome(
     name in TOOL_ARGUMENT_SPECS && !isDryRunCall ? validateToolArgs(name, rawArgs) : {};
   const dryRunArgs = isDryRunCall ? (rawRecord as ValidatedArgs) : args;
 
-  if (!(name === "mindvault_terms" && rawRecord.operation === "get")) {
+  // `mindvault_terms` is gated as the setter it can be; its `get` branch is a
+  // plain registry read and is exempt from both spend guardrails.
+  const isTermsRead = name === "mindvault_terms" && rawRecord.operation === "get";
+  if (!isTermsRead) {
     assertMainnetMutationAllowed(NETWORK, name, rawRecord);
   }
 
@@ -4069,12 +4732,14 @@ async function dispatchToolOutcome(
   // guardrail above (which only fires on pubnet) and from the auto-pay ceiling
   // in buy() (which only fires above an amount); a call may have to satisfy
   // all three. Off unless MINDVAULT_CONFIRM_PAID_OPERATIONS says otherwise.
-  assertPaidOperationConfirmed({
-    toolName: name,
-    args: rawRecord,
-    dryRun: isDryRunCall,
-    env: process.env,
-  });
+  if (!isTermsRead) {
+    assertPaidOperationConfirmed({
+      toolName: name,
+      args: rawRecord,
+      dryRun: isDryRunCall,
+      env: process.env,
+    });
+  }
 
   if (API_MUTATION_TOOLS.has(name) && !isDryRunCall) {
     await assertApiReachableFor(name);
@@ -4113,7 +4778,7 @@ async function dispatchToolOutcome(
         return parsed.ok ? searchOutcome(parsed.filters) : parsed.error;
       }
       case "mindvault_preview":
-        return preview(requiredString(args, "resourceId"));
+        return preview(requiredString(args, "resourceId"), flag(args, "bypassCache"));
       case "mindvault_register":
         return register(
           requiredString(args, "name"),
@@ -4184,7 +4849,7 @@ async function dispatchToolOutcome(
       case "mindvault_lease_status":
         return leaseStatus(requiredString(args, "resourceId"), optionalString(args, "holder"));
       case "mindvault_purchase_history":
-        return purchaseHistoryTool(rawRecord);
+        return purchaseHistoryTool(rawRecord, { profile: activeProfileName });
       case "mindvault_export_receipts":
         return exportReceiptsToolWithTimeout(
           rawRecord,
@@ -4212,6 +4877,8 @@ async function dispatchToolOutcome(
           requiredString(args, "resourceId"),
           optionalString(args, "expectedMetadataHash"),
         );
+      case "mindvault_metadata_diff":
+        return metadataDiff(requiredString(args, "resourceId"));
       case "mindvault_verify_attestation":
         return verifyAttestation(
           requiredString(args, "resourceId"),
@@ -4219,6 +4886,11 @@ async function dispatchToolOutcome(
         );
       case "mindvault_registry_lookup":
         return registryLookup(requiredString(args, "resourceId"));
+      case "mindvault_explain_error_code":
+        return explainErrorCode(
+          args.code === undefined ? undefined : Number(args.code),
+          optionalString(args, "name"),
+        );
       case "mindvault_batch_catalog_lookup":
         return batchCatalogLookupOutcome(
           requiredStringArray(args, "resourceIds"),
@@ -4233,6 +4905,20 @@ async function dispatchToolOutcome(
         );
       case "mindvault_registry_count":
         return registryCount(optionalString(args, "creator"));
+      case "mindvault_registry_creator_page":
+        return registryCreatorPage(
+          requiredString(args, "creator"),
+          optionalString(args, "cursor"),
+          optionalInt(args, "limit", REGISTRY_LIST_DEFAULT_LIMIT),
+          optionalFlag(args, "listed"),
+          optionalString(args, "state"),
+        );
+      case "mindvault_registry_tag_search":
+        return registryTagSearch(
+          requiredString(args, "prefix"),
+          optionalInt(args, "cursor", REGISTRY_LIST_DEFAULT_START),
+          optionalInt(args, "limit", REGISTRY_LIST_DEFAULT_LIMIT),
+        );
       case "mindvault_update_metadata":
         return updateMetadata(requiredString(args, "resourceId"), requiredString(args, "metadata"));
       case "mindvault_set_price":
@@ -4275,6 +4961,8 @@ async function dispatchToolOutcome(
         return checkStatePermissionsTool();
       case "mindvault_registry_health":
         return registryHealth();
+      case "mindvault_rpc_health":
+        return rpcHealthOutcome();
       case "mindvault_prewarm_catalog":
         return prewarmCatalogCache();
       case "mindvault_client_config":
@@ -4285,7 +4973,7 @@ async function dispatchToolOutcome(
         return importWallet({
           secretKey: optionalString(args, "secretKey"),
           profile: optionalString(args, "profile"),
-          persist: flag(args, "persist"),
+          confirm: flag(args, "confirm"),
         });
       case "mindvault_rotate_publisher_key":
         return rotatePublisherKey(optionalString(args, "profile"));
@@ -4293,6 +4981,12 @@ async function dispatchToolOutcome(
         return formatVerifyInstall(verifyInstall(process.env));
       case "mindvault_debug_bundle":
         return debugBundleTool(rawRecord);
+      case "mindvault_onchain_preflight":
+        return onchainPreflightTool(rawRecord);
+      case "mindvault_migration_preview":
+        return migrationPreviewTool(rawRecord);
+      case "mindvault_support_bundle":
+        return supportBundleTool(rawRecord);
       case "mindvault_recover_catalog_cache":
         return recoverCatalogCache();
       case "mindvault_wallet_balances":
@@ -4527,6 +5221,18 @@ if (!process.env.VITEST) {
   // cold-cache cost, which is the status quo this is improving on, not a
   // regression.
   prewarmCatalogCache().catch(() => {});
+
+  // Best-effort retention pass (#1044): prune expired state backups, rotated
+  // audit generations, and stale receipt records once per boot, under the
+  // documented MINDVAULT_* retention settings and their safe defaults. Never
+  // throws and never deletes the active state file or the live audit log;
+  // failures are logged and the server starts anyway.
+  const retentionReport = applyRetentionPolicies(process.env);
+  if (retentionReport.errors.length > 0) {
+    logger.warn(
+      `MindVault MCP: retention pass completed with errors: ${retentionReport.errors.join("; ")}`,
+    );
+  }
 
   await server.connect(transport);
 }

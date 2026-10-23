@@ -44,11 +44,17 @@
   },
   "dependencies": {
     "@mindvault/registry-client": "workspace:*",
-    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@modelcontextprotocol/sdk": "^1.32.0",
     "@stellar/stellar-sdk": "^15.0.1",
     "@x402/fetch": "^2.9.0",
     "@x402/stellar": "^2.9.0",
-    "node-fetch": "^3.3.2"
+    "node-fetch": "^3.3.2",
+    "undici": "^7.29.1"
+  },
+  "pnpm": {
+    "overrides": {
+      "follow-redirects": ">=1.16.1"
+    }
   },
   "devDependencies": {
     "@types/node": "^25.9.1",

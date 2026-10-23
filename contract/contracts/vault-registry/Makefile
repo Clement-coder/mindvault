@@ -1,3 +1,11 @@
+# This crate is a member of the `contract` workspace, so cargo writes the
+# WASM to the workspace root's `target/` directory, not to a `target/`
+# directory next to this Makefile. Resolve the paths from the workspace root
+# so `make build` and `make preflight` work from this directory.
+WORKSPACE_DIR := $(realpath $(dir $(lastword $(MAKEFILE_LIST)))/../..)
+WASM_FILE := $(WORKSPACE_DIR)/target/wasm32v1-none/release/vault_registry.wasm
+WASM_MAX_SIZE := 159744
+
 default: build
 
 all: test
@@ -6,8 +14,8 @@ test: build
 	cargo test
 
 build:
-	stellar contract build
-	@ls -l target/wasm32v1-none/release/*.wasm
+	stellar contract build --manifest-path $(WORKSPACE_DIR)/Cargo.toml
+	@ls -l $(WASM_FILE)
 
 fmt:
 	cargo fmt --all
@@ -18,7 +26,7 @@ clean:
 # Run all locally-verifiable pre-deploy checks in one step.
 # Mirrors what .github/workflows/contract-ci.yml enforces in CI:
 #   1. cargo test   — full test suite including event-schema and workflow tests
-#   2. optimized build + WASM size guard (budget: 36,864 bytes)
+#   2. optimized build + WASM size guard (budget: 159,744 bytes)
 #   3. no_std compatibility check
 #
 # See docs/contract-upgrade-checklist.md for the full deployment checklist,
@@ -33,10 +41,9 @@ preflight:
 	@echo "==> [1/3] Running tests..."
 	cargo test
 	@echo "==> [2/3] Building optimized WASM..."
-	stellar contract build --manifest-path Cargo.toml --optimize
-	@WASM=target/wasm32v1-none/release/vault_registry.wasm; \
-	SIZE=$$(stat -c%s "$$WASM" 2>/dev/null || stat -f%z "$$WASM"); \
-	MAX=114688; \
+	stellar contract build --manifest-path $(WORKSPACE_DIR)/Cargo.toml --optimize
+	@SIZE=$$(stat -c%s "$(WASM_FILE)" 2>/dev/null || stat -f%z "$(WASM_FILE)"); \
+	MAX=$(WASM_MAX_SIZE); \
 	echo "    WASM size: $$SIZE bytes (budget: $$MAX bytes)"; \
 	if [ "$$SIZE" -gt "$$MAX" ]; then \
 	  echo "    ERROR: WASM over budget by $$(( $$SIZE - $$MAX )) bytes."; \

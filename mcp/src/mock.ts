@@ -16,6 +16,8 @@
 import { Keypair } from "@stellar/stellar-sdk";
 import { explorerTxUrl } from "./stellarExplorer.js";
 import { stroopsToUsdc } from "./usdcAmount.js";
+import { decodeIdCursor, encodeIdCursor } from "./registryIdCursor.js";
+import { txPhaseFields } from "./txPhases.js";
 
 const TRUTHY = new Set(["1", "true", "yes", "on"]);
 
@@ -165,7 +167,12 @@ export function createMockFetch(
     if (method === "GET" && pathname.startsWith("/accounts/")) {
       return json({
         balances: [
-          { asset_type: "credit_alphanum4", asset_code: "USDC", balance: "1000.0000000" },
+          {
+            asset_type: "credit_alphanum4",
+            asset_code: "USDC",
+            asset_issuer: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+            balance: "1000.0000000",
+          },
           { asset_type: "native", balance: "100.0000000" },
         ],
       });
@@ -359,6 +366,7 @@ export function mockUpdateMetadata(resourceId: string, metadata: string): string
   return JSON.stringify(
     {
       status: "success",
+      ...txPhaseFields("settled"),
       resourceId,
       metadata,
       txHash: `MOCK_TX_UPDATE_META_${resourceId}`,
@@ -374,6 +382,7 @@ export function mockSetPrice(resourceId: string, price: string): string {
   return JSON.stringify(
     {
       status: "success",
+      ...txPhaseFields("settled"),
       resourceId,
       price,
       txHash: `MOCK_TX_SET_PRICE_${resourceId}`,
@@ -389,6 +398,7 @@ export function mockTransferOwnership(resourceId: string, newCreator: string): s
   return JSON.stringify(
     {
       status: "success",
+      ...txPhaseFields("settled"),
       resourceId,
       newCreator,
       txHash: `MOCK_TX_TRANSFER_${resourceId}`,
@@ -404,6 +414,7 @@ export function mockAcceptTransfer(resourceId: string): string {
   return JSON.stringify(
     {
       status: "success",
+      ...txPhaseFields("settled"),
       resourceId,
       txHash: `MOCK_TX_ACCEPT_TRANSFER_${resourceId}`,
       explorerUrl: explorerTxUrl(`MOCK_TX_ACCEPT_TRANSFER_${resourceId}`),
@@ -418,6 +429,7 @@ export function mockCancelTransfer(resourceId: string): string {
   return JSON.stringify(
     {
       status: "success",
+      ...txPhaseFields("settled"),
       resourceId,
       txHash: `MOCK_TX_CANCEL_TRANSFER_${resourceId}`,
       explorerUrl: explorerTxUrl(`MOCK_TX_CANCEL_TRANSFER_${resourceId}`),
@@ -454,6 +466,7 @@ export function mockSetListed(resourceId: string, listed: boolean): string {
   return JSON.stringify(
     {
       status: "success",
+      ...txPhaseFields("settled"),
       resourceId,
       listed,
       txHash: `MOCK_TX_SET_LISTED_${resourceId}`,
@@ -550,19 +563,19 @@ export function mockBuyReceipt(
 export const MOCK_REGISTRY_RESOURCES: MockRegistryResource[] = [
   {
     id: "mock-1",
-    creator: "GMOCKCREATOR1",
+    creator: "GA6HCMBLTZS5VYYBCATRBRZ3BZJMAFUDKYYF6AH6MVCMGWMRDNSWJPIH",
     price: "1.5000000 USDC",
     metadata: "Intro to Stellar",
     listed: true,
-    tags: [],
+    tags: ["dataset", "stellar"],
   },
   {
     id: "mock-2",
-    creator: "GMOCKCREATOR2",
+    creator: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
     price: "0.5000000 USDC",
     metadata: "x402 Cheat Sheet",
     listed: true,
-    tags: [],
+    tags: ["guide", "x402"],
   },
 ];
 
@@ -613,6 +626,162 @@ export function mockRegistryList(
       limit,
       count: slice.length,
       resources: slice,
+      contract: contractId,
+    },
+    null,
+    2,
+  );
+}
+
+/**
+ * The mock catalog, including the profile resource the active wallet owns.
+ * Same seed as `mockRegistryList`, so both tools report the same rows.
+ */
+function mockRegistryCatalog(activePublicKey?: string | null): MockRegistryResource[] {
+  const all = [...MOCK_REGISTRY_RESOURCES];
+  if (activePublicKey) {
+    all.push({
+      id: "mock-profile",
+      creator: activePublicKey,
+      price: "2.5000000 USDC",
+      metadata: "Your Profile Fixture",
+      listed: true,
+      tags: [],
+    });
+  }
+  return all;
+}
+
+/**
+ * Stand-in for `list_by_creator_page_filtered`.
+ *
+ * Mirrors the contract's semantics: the filters compose with AND, the cursor
+ * resumes after the last returned row, and a page that matches nothing ends
+ * the iteration.
+ */
+export function mockRegistryCreatorPage(
+  creator: string,
+  cursorToken: string | undefined,
+  limit: number,
+  listed: boolean | undefined,
+  state: string | undefined,
+  contractId: string,
+  activePublicKey?: string | null,
+): string {
+  const decoded =
+    cursorToken === undefined
+      ? ({ ok: true, cursor: { tag: "Start", values: undefined } } as const)
+      : decodeIdCursor(cursorToken);
+  if (!decoded.ok) {
+    throw new Error(decoded.error);
+  }
+
+  const owned = mockRegistryCatalog(activePublicKey).filter(
+    (resource) => resource.creator === creator,
+  );
+  const matches = owned.filter((resource) => {
+    if (listed !== undefined && resource.listed !== listed) return false;
+    if (state !== undefined) {
+      // The mock seed only holds listed and delisted resources.
+      const mockState = resource.listed ? "Listed" : "Delisted";
+      if (mockState !== state) return false;
+    }
+    return true;
+  });
+
+  const lastId = decoded.cursor.tag === "After" ? decoded.cursor.values[1] : undefined;
+  const start = lastId === undefined ? 0 : matches.findIndex((r) => r.id === lastId) + 1;
+  const slice = matches.slice(start, start + limit);
+  const hasMore = start + slice.length < matches.length;
+  const nextCursor = hasMore
+    ? encodeIdCursor({
+        tag: "After",
+        values: [start + slice.length - 1, slice[slice.length - 1].id, start + slice.length],
+      })
+    : null;
+
+  return JSON.stringify(
+    {
+      source: "on-chain (mock)",
+      creator,
+      count: slice.length,
+      resources: slice.map((resource) => ({
+        ...resource,
+        state: resource.listed ? "Listed" : "Delisted",
+      })),
+      nextCursor,
+      message:
+        slice.length === 0
+          ? `No on-chain resources matched for creator ${creator} (mock mode).`
+          : undefined,
+      contract: contractId,
+    },
+    null,
+    2,
+  );
+}
+
+/**
+ * Stand-in for `search_by_tag_prefix`.
+ *
+ * The prefix is normalized like a tag (trimmed, lowercased) and the cursor
+ * is a catalog index, so a page that matches nothing still advances.
+ */
+export function mockRegistryTagSearch(
+  prefix: string,
+  cursor: number,
+  limit: number,
+  contractId: string,
+): string {
+  const normalized = prefix.trim().toLowerCase();
+  const catalog = mockRegistryCatalog(null);
+
+  if (normalized.length === 0) {
+    return JSON.stringify(
+      {
+        source: "on-chain (mock)",
+        prefix,
+        cursor,
+        limit,
+        count: 0,
+        resources: [],
+        nextCursor: null,
+        message: `An empty tag prefix matches every tag and returns nothing (mock mode).`,
+        contract: contractId,
+      },
+      null,
+      2,
+    );
+  }
+
+  const matches: { resource: MockRegistryResource; index: number }[] = [];
+  for (let index = Math.max(cursor, 0); index < catalog.length; index++) {
+    const resource = catalog[index];
+    if (resource.tags.some((tag) => tag.toLowerCase().startsWith(normalized))) {
+      matches.push({ resource, index });
+      if (matches.length >= limit) break;
+    }
+  }
+
+  const last = matches[matches.length - 1];
+  const nextCursor = last && last.index + 1 < catalog.length ? last.index + 1 : null;
+
+  return JSON.stringify(
+    {
+      source: "on-chain (mock)",
+      prefix,
+      cursor,
+      limit,
+      count: matches.length,
+      resources: matches.map(({ resource }) => ({
+        ...resource,
+        state: resource.listed ? "Listed" : "Delisted",
+      })),
+      nextCursor,
+      message:
+        matches.length === 0
+          ? `No on-chain resources carry a tag starting with "${prefix}" (mock mode).`
+          : undefined,
       contract: contractId,
     },
     null,
@@ -679,6 +848,7 @@ export function mockBuyLease(resourceId: string, tier: string, dryRun: boolean):
   return JSON.stringify(
     {
       status: "success",
+      ...txPhaseFields("settled"),
       resourceId,
       tier,
       priceStroops: priceStroops.toString(),

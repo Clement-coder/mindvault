@@ -68,7 +68,17 @@ export const REDACTED = "[REDACTED]";
  * parent shell never reaches the bundle even in masked form.
  */
 const ENV_PREFIXES = ["MINDVAULT_", "STELLAR_", "SOROBAN_", "HORIZON_", "VAULT_REGISTRY_"];
-const ENV_EXACT = new Set(["NETWORK", "SPONSORED_ACCOUNT_URL", "USDC_CONTRACT_ID", "NODE_ENV"]);
+const ENV_EXACT = new Set([
+  "NETWORK",
+  "SPONSORED_ACCOUNT_URL",
+  "USDC_CONTRACT_ID",
+  "NODE_ENV",
+  // Standard proxy variables (#1075). Their values may embed `user:pass@`
+  // userinfo; `redactSecrets` strips it before the value is carried.
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "NO_PROXY",
+]);
 
 /** Variable names that carry a credential, whatever their value looks like. */
 const SECRET_NAME = /SECRET|KEY|TOKEN|PASS|PRIVATE|CREDENTIAL|SIGNING/i;

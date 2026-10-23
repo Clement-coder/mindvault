@@ -79,6 +79,25 @@ as profile state. There is deliberately no filesystem use, which keeps "no
 cache present" deterministic and independent of anything an earlier run left
 behind.
 
+## Request identity and fresh reads
+
+Catalog pages and metadata are scoped by the active profile, Stellar network,
+registry contract, API origin, and the exact request page. A cache entry from a
+different profile or network is never eligible for offline fallback. This is
+the same principle as HTTP caching: the request identity must be part of the
+cache key.
+
+`mindvault_browse` and `mindvault_search` return an opaque `nextCursor` when
+another page is available. Pass that value back as `cursor` without changing
+the filters. Cursors are intentionally rejected after a profile/network
+change or filter change; start a new browse/search in that case. The existing
+`offset` argument remains supported for compatibility.
+
+For a one-off fresh read, pass `bypassCache: true` to browse, search, or
+preview. The response reports `cacheStatus: "bypassed"`; this is scoped to the
+call and does not disable or clear the shared cache policy. If the fresh read
+cannot reach the API, it fails instead of silently serving an offline snapshot.
+
 ## When the snapshot is served (#837)
 
 The cache answers for one situation: **the catalog could not answer.** That is

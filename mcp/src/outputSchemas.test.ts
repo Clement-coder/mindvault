@@ -74,6 +74,8 @@ describe("representative payloads match advertised required keys", () => {
     assertKeys(CATALOG_LIST_OUTPUT_SCHEMA, {
       items: [{ id: "mock-1", title: "Intro", price: "1.5", description: null, accessUrl: null }],
       notice: null,
+      cacheStatus: "live",
+      nextCursor: null,
       truncated: false,
     });
   });
@@ -87,6 +89,7 @@ describe("representative payloads match advertised required keys", () => {
       type: "link",
       verificationStatus: "verified",
       accessUrl: "https://example.com",
+      cacheStatus: "live",
     });
   });
 

@@ -16,7 +16,8 @@ export const MAX_AUDIT_QUERY_RESULTS = 500;
 export function queryAuditLog(path: string, query: AuditQuery = {}) {
   const limit = query.limit ?? 50;
   const offset = query.offset ?? 0;
-  if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_AUDIT_QUERY_RESULTS) throw new RangeError("Invalid limit");
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_AUDIT_QUERY_RESULTS)
+    throw new RangeError("Invalid limit");
   if (!Number.isSafeInteger(offset) || offset < 0) throw new RangeError("Invalid offset");
   const since = query.since === undefined ? null : Date.parse(query.since);
   const until = query.until === undefined ? null : Date.parse(query.until);
@@ -41,7 +42,11 @@ export function queryAuditLog(path: string, query: AuditQuery = {}) {
     for (const line of text.split("\n")) {
       if (!line.trim()) continue;
       let event: Record<string, unknown>;
-      try { event = JSON.parse(line); } catch { continue; }
+      try {
+        event = JSON.parse(line);
+      } catch {
+        continue;
+      }
       if (!event || typeof event !== "object" || Array.isArray(event)) continue;
       const time = typeof event.timestamp === "string" ? Date.parse(event.timestamp) : NaN;
       if (since !== null && !(time >= since)) continue;
@@ -51,7 +56,12 @@ export function queryAuditLog(path: string, query: AuditQuery = {}) {
       matches.push(redactObject(event) as Record<string, unknown>);
     }
     const entries = matches.slice(offset, offset + limit);
-    return { entries, nextOffset: offset + limit < matches.length ? offset + limit : null, truncated: start > 0, scannedBytes: nread };
+    return {
+      entries,
+      nextOffset: offset + limit < matches.length ? offset + limit : null,
+      truncated: start > 0,
+      scannedBytes: nread,
+    };
   } finally {
     closeSync(fd);
   }

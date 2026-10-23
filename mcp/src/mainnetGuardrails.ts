@@ -56,6 +56,8 @@ export const MAINNET_GATED_TOOLS = [
   "mindvault_freeze",
   "mindvault_royalty",
   "mindvault_set_tags",
+  // `operation: "set"` only; the dispatcher exempts `"get"`.
+  "mindvault_terms",
 ] as const;
 
 export type MainnetGatedTool = (typeof MAINNET_GATED_TOOLS)[number];

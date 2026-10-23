@@ -43,6 +43,13 @@ describe("redaction utility", () => {
       expect(result).toContain("[REDACTED]");
     });
 
+    it("should strip URL userinfo credentials but keep scheme and host", () => {
+      const input = "connecting via http://alice:s3cret@proxy.corp:8080";
+      const result = redactSecrets(input);
+      expect(result).toBe("connecting via http://proxy.corp:8080");
+      expect(result).not.toContain("s3cret");
+    });
+
     it("should not modify strings without secrets", () => {
       const input = "This is a normal string with no secrets";
       const result = redactSecrets(input);

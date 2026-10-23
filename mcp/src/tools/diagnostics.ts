@@ -114,14 +114,30 @@ export async function registryHealth(): Promise<string> {
   return lines.join("\n");
 }
 
+/**
+ * Import an existing Stellar wallet with a mandatory address-preview step.
+ *
+ * The tool is intentionally two-step so an agent always sees the derived
+ * address before any credential is written to disk:
+ *
+ *   1. Without `confirm` (or `confirm: false`): derive the public key, display
+ *      the address together with the target profile and network, then return a
+ *      prompt to call again with `confirm: true`.  Nothing is written.
+ *   2. With `confirm: true`: derive the address again, persist the wallet, and
+ *      return confirmation.  The secret key is never included in any response.
+ *
+ * The old `persist` flag is no longer part of the public surface.  Any caller
+ * that previously passed `persist: false` already gets the same no-write
+ * behaviour from the default (unconfirmed) path, so no existing client breaks.
+ */
 export async function importWallet(args: {
   secretKey?: string;
   profile?: string;
-  persist?: boolean;
+  confirm?: unknown;
 }): Promise<string> {
   const target = resolveProfileName(args.profile);
-  const persist = args.persist !== false;
 
+  // Resolve secret: explicit arg beats env var.
   let secretKey = args.secretKey;
   if (!secretKey) {
     secretKey = resolveAgentSecret();
@@ -136,32 +152,55 @@ export async function importWallet(args: {
     throw new Error("Invalid Stellar secret key. Must be S followed by 55 base32 characters.");
   }
 
+  // Derive the public address locally — no network call needed.
   let publicKey: string;
   try {
     const { Keypair } = await import("@stellar/stellar-sdk");
-    const keypair = Keypair.fromSecret(secretKey);
-    publicKey = keypair.publicKey();
+    publicKey = Keypair.fromSecret(secretKey).publicKey();
   } catch (err) {
     throw new Error(`Failed to derive public key: ${safeErrorMessage(err)}`);
   }
 
-  if (persist) {
-    setActiveProfileName(target);
-    activeProfile().wallet = { publicKey, secretKey };
-    saveState();
+  // Normalise confirm using the same vocabulary as the reset guard.
+  const confirmed = isImportConfirmed(args.confirm);
+
+  if (!confirmed) {
+    // Preview mode: show everything the agent needs to verify, write nothing.
     return [
-      `Wallet imported.`,
-      `Profile: ${target}`,
-      `Address: ${publicKey}`,
-      `Wallet persisted to ${STATE_FILE} (mode 0600).`,
+      `Wallet NOT imported — confirmation required.`,
+      `Derived address: ${publicKey}`,
+      `Target profile:  ${target}`,
+      `Network:         ${NETWORK} (${STELLAR_NETWORK})`,
+      ``,
+      `Verify the address above belongs to the intended wallet.`,
+      `To save it, call mindvault_import_wallet again with confirm: true.`,
     ].join("\n");
   }
 
+  // Confirmed: persist and return confirmation (secret never in output).
+  setActiveProfileName(target);
+  activeProfile().wallet = { publicKey, secretKey };
+  saveState();
   return [
-    `Wallet validated (not persisted).`,
+    `Wallet imported.`,
+    `Profile: ${target}`,
     `Address: ${publicKey}`,
-    `Pass persist: true to save to the state file.`,
+    `Network: ${NETWORK} (${STELLAR_NETWORK})`,
+    `Wallet persisted to ${STATE_FILE} (mode 0600).`,
   ].join("\n");
+}
+
+/**
+ * Whether an importWallet call carries explicit confirmation.
+ *
+ * Accepts the same vocabulary as the reset guard (true, 1, "true", "1",
+ * "yes") so agents that already know the confirmation pattern need no
+ * new spellings.
+ */
+export function isImportConfirmed(value: unknown): boolean {
+  if (value === true || value === 1) return true;
+  if (typeof value !== "string") return false;
+  return ["true", "1", "yes"].includes(value.trim().toLowerCase());
 }
 
 export async function rotatePublisherKey(profileArg?: string): Promise<string> {

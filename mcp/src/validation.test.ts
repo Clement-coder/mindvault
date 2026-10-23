@@ -86,6 +86,13 @@ const VALID_CALLS: Record<string, Record<string, unknown>> = {
     externalUrl: "https://example.com/data.json",
   },
   mindvault_buy: { resourceId: "res-001" },
+  mindvault_buy_lease: { resourceId: "res-001", tier: "day" },
+  mindvault_lease_status: {
+    resourceId: "res-001",
+    holder: "GA6HCMBLTZS5VYYBCATRBRZ3BZJMAFUDKYYF6AH6MVCMGWMRDNSWJPIH",
+  },
+  mindvault_import_profiles: { data: "{}" },
+  mindvault_export_profiles: {},
   mindvault_export_receipts: {},
   mindvault_register_onchain: { resourceId: "res-001" },
   mindvault_agent_status: {},
@@ -97,6 +104,7 @@ const VALID_CALLS: Record<string, Record<string, unknown>> = {
   mindvault_network_profile: {},
   mindvault_check_bindings: {},
   mindvault_check_consistency: { resourceId: "res-001" },
+  mindvault_metadata_diff: { resourceId: "res-001" },
   mindvault_verify_attestation: {
     resourceId: "res001",
     attestationHash: "a".repeat(64),
@@ -105,6 +113,10 @@ const VALID_CALLS: Record<string, Record<string, unknown>> = {
   mindvault_registry_list: {},
   mindvault_registry_count: {},
   mindvault_registry_count: {},
+  mindvault_registry_creator_page: {
+    creator: "GA6HCMBLTZS5VYYBCATRBRZ3BZJMAFUDKYYF6AH6MVCMGWMRDNSWJPIH",
+  },
+  mindvault_registry_tag_search: { prefix: "dat" },
   mindvault_tx_status: { txHash: VALID_SHA256 },
   mindvault_reset: {},
   mindvault_backup_state: { passphrase: "correct-horse" },
@@ -123,7 +135,6 @@ const VALID_CALLS: Record<string, Record<string, unknown>> = {
   mindvault_cancel_transfer: { resourceId: "res-001" },
   mindvault_pending_transfer: { resourceId: "res-001" },
   mindvault_set_listed: { resourceId: "res-001", listed: true },
-  mindvault_dispute: { resourceId: "res-001", action: "flag", reason: "Duplicate listing" },
   mindvault_set_tags: { resourceId: "res-001", tags: ["dataset"] },
   mindvault_freeze: { resourceId: "res-001", confirm: "freeze_metadata" },
   mindvault_fee_config: {},
@@ -140,6 +151,9 @@ const VALID_CALLS: Record<string, Record<string, unknown>> = {
   mindvault_rotate_publisher_key: {},
   mindvault_verify_install: {},
   mindvault_debug_bundle: { auditLogLines: 50, includeEnvironment: true },
+  mindvault_onchain_preflight: { requestedSchemaVersion: 7 },
+  mindvault_migration_preview: {},
+  mindvault_support_bundle: { incidentId: "mv-01hq7x9k2m4p6r8t0v2w4y6a8c", auditLines: 100 },
   mindvault_recover_catalog_cache: {},
   mindvault_wallet_balances: {},
   mindvault_server_endpoints: {},
@@ -374,6 +388,88 @@ describe("string arguments", () => {
   });
 });
 
+describe("outbound URL safety (#1078)", () => {
+  const publish = (externalUrl: string) =>
+    validateToolArgs("mindvault_publish", { title: "T", price: "1.00", externalUrl });
+
+  it("accepts a public http(s) externalUrl", () => {
+    expect(publish("https://example.com/data.json")).toMatchObject({
+      externalUrl: "https://example.com/data.json",
+    });
+  });
+
+  it.each([
+    "http://127.0.0.1/x",
+    "http://169.254.169.254/latest/meta-data/",
+    "http://10.0.0.1/x",
+    "http://192.168.1.1/x",
+    "http://[::1]/x",
+    "http://[fe80::1]/x",
+  ])("rejects the private/loopback externalUrl %s", (externalUrl) => {
+    const err = expectInvalid("mindvault_publish", { title: "T", price: "1.00", externalUrl });
+    expect(err.issues[0].field).toBe("externalUrl");
+    expect(err.issues[0].code).toBe("blocked_url");
+  });
+
+  it.each(["http://localhost:4021/x", "http://api.internal/x", "http://svc.local/x"])(
+    "rejects the local-name externalUrl %s",
+    (externalUrl) => {
+      const err = expectInvalid("mindvault_publish", { title: "T", price: "1.00", externalUrl });
+      expect(err.issues[0].code).toBe("blocked_url");
+    },
+  );
+
+  it("rejects an http(s) metadata pointer to a private host", () => {
+    const err = expectInvalid("mindvault_update_metadata", {
+      resourceId: "res-001",
+      metadata: "http://169.254.169.254/meta.json",
+    });
+    expect(err.issues[0].field).toBe("metadata");
+    expect(err.issues[0].code).toBe("blocked_url");
+  });
+
+  it("accepts a non-URL metadata pointer without host checks", () => {
+    expect(() =>
+      validateToolArgs("mindvault_update_metadata", {
+        resourceId: "res-001",
+        metadata: "ipfs://QmXoypizjW3WknFiJnKLwHCnL72vedxjQkDDP1mXWo6uco",
+      }),
+    ).not.toThrow();
+    expect(() =>
+      validateToolArgs("mindvault_update_metadata", {
+        resourceId: "res-001",
+        metadata: "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      }),
+    ).not.toThrow();
+  });
+
+  it("accepts a public http(s) metadata pointer", () => {
+    expect(() =>
+      validateToolArgs("mindvault_update_metadata", {
+        resourceId: "res-001",
+        metadata: "https://example.com/meta.json",
+      }),
+    ).not.toThrow();
+  });
+
+  it("honours MINDVAULT_URL_ALLOWLIST for a private host", () => {
+    const previous = process.env.MINDVAULT_URL_ALLOWLIST;
+    process.env.MINDVAULT_URL_ALLOWLIST = "10.0.0.5";
+    try {
+      expect(() =>
+        validateToolArgs("mindvault_publish", {
+          title: "T",
+          price: "1.00",
+          externalUrl: "http://10.0.0.5/x",
+        }),
+      ).not.toThrow();
+    } finally {
+      if (previous === undefined) delete process.env.MINDVAULT_URL_ALLOWLIST;
+      else process.env.MINDVAULT_URL_ALLOWLIST = previous;
+    }
+  });
+});
+
 describe("enum arguments", () => {
   it("accepts every advertised literal", () => {
     for (const status of ["pending", "verified", "rejected", "skipped"]) {
@@ -470,10 +566,16 @@ describe("stellar_address arguments", () => {
       validateToolArgs("mindvault_terms", { operation: "get", creator: VALID_PUBLIC_KEY }),
     ).not.toThrow();
     expect(() =>
-      validateToolArgs("mindvault_royalty", { resourceId: "res-001", royaltyRecipient: VALID_PUBLIC_KEY }),
+      validateToolArgs("mindvault_royalty", {
+        resourceId: "res-001",
+        royaltyRecipient: VALID_PUBLIC_KEY,
+      }),
     ).not.toThrow();
     expect(() =>
-      validateToolArgs("mindvault_lease_status", { resourceId: "res-001", holder: VALID_PUBLIC_KEY }),
+      validateToolArgs("mindvault_lease_status", {
+        resourceId: "res-001",
+        holder: VALID_PUBLIC_KEY,
+      }),
     ).not.toThrow();
     expect(() =>
       validateToolArgs("mindvault_register", {

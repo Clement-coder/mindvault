@@ -51,6 +51,10 @@ so clients can branch without parsing any text. Its versioned shape is:
 response remains unchanged for MCP clients that do not consume structured
 content.
 
+`requestId` is optional and present when the upstream reported one — the
+`x-request-id` the MindVault server echoes, which is the id its logs are
+written under.
+
 The mapping is a pure function of `(source, status, payload)` — the same failure
 always produces the same text, so agent behavior is reproducible.
 
@@ -129,6 +133,40 @@ Next: The request signature was rejected because its timestamp fell outside the 
 The other signature 401s (`Missing X-Timestamp`, `Missing X-Signature`,
 `Invalid request signature`) are signing bugs and stay on the generic auth/revoked
 path. See [request-signature.md](./request-signature.md#client-side-clock-skew-diagnostics).
+
+## Non-JSON upstream responses
+
+Not every failure comes from the MindVault API. A misconfigured reverse proxy
+answers `502` with an HTML page, a WAF answers `403` with a captcha form, a load
+balancer answers `503` with plain text, and a corporate gateway answers `407`
+with an HTML login prompt. None of those bodies carry the `error` / `message`
+field the mapper looks for, so before this was handled the raw markup flowed
+straight into the error an agent read — and an HTML error page can echo back
+whatever it was sent, including an `Authorization` header or a publisher API key.
+
+A body that is not JSON is therefore turned into a typed marker
+(`MV_MALFORMED_RESPONSE`) before it reaches the mapper. The marker keeps the
+status, the upstream's request id, the content type and the body size, and
+carries a short excerpt that has been through the shared secret redaction. The
+raw body stops there: it never reaches the tool result, the log, or the agent.
+
+```text
+Browse failed: the upstream returned a non-JSON body (text/html) [HTTP 502, 105 bytes, request id req-42]: <html><head>…</head></html>
+Source: MindVault API · Category: server · HTTP 502
+Next: The upstream answered with a non-JSON body (a proxy, gateway or load balancer usually does this), so the request may not have reached the service at all. Retry once; if it persists, quote the request id above when reporting the failure.
+```
+
+Two details carry weight here:
+
+- **The credential branches are skipped.** A `401` with a non-JSON body is not
+  a revoked key — the service never saw the request. Blaming the credential
+  would send an agent off to replace a key that was never the problem.
+- **The request id is preserved.** It is the only handle on a request that
+  never became a server log line, and it is what makes the failure
+  reportable.
+
+The failure is classified as `server` and is **safe to retry**: nothing was
+committed, because the request did not reach the service.
 
 ## API health preflight before mutations
 

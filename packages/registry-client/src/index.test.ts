@@ -143,6 +143,11 @@ describe("generated bindings (drift guard)", () => {
     48: "DuplicateTxHash",
     49: "FeeConfigNotSet",
     50: "AdminNominationExpired",
+    51: "InvalidMetadataPointers",
+    52: "AdminAlreadySet",
+    53: "RecoveryAdminNotSet",
+    54: "UnsupportedResourceSchema",
+    55: "RevisionOverflow",
   };
   // The full set of contract methods consumers call, mirroring the contract's
   // METHOD_SCHEMA. Adding, removing or renaming a contract function changes
@@ -157,49 +162,73 @@ describe("generated bindings (drift guard)", () => {
     "admin",
     "anchor_purchase_receipt",
     "attempt_anchor_purchase_receipt",
+    "bootstrap_dual_admin",
+    "buy_lease",
     "cancel_transfer",
+    "check_tag_index",
+    "compute_attestation_hash",
     "contract_version",
     "count",
+    "creator_earnings_estimate",
     "creator_listed_count",
     "creator_resource_count",
     "delist",
     "emergency_delist",
     "exists",
     "exists_many",
+    "export_page",
     "extend_resource_ttl",
     "flag_details",
     "flag_resource",
     "freeze_metadata",
     "freeze_resource",
     "get",
+    "get_anchor_attempts",
     "get_anchor_failure",
     "get_attestation_hash",
     "get_fee_config",
     "get_fee_destination",
     "get_flag_reason_hash",
+    "get_lease",
     "get_many",
     "get_memo_hash",
+    "get_metadata_pointers",
     "get_owner",
     "get_owner_many",
     "get_payment",
     "get_payment_receipt",
     "get_purchase_receipt",
+    "get_refund",
+    "get_refund_deadline",
+    "get_refunded_amount",
     "get_resource_state",
+    "get_resource_states",
+    "get_revision",
     "get_terms_hash",
+    "get_verifier_status_history",
     "initialize_network",
     "is_flagged",
     "is_moderator",
     "is_paused",
     "is_settler",
     "is_verifier",
+    "lease_is_active",
+    "lease_price",
     "list",
     "list_by_creator",
+    "list_by_creator_page",
+    "list_by_creator_page_filtered",
     "list_by_dispute_status",
+    "list_by_dispute_status_page",
+    "list_by_state",
     "list_by_tag",
+    "list_by_tag_page",
     "list_by_verification_status",
     "list_listed",
+    "list_listed_page",
     "list_page",
     "listed_count",
+    "migrate_resource",
     "network_id",
     "nominate_new_admin",
     "open_dispute",
@@ -209,9 +238,15 @@ describe("generated bindings (drift guard)", () => {
     "pending_admin_expiry",
     "propose_transfer",
     "reactivate_resource",
+    "record_admin_refund",
     "record_anchor_failure",
+    "record_creator_refund",
+    "record_lease",
     "record_payment",
     "record_payment_idempotent",
+    "recover_admin",
+    "recovery_admin",
+    "refund_window",
     "register",
     "register_batch",
     "register_with_hash",
@@ -223,39 +258,39 @@ describe("generated bindings (drift guard)", () => {
     "repair_index",
     "repair_tag_index",
     "resolve_dispute",
+    "resource_schema_version",
     "retry_anchor_purchase_receipt",
+    "revoke_lease",
     "rotate_verifier",
+    "search_by_tag_prefix",
     "set_fee_config",
     "set_fee_destination",
     "set_fee_recipient",
     "set_flag_reason_hash",
     "set_listed",
+    "set_metadata_pointers",
     "set_paused",
     "set_paused_until",
     "set_price",
     "set_price_many",
+    "set_recovery_admin",
+    "set_refund_window",
+    "set_registry_terms_hash",
     "set_royalty_recipient",
     "set_tags",
-    "top_tags",
     "set_terms_hash",
     "set_verification_status",
+    "settle_lease",
     "settle_payment",
+    "state_digest",
     "tombstone_resource",
+    "top_tags",
     "transfer_ownership",
+    "transfer_ownership_with_terms",
     "unflag_resource",
     "update_metadata",
-    "list_listed_page",
-    "list_by_dispute_status_page",
-    "list_by_creator_page",
-    "list_by_tag_page",
-    "get_anchor_attempts",
-    "buy_lease",
-    "record_lease",
-    "settle_lease",
-    "revoke_lease",
-    "get_lease",
-    "lease_is_active",
-    "lease_price",
+    "update_metadata_many",
+    "verify_attestation_hash",
   ];
 
   it("re-exports the generated Client and Errors", () => {
@@ -336,6 +371,60 @@ describe("getAttestationHash", () => {
         resourceId: "res1",
       }),
     ).rejects.toThrow("does not expose get_attestation_hash");
+  });
+});
+
+/**
+ * The contract spec entry for `name`, read off the client's own spec.
+ *
+ * The generated client builds its methods from the spec, so the spec is where
+ * a renamed or re-ordered argument shows up first.
+ */
+function specFunc(client: Client, name: string) {
+  const spec = (
+    client as unknown as {
+      spec: {
+        funcs: () => Array<{
+          name: () => Uint8Array;
+          inputs: () => Array<{ name: () => Uint8Array }>;
+        }>;
+      };
+    }
+  ).spec;
+  return spec.funcs().find((f) => Buffer.from(f.name()).toString("utf8") === name);
+}
+
+/** The argument names of a spec function, in declaration order. */
+function specArgNames(fn: { inputs: () => Array<{ name: () => Uint8Array }> }): string[] {
+  return fn.inputs().map((a) => Buffer.from(a.name()).toString("utf8"));
+}
+
+describe("on-chain listing methods", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const contractId = networks.testnet.defaultRegistryContractId!;
+  const rpcUrl = networks.testnet.sorobanRpcUrl;
+
+  it("exposes the filtered creator page and the tag-prefix search", () => {
+    const client = createRegistryClient({ contractId, rpcUrl });
+    expect(typeof client.list_by_creator_page_filtered).toBe("function");
+    expect(typeof client.search_by_tag_prefix).toBe("function");
+  });
+
+  it("carries the creator, cursor, limit and filters in the contract spec", () => {
+    const client = createRegistryClient({ contractId, rpcUrl });
+    const fn = specFunc(client, "list_by_creator_page_filtered");
+    expect(fn).toBeDefined();
+    expect(specArgNames(fn!)).toEqual(["creator", "cursor", "limit", "listed", "state"]);
+  });
+
+  it("carries the prefix, cursor and limit in the contract spec", () => {
+    const client = createRegistryClient({ contractId, rpcUrl });
+    const fn = specFunc(client, "search_by_tag_prefix");
+    expect(fn).toBeDefined();
+    expect(specArgNames(fn!)).toEqual(["prefix", "cursor", "limit"]);
   });
 });
 

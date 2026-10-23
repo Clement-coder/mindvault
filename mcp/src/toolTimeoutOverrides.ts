@@ -28,9 +28,22 @@
  */
 
 import type { TimeoutBudgets, TimeoutService } from "./httpTimeout.js";
+import { isTimeoutDisabled } from "./httpTimeout.js";
 
 /** Environment variable holding the per-tool override list. */
 export const TOOL_TIMEOUTS_ENV_VAR = "MINDVAULT_TOOL_TIMEOUTS";
+
+/**
+ * Environment variable that caps every per-tool timeout override.
+ *
+ * A tool override that would exceed this cap is treated as invalid and causes
+ * startup to fail with a clear message. Setting the cap to `0` disables the
+ * transport/server deadline ceiling.
+ */
+export const TRANSPORT_TIMEOUT_MAX_ENV_VAR = "MINDVAULT_TRANSPORT_TIMEOUT_MAX_MS";
+
+/** Default ceiling applied to per-tool timeout overrides (milliseconds). */
+export const DEFAULT_TRANSPORT_TIMEOUT_MAX_MS = 300_000;
 
 /** Prefix every MCP tool name carries; optional in the override list. */
 const TOOL_PREFIX = "mindvault_";
@@ -99,6 +112,29 @@ export function resolveToolTimeouts(env: NodeJS.ProcessEnv = process.env): Parse
   return parseToolTimeouts(env[TOOL_TIMEOUTS_ENV_VAR]);
 }
 
+/** Parse the transport/server request deadline cap from the environment. */
+export function parseTransportTimeoutMax(raw: string | undefined): number {
+  if (raw == null || raw.trim() === "") return DEFAULT_TRANSPORT_TIMEOUT_MAX_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_TRANSPORT_TIMEOUT_MAX_MS;
+  return Math.floor(parsed);
+}
+
+/** Resolve the transport/server request deadline cap from the environment. */
+export function resolveTransportTimeoutMax(env: NodeJS.ProcessEnv = process.env): number {
+  return parseTransportTimeoutMax(env[TRANSPORT_TIMEOUT_MAX_ENV_VAR]);
+}
+
+/**
+ * The effective request deadline: when a cap is set (and not disabled),
+ * overrides may not exceed it. Returns the cap when finite and > 0,
+ * otherwise `Infinity` meaning "no ceiling".
+ */
+export function effectiveRequestDeadline(maxTransportMs: number): number {
+  if (isTimeoutDisabled(maxTransportMs)) return Number.POSITIVE_INFINITY;
+  return maxTransportMs;
+}
+
 /**
  * The budget a given tool should run under.
  *
@@ -124,6 +160,41 @@ export function hasOverride(
   overrides: ToolTimeoutOverrides,
 ): boolean {
   return toolName !== undefined && normalizeToolName(toolName) in overrides;
+}
+
+/**
+ * Validate that every per-tool override remains within the effective request
+ * deadline (transport/server). Returns a list of human-readable errors.
+ */
+export function validateToolTimeoutOverrides(
+  overrides: ToolTimeoutOverrides,
+  maxTransportMs: number,
+): string[] {
+  const errors: string[] = [];
+  const deadline = effectiveRequestDeadline(maxTransportMs);
+  if (deadline === Number.POSITIVE_INFINITY) return errors;
+
+  const names = Object.keys(overrides).sort();
+  for (const name of names) {
+    const value = overrides[name];
+    if (value === 0) continue;
+    if (value > deadline) {
+      errors.push(
+        `Tool timeout override for ${name} (${value}ms) exceeds the effective request deadline (${deadline}ms).`,
+      );
+    }
+  }
+  return errors;
+}
+
+/** Throw a startup error when a tool timeout override exceeds the deadline. */
+export function assertToolTimeoutOverridesWithinDeadline(
+  overrides: ToolTimeoutOverrides,
+  maxTransportMs: number,
+): void {
+  const errors = validateToolTimeoutOverrides(overrides, maxTransportMs);
+  if (errors.length === 0) return;
+  throw new Error(`Invalid per-tool timeout configuration: ${errors.join(" ")}`);
 }
 
 /**

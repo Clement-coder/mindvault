@@ -101,7 +101,7 @@ describe("concurrent state writes (#591)", () => {
         dispatchTool("mindvault_import_wallet", {
           secretKey: id.secretKey,
           profile: id.profile,
-          persist: true,
+          confirm: true,
         }),
       ),
     );
@@ -121,7 +121,7 @@ describe("concurrent state writes (#591)", () => {
         dispatchTool("mindvault_import_wallet", {
           secretKey: id.secretKey,
           profile: id.profile,
-          persist: true,
+          confirm: true,
         }),
       ),
     );
@@ -148,7 +148,7 @@ describe("concurrent state writes (#591)", () => {
         dispatchTool("mindvault_import_wallet", {
           secretKey: id.secretKey,
           profile: id.profile,
-          persist: true,
+          confirm: true,
         }),
       ),
     );
@@ -183,7 +183,7 @@ describe("concurrent state writes (#591)", () => {
         dispatchTool("mindvault_import_wallet", {
           secretKey: id.secretKey,
           profile: id.profile,
-          persist: true,
+          confirm: true,
         }),
       ),
     );
@@ -199,12 +199,12 @@ describe("concurrent state writes (#591)", () => {
     const good = makeIdentities(4, "after-failure");
 
     const results = await Promise.allSettled([
-      dispatchTool("mindvault_import_wallet", { secretKey: "not-a-stellar-key", persist: true }),
+      dispatchTool("mindvault_import_wallet", { secretKey: "not-a-stellar-key", confirm: true }),
       ...good.map((id) =>
         dispatchTool("mindvault_import_wallet", {
           secretKey: id.secretKey,
           profile: id.profile,
-          persist: true,
+          confirm: true,
         }),
       ),
     ]);
@@ -230,7 +230,7 @@ describe("concurrent state writes (#591)", () => {
         dispatchTool("mindvault_import_wallet", {
           secretKey: id.secretKey,
           profile: id.profile,
-          persist: true,
+          confirm: true,
         }),
       ),
       ...Array.from({ length: CONCURRENCY }, () => dispatchTool("mindvault_list_profiles", {})),
@@ -250,7 +250,7 @@ describe("concurrent state writes (#591)", () => {
     await dispatchTool("mindvault_import_wallet", {
       secretKey: seed.secretKey,
       profile: seed.profile,
-      persist: true,
+      confirm: true,
     });
     chmodSync(STATE_FILE, 0o400);
 
@@ -260,7 +260,7 @@ describe("concurrent state writes (#591)", () => {
         dispatchTool("mindvault_import_wallet", {
           secretKey: id.secretKey,
           profile: id.profile,
-          persist: true,
+          confirm: true,
         }),
       ),
     );

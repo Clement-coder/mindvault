@@ -36,6 +36,7 @@ import { explorerTxUrl } from "../stellarExplorer.js";
 import { stroopsToUsdc } from "../usdcAmount.js";
 import { transferUsdc, UsdcTransferError } from "../usdcTransfer.js";
 import { mockBuyLease, mockLeaseStatus } from "../mock.js";
+import { txPhaseFields } from "../txPhases.js";
 
 export const LEASE_TIER_NAMES = ["hour", "day", "week"] as const;
 export type LeaseTierName = (typeof LEASE_TIER_NAMES)[number];
@@ -283,6 +284,7 @@ export async function buyLease(
   return JSON.stringify(
     {
       status: "success",
+      ...txPhaseFields("settled"),
       ...intent,
       paymentTxHash: payment.txHash,
       paymentExplorerUrl: explorerTxUrl(payment.txHash),

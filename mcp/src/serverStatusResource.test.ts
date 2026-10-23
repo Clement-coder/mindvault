@@ -188,7 +188,7 @@ describe("mindvault://server/status through the MCP server", () => {
     const wallet = Keypair.random();
     const imported: any = await client.callTool({
       name: "mindvault_import_wallet",
-      arguments: { secretKey: wallet.secret(), profile: "alice.personal", persist: true },
+      arguments: { secretKey: wallet.secret(), profile: "alice.personal", confirm: true },
     });
     expect(imported.isError).toBeFalsy();
 

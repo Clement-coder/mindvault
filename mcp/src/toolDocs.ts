@@ -35,19 +35,41 @@ export const REGENERATE_COMMAND = "pnpm --filter @mindvault/mcp generate-tool-do
  * rather than a single flat list.
  */
 export function groupOf(name: string): string {
-  if (["mindvault_setup_wallet", "mindvault_wallet_info", "mindvault_import_wallet"].includes(name))
+  if (
+    [
+      "mindvault_setup_wallet",
+      "mindvault_wallet_info",
+      "mindvault_import_wallet",
+      "mindvault_repair_sponsored_account",
+      "mindvault_wallet_balances",
+    ].includes(name)
+  )
     return "Wallet";
   if (
-    ["mindvault_use_profile", "mindvault_list_profiles", "mindvault_export_profiles", "mindvault_import_profiles"].includes(name)
+    [
+      "mindvault_use_profile",
+      "mindvault_list_profiles",
+      "mindvault_export_profiles",
+      "mindvault_import_profiles",
+      "mindvault_switch_network_profile",
+    ].includes(name)
   )
     return "Profiles";
-  if (["mindvault_browse", "mindvault_search", "mindvault_preview"].includes(name))
+  if (
+    [
+      "mindvault_browse",
+      "mindvault_search",
+      "mindvault_preview",
+      "mindvault_prewarm_catalog",
+    ].includes(name)
+  )
     return "Catalog";
   if (
     [
       "mindvault_register",
       "mindvault_publish",
       "mindvault_publish_status",
+      "mindvault_publish_batch",
       "mindvault_buy",
       "mindvault_buy_lease",
       "mindvault_lease_status",
@@ -62,6 +84,12 @@ export function groupOf(name: string): string {
       "mindvault_set_tags",
       "mindvault_transfer_ownership",
       "mindvault_set_listed",
+      "mindvault_accept_transfer",
+      "mindvault_cancel_transfer",
+      "mindvault_pending_transfer",
+      "mindvault_terms",
+      "mindvault_freeze",
+      "mindvault_royalty",
     ].includes(name)
   )
     return "On-chain Management";
@@ -71,9 +99,17 @@ export function groupOf(name: string): string {
       "mindvault_registry_lookup",
       "mindvault_registry_list",
       "mindvault_registry_health",
+      "mindvault_registry_count",
+      "mindvault_registry_creator_page",
+      "mindvault_registry_tag_search",
       "mindvault_check_consistency",
       "mindvault_check_bindings",
       "mindvault_tx_status",
+      "mindvault_onchain_preflight",
+      "mindvault_verify_attestation",
+      "mindvault_resource_provenance",
+      "mindvault_resource_change_log",
+      "mindvault_fee_config",
     ].includes(name)
   )
     return "Registry & Diagnostics";
@@ -84,6 +120,8 @@ export function groupOf(name: string): string {
       "mindvault_restore_state",
       "mindvault_reset",
       "mindvault_check_state_permissions",
+      "mindvault_migration_preview",
+      "mindvault_compare_state_backup",
     ].includes(name)
   )
     return "State Management";
@@ -95,6 +133,10 @@ export function groupOf(name: string): string {
       "mindvault_rotate_publisher_key",
       "mindvault_verify_install",
       "mindvault_debug_bundle",
+      "mindvault_support_bundle",
+      "mindvault_client_config",
+      "mindvault_mainnet_banner",
+      "mindvault_server_endpoints",
     ].includes(name)
   )
     return "Operations";

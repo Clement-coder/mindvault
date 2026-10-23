@@ -202,6 +202,9 @@ and the hosted MindVault backend.
 | `MINDVAULT_PURCHASES_FILE`        | `~/.mindvault/purchases.json`                          | Where purchase receipts are stored, read by `mindvault_purchase_history` and `mindvault_export_receipts`         |
 | `MINDVAULT_RESOURCE_HISTORY_FILE` | `~/.mindvault/resource-history.jsonl`                  | Append-only audit path used by the resource provenance and change-log tools                                      |
 | `MINDVAULT_MAX_AUTO_PAY_USDC`     | `10`                                                   | Ceiling on an x402 payment `mindvault_buy` will make without `maxAutoPayUsdc` ([docs](environment-variables.md)) |
+| `HTTP_PROXY`                      | unset                                                  | Proxy URL for `http:` requests. Credentials in the URL are redacted from logs and diagnostics                    |
+| `HTTPS_PROXY`                     | unset                                                  | Proxy URL for `https:` requests. Credentials in the URL are redacted from logs and diagnostics                   |
+| `NO_PROXY`                        | unset                                                  | Comma-separated hosts that bypass the proxy (`*`, `.domain`, `host:port`)                                        |
 
 Overriding a network value without changing `STELLAR_NETWORK` is a common
 mistake, so the server cross-checks them at startup and refuses to launch on a

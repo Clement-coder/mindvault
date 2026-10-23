@@ -118,3 +118,16 @@ rebuilding from an authoritative list (including dropping an id from the
 index while it stays readable via `get`), rejecting an unknown id with no
 partial write, rejecting duplicate ids, requiring an admin first, and
 re-running the current list as a safe no-op.
+
+## Bounded continuation groundwork
+
+The current `repair_index(ids)` remains the compatibility entry point and still
+validates and writes the full supplied list in one transaction. The contract
+now defines `INDEX_REPAIR_PAGE_CAP`, `IndexRepairProgress`, and
+`IndexRepairPage` as the schema foundation for a bounded continuation API.
+These types do not yet change runtime behavior or expose a new method. A live
+continuation implementation must persist and enforce the returned cursor,
+reject out-of-order/replayed pages, preserve duplicate detection across page
+boundaries, and keep partially written indexes from appearing complete. Until
+those guarantees are implemented, operators should continue using
+`repair_index` only when the full list fits within transaction resource limits.

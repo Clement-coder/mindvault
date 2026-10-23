@@ -9,11 +9,17 @@ export function createSingleFlight<T>() {
       const request = Promise.resolve().then(load);
       pending.set(key, request);
       void request.then(
-        () => { if (pending.get(key) === request) pending.delete(key); },
-        () => { if (pending.get(key) === request) pending.delete(key); },
+        () => {
+          if (pending.get(key) === request) pending.delete(key);
+        },
+        () => {
+          if (pending.get(key) === request) pending.delete(key);
+        },
       );
       return request;
     },
-    get pendingCount(): number { return pending.size; },
+    get pendingCount(): number {
+      return pending.size;
+    },
   };
 }

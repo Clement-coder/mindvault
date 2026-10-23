@@ -180,3 +180,33 @@ router.get("/agent/status", async (_req, res) => {
 });
 
 export default router;
+
+// Issue #1030: bounded cancellation support for long-running verification
+import type { Request, Response } from "express";
+
+export function withTimeout(ms: number, abortController?: AbortController) {
+  const controller = abortController ?? new AbortController();
+  const timeout = setTimeout(() => controller.abort(new Error("timeout")), ms);
+  return {
+    signal: controller.signal,
+    clear: () => clearTimeout(timeout),
+  };
+}
+
+export async function cancelableRequest<T>(
+  fn: (signal: AbortSignal) => Promise<T>,
+  ms: number,
+): Promise<{ status: "ok"; result: T } | { status: "canceled"; reason: string }> {
+  const { signal, clear } = withTimeout(ms);
+  try {
+    const result = await fn(signal);
+    clear();
+    return { status: "ok", result };
+  } catch (err: any) {
+    clear();
+    if (err?.name === "AbortError" || signal.aborted) {
+      return { status: "canceled", reason: "timeout" };
+    }
+    throw err;
+  }
+}

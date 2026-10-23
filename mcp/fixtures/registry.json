@@ -10,19 +10,19 @@
   "resources": [
     {
       "id": "mock-1",
-      "creator": "GMOCKCREATOR1",
+      "creator": "GA6HCMBLTZS5VYYBCATRBRZ3BZJMAFUDKYYF6AH6MVCMGWMRDNSWJPIH",
       "price": "1.5000000 USDC",
       "metadata": "Intro to Stellar",
       "listed": true,
-      "tags": []
+      "tags": ["dataset", "stellar"]
     },
     {
       "id": "mock-2",
-      "creator": "GMOCKCREATOR2",
+      "creator": "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
       "price": "0.5000000 USDC",
       "metadata": "x402 Cheat Sheet",
       "listed": true,
-      "tags": []
+      "tags": ["guide", "x402"]
     }
   ],
   "contract": "MOCK_CONTRACT_ID"

@@ -121,6 +121,7 @@ describe("paidOperationClass", () => {
       "mindvault_publish",
       "mindvault_publish_batch",
       "mindvault_buy",
+      "mindvault_buy_lease",
     ]);
   });
 

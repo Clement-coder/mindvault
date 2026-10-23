@@ -86,8 +86,9 @@ export function txStatusLookup(txHash: string) {
 
 /**
  * The result a registry mutation returns when its transaction was submitted
- * but not confirmed: `status: "submitted"`, the hash, and how to check it.
- * Fits the same `status`/`resourceId`/`txHash` shape as a confirmed result.
+ * but not confirmed: `status: "submitted"`, `txPhase: "submitted"`, the hash,
+ * and how to check it. Fits the same `status`/`resourceId`/`txHash` shape as a
+ * confirmed result.
  */
 export function submittedUnconfirmedResult(
   operation: string,
@@ -97,6 +98,7 @@ export function submittedUnconfirmedResult(
 ) {
   return {
     status: "submitted" as const,
+    txPhase: "submitted" as const,
     resourceId,
     ...fields,
     txHash: unconfirmed.txHash,

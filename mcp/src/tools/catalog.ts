@@ -156,14 +156,16 @@ async function previewDataUnshared(resourceId: string): Promise<{ r: any; label:
 
 export async function preview(resourceId: string): Promise<string> {
   const { r, label } = await previewData(resourceId);
+  // Every advertised field is required (#1065): a value the API left out is
+  // reported as null rather than dropped by JSON.stringify.
   const out: Record<string, unknown> = {
-    id: r.id,
-    title: r.title,
-    description: r.description,
-    price: `$${r.price} USDC`,
-    type: r.resourceType,
-    verificationStatus: r.verificationStatus,
-    accessUrl: r.accessUrl,
+    id: r.id ?? null,
+    title: r.title ?? null,
+    description: r.description ?? null,
+    price: r.price == null ? null : `$${r.price} USDC`,
+    type: r.resourceType ?? null,
+    verificationStatus: r.verificationStatus ?? null,
+    accessUrl: r.accessUrl ?? null,
   };
   if (label) out.offlineCache = label;
   // Publisher-supplied title/description are unbounded at the source, so cap

@@ -154,3 +154,24 @@ Every outbound HTTP request the MCP server makes — to the MindVault API, Horiz
 - **No header overwriting:** If a caller explicitly supplies `x-request-id`, that value is preserved — it is more specific than the ambient scope id.
 
 The implementation lives in `mcp/src/correlation.ts` and uses `AsyncLocalStorage` from `node:async_hooks`.
+
+---
+
+## Outbound Proxy
+
+Enterprise deployments usually reach the network through an egress proxy. The MCP server honours the conventional proxy environment variables for every outbound call — the MindVault API, Horizon, Soroban RPC, the sponsored-account service, and x402 paid fetches:
+
+| Variable      | Purpose                                                             |
+| ------------- | ------------------------------------------------------------------- |
+| `HTTP_PROXY`  | Proxy URL for `http:` requests (lowercase `http_proxy` also read)   |
+| `HTTPS_PROXY` | Proxy URL for `https:` requests (lowercase `https_proxy` also read) |
+| `NO_PROXY`    | Comma-separated hosts that bypass the proxy (lowercase also read)   |
+
+Two properties make this safe to enable:
+
+- **Direct-connect is the default.** With no proxy variable set, nothing changes: every request connects directly, exactly as before. A malformed proxy URL fails loudly at the first request rather than silently leaking traffic around the proxy.
+- **Credentials never appear in logs.** A proxy URL commonly embeds `user:password@` userinfo. That userinfo is stripped before a proxy URL reaches any log line, startup diagnostic, `mindvault_network_profile` output, or the debug bundle, so the host is still visible for troubleshooting while the secret is not.
+
+`NO_PROXY` follows the customary semantics: `*` bypasses everything, a leading dot (`.example.com`) matches a domain suffix, a bare domain (`example.com`) matches on a DNS label boundary, and `host:port` additionally requires the port to match.
+
+The implementation lives in `mcp/src/proxy.ts` and routes through an undici `ProxyAgent` attached as the fetch dispatcher for requests a proxy applies to. Proxy URLs are redacted by `mcp/src/redaction.ts` and `mcp/src/diagnostics.ts`.

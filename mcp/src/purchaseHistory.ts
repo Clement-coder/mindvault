@@ -38,6 +38,15 @@ export interface PurchaseReceipt {
   /** Optional resource title for agent-friendly listing. */
   title?: string;
   /**
+   * Client-generated idempotency key for this purchase attempt (#1027).
+   *
+   * The buy path derives it once per logical purchase and reuses it across
+   * transport reconnects and retries, so a lost response can be resolved to
+   * the original receipt instead of paying twice. Optional because receipts
+   * written before this field existed do not have one.
+   */
+  clientIdempotencyKey?: string;
+  /**
    * Wallet profile the purchase was made under (#584).
    *
    * Optional because receipts written before this field existed do not have
@@ -65,6 +74,91 @@ export interface PurchaseHistoryFilter {
    * receipts recorded before profiles were tracked.
    */
   profile?: string;
+  /**
+   * Exact match on the client idempotency key of a purchase attempt (#1028).
+   * An agent that lost a buy response before a receipt arrived can send the
+   * key it already used and see whether that attempt produced a receipt.
+   */
+  idempotencyKey?: string;
+}
+
+/**
+ * Lifecycle of a purchase attempt as seen from a locally persisted receipt
+ * (#1028). A receipt only exists once the buy response arrived, so the store
+ * can distinguish an unknown attempt (no receipt), a settled one (receipt with
+ * a tx hash), and a submitted-but-unconfirmed one (receipt without a hash).
+ * "failed" is reported when the receipt was recorded for a resource whose
+ * settlement is known to have failed.
+ */
+export type PurchaseStatus = "unknown" | "pending" | "settled" | "failed";
+
+/**
+ * Classify a persisted receipt into a purchase status (#1028).
+ *
+ * The local store is the client's own record: it cannot see an in-flight
+ * server payment, so "pending" means "a receipt exists but no on-chain hash
+ * was captured" — the honest state for a response that arrived before
+ * settlement, or before the hash was available.
+ */
+export function purchaseStatusOf(receipt: PurchaseReceipt): PurchaseStatus {
+  if (receipt.txHash) return "settled";
+  return "pending";
+}
+
+/** A lookup result for one client idempotency key (#1028). */
+export interface PurchaseStatusLookup {
+  idempotencyKey: string;
+  status: PurchaseStatus;
+  /** The matching receipt, or null when no attempt with this key is known. */
+  receipt: PurchaseReceipt | null;
+  message: string;
+}
+
+/**
+ * Resolve a purchase attempt by its client idempotency key (#1028).
+ *
+ * Lookup is scoped to the active profile: a receipt recorded under another
+ * profile is never returned, so one buyer cannot read another's purchase. An
+ * unknown key yields an explicit "unknown" result rather than an empty list,
+ * so an agent that lost a response learns whether the attempt is recoverable.
+ */
+export function lookupPurchaseByIdempotencyKey(
+  idempotencyKey: string,
+  options: { profile?: string; now?: () => PurchaseReceipt[] } = {},
+): PurchaseStatusLookup {
+  const key = (idempotencyKey ?? "").trim();
+  if (!key) {
+    throw new PurchaseHistoryError(
+      "idempotencyKey is required to look up a purchase attempt. Pass the key you sent with mindvault_buy.",
+    );
+  }
+  const receipts = (options.now ?? listPurchases)().filter((r) => r.clientIdempotencyKey === key);
+  const scoped = options.profile
+    ? receipts.filter((r) => profileOf(r) === options.profile)
+    : receipts;
+  const match = scoped[0] ?? null;
+
+  if (!match) {
+    return {
+      idempotencyKey: key,
+      status: "unknown",
+      receipt: null,
+      message:
+        "No purchase attempt with this idempotency key is recorded for this profile. " +
+        "If the original response was lost, the payment may still be in flight; check mindvault_tx_status, or retry mindvault_buy with the same key.",
+    };
+  }
+
+  const status = purchaseStatusOf(match);
+  return {
+    idempotencyKey: key,
+    status,
+    receipt: match,
+    message:
+      status === "settled"
+        ? `Resolved to the original receipt (tx ${match.txHash}). Do not pay again.`
+        : "A receipt exists but no settlement hash was recorded. Check mindvault_tx_status before retrying.",
+  };
 }
 
 export interface PurchaseHistoryFile {
@@ -99,6 +193,11 @@ function emptyStore(): PurchaseHistoryFile {
   return { version: PURCHASE_HISTORY_VERSION, epoch: PURCHASE_HISTORY_EPOCH, purchases: [] };
 }
 
+/** `null`, a string, or absent — the stored forms of a nullable receipt field. */
+function isNullableString(value: unknown): value is string | null | undefined {
+  return value === undefined || value === null || typeof value === "string";
+}
+
 function isReceipt(value: unknown): value is PurchaseReceipt {
   if (!value || typeof value !== "object") return false;
   const r = value as Record<string, unknown>;
@@ -107,10 +206,20 @@ function isReceipt(value: unknown): value is PurchaseReceipt {
     typeof r.amount === "string" &&
     typeof r.network === "string" &&
     typeof r.timestamp === "string" &&
-    (r.txHash === null || typeof r.txHash === "string") &&
-    (r.receiptRef === null || typeof r.receiptRef === "string") &&
+    isNullableString(r.txHash) &&
+    isNullableString(r.receiptRef) &&
     (r.profile === undefined || typeof r.profile === "string")
   );
+}
+
+/**
+ * `txHash` and `receiptRef` are nullable, never optional, in the published
+ * schemas (#1065). A receipt written without one (hand-edited, or by an older
+ * build that serialized `undefined`) used to be dropped from the history
+ * entirely; it is kept, with the missing value read back as `null`.
+ */
+function normalizeStoredReceipt(r: PurchaseReceipt): PurchaseReceipt {
+  return { ...r, txHash: r.txHash ?? null, receiptRef: r.receiptRef ?? null };
 }
 
 /** Load the purchase store. Corrupted / missing files yield an empty history. */
@@ -127,8 +236,11 @@ export function loadPurchaseHistory(): PurchaseHistoryFile {
     if ((raw.epoch ?? "") !== PURCHASE_HISTORY_EPOCH) {
       return emptyStore();
     }
-    const purchases = raw.purchases.filter(isReceipt);
-    return { version: PURCHASE_HISTORY_VERSION, purchases };
+    const purchases = raw.purchases.filter(isReceipt).map(normalizeStoredReceipt);
+    // Keep the epoch: `recordPurchase` persists what this returns, and a store
+    // written back without it reads as a different epoch next time, which
+    // would discard every receipt recorded so far.
+    return { version: PURCHASE_HISTORY_VERSION, epoch: PURCHASE_HISTORY_EPOCH, purchases };
   } catch {
     return emptyStore();
   }
@@ -165,6 +277,7 @@ export function recordPurchase(
     timestamp: input.timestamp ?? new Date().toISOString(),
     receiptRef: input.receiptRef ?? null,
     ...(input.title ? { title: input.title } : {}),
+    ...(input.clientIdempotencyKey ? { clientIdempotencyKey: input.clientIdempotencyKey } : {}),
     ...(input.profile ? { profile: input.profile } : {}),
   };
 
@@ -227,6 +340,22 @@ export function normalizePurchaseHistoryFilter(
     }
   }
 
+  if (
+    args.idempotencyKey !== undefined &&
+    args.idempotencyKey !== null &&
+    args.idempotencyKey !== ""
+  ) {
+    if (typeof args.idempotencyKey !== "string") {
+      throw new PurchaseHistoryError(
+        "Invalid idempotencyKey filter: expected a string idempotency key.",
+      );
+    }
+    filter.idempotencyKey = args.idempotencyKey.trim();
+    if (!filter.idempotencyKey) {
+      throw new PurchaseHistoryError("Invalid idempotencyKey filter: expected a non-empty string.");
+    }
+  }
+
   return filter;
 }
 
@@ -240,6 +369,7 @@ export function listPurchases(filter: PurchaseHistoryFilter = {}): PurchaseRecei
     if (filter.resourceId && p.resourceId !== filter.resourceId) return false;
     if (filter.network && p.network !== filter.network) return false;
     if (filter.profile && profileOf(p) !== filter.profile) return false;
+    if (filter.idempotencyKey && p.clientIdempotencyKey !== filter.idempotencyKey) return false;
     if (filter.query) {
       const query = filter.query.toLocaleLowerCase();
       if (
@@ -303,6 +433,7 @@ export function formatPurchaseHistory(
         // null when no hash was recorded (e.g. buy completed before hash was
         // available). Use mindvault_tx_status to check live settlement status.
         explorerUrl: explorerTxUrl(r.txHash, explorerNetwork),
+        status: purchaseStatusOf(r),
       })),
     },
     null,
@@ -311,8 +442,18 @@ export function formatPurchaseHistory(
 }
 
 /** Read-only tool entrypoint used by the MCP server. */
-export function purchaseHistoryTool(args?: Record<string, unknown>): string {
+export function purchaseHistoryTool(
+  args?: Record<string, unknown>,
+  options: { profile?: string } = {},
+): string {
   const filter = normalizePurchaseHistoryFilter(args);
+  if (filter.idempotencyKey) {
+    return JSON.stringify(
+      lookupPurchaseByIdempotencyKey(filter.idempotencyKey, { profile: options.profile }),
+      null,
+      2,
+    );
+  }
   return formatPurchaseHistory(listPurchases(filter), filter);
 }
 /** Test helper: wipe the configured purchases file content. */

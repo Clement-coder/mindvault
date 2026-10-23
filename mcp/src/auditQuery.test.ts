@@ -6,7 +6,9 @@ import { queryAuditLog, MAX_AUDIT_QUERY_BYTES } from "./auditQuery.js";
 
 const dir = mkdtempSync(join(tmpdir(), "mindvault-query-"));
 const path = join(dir, "audit.jsonl");
-afterEach(() => { writeFileSync(path, ""); });
+afterEach(() => {
+  writeFileSync(path, "");
+});
 
 describe("bounded audit queries", () => {
   it("composes time, tool, and outcome filters with stable offsets", () => {
@@ -17,7 +19,12 @@ describe("bounded audit queries", () => {
       { timestamp: "2026-01-04T00:00:00Z", toolName: "browse", status: "error" },
     ];
     writeFileSync(path, events.map((e) => JSON.stringify(e)).join("\n") + "\n");
-    const filters = { since: "2026-01-02T00:00:00Z", tool: "browse", outcome: "error" as const, limit: 1 };
+    const filters = {
+      since: "2026-01-02T00:00:00Z",
+      tool: "browse",
+      outcome: "error" as const,
+      limit: 1,
+    };
     const first = queryAuditLog(path, filters);
     expect(first.entries).toEqual([events[2]]);
     expect(first.nextOffset).toBe(1);
@@ -34,7 +41,13 @@ describe("bounded audit queries", () => {
   });
 
   it("caps bytes and reports omitted history", () => {
-    writeFileSync(path, JSON.stringify({ payload: "x".repeat(MAX_AUDIT_QUERY_BYTES) }) + "\n" + JSON.stringify({ toolName: "latest", status: "success" }) + "\n");
+    writeFileSync(
+      path,
+      JSON.stringify({ payload: "x".repeat(MAX_AUDIT_QUERY_BYTES) }) +
+        "\n" +
+        JSON.stringify({ toolName: "latest", status: "success" }) +
+        "\n",
+    );
     const result = queryAuditLog(path);
     expect(result.truncated).toBe(true);
     expect(result.scannedBytes).toBeLessThanOrEqual(MAX_AUDIT_QUERY_BYTES);

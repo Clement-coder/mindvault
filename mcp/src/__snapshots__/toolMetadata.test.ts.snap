@@ -4,9 +4,12 @@ exports[`MCP tool metadata > exposes the expected tool surface 1`] = `
 [
   "mindvault_setup_wallet",
   "mindvault_wallet_info",
+  "mindvault_wallet_balances",
   "mindvault_repair_sponsored_account",
   "mindvault_use_profile",
   "mindvault_list_profiles",
+  "mindvault_export_profiles",
+  "mindvault_import_profiles",
   "mindvault_switch_network_profile",
   "mindvault_browse",
   "mindvault_search",
@@ -14,6 +17,8 @@ exports[`MCP tool metadata > exposes the expected tool surface 1`] = `
   "mindvault_register",
   "mindvault_publish",
   "mindvault_buy",
+  "mindvault_buy_lease",
+  "mindvault_lease_status",
   "mindvault_export_receipts",
   "mindvault_register_onchain",
   "mindvault_agent_status",
@@ -22,18 +27,21 @@ exports[`MCP tool metadata > exposes the expected tool surface 1`] = `
   "mindvault_network_profile",
   "mindvault_check_bindings",
   "mindvault_check_consistency",
+  "mindvault_metadata_diff",
   "mindvault_verify_attestation",
   "mindvault_registry_lookup",
   "mindvault_registry_list",
-  "mindvault_batch_catalog_lookup",
-  "mindvault_preview_metadata_hash",
+  "mindvault_registry_creator_page",
+  "mindvault_registry_tag_search",
   "mindvault_registry_count",
   "mindvault_tx_status",
   "mindvault_reset",
   "mindvault_backup_state",
+  "mindvault_compare_state_backup",
   "mindvault_resource_provenance",
   "mindvault_resource_change_log",
   "mindvault_restore_state",
+  "mindvault_server_endpoints",
   "mindvault_metrics",
   "mindvault_set_tags",
   "mindvault_update_metadata",
@@ -43,7 +51,9 @@ exports[`MCP tool metadata > exposes the expected tool surface 1`] = `
   "mindvault_cancel_transfer",
   "mindvault_pending_transfer",
   "mindvault_set_listed",
-  "mindvault_dispute",
+  "mindvault_freeze",
+  "mindvault_fee_config",
+  "mindvault_royalty",
   "mindvault_check_state_permissions",
   "mindvault_registry_health",
   "mindvault_prewarm_catalog",
@@ -57,6 +67,9 @@ exports[`MCP tool metadata > exposes the expected tool surface 1`] = `
   "mindvault_publish_status",
   "mindvault_purchase_history",
   "mindvault_publish_batch",
+  "mindvault_onchain_preflight",
+  "mindvault_migration_preview",
+  "mindvault_support_bundle",
 ]
 `;
 
@@ -72,10 +85,9 @@ exports[`MCP tool metadata > mindvault_publish inputSchema 1`] = `
       "type": "boolean",
     },
     "description": {
-      "description": "Optional detailed description of the resource content. Example: 'A beginner-friendly guide covering Stellar's Federated Byzantine Agreement protocol.'",
+      "description": "Optional detailed description of the resource content (max 2048 characters).",
       "examples": [
         "A beginner-friendly guide covering Stellar's Federated Byzantine Agreement protocol.",
-        "Step-by-step tutorial on building Soroban smart contracts with Rust.",
       ],
       "type": "string",
     },
@@ -84,30 +96,27 @@ exports[`MCP tool metadata > mindvault_publish inputSchema 1`] = `
       "type": "boolean",
     },
     "externalUrl": {
-      "description": "Public URL buyers receive after payment. Example: 'https://docs.stellar.org/consensus'",
+      "description": "Public http(s) URL buyers receive after payment.",
       "examples": [
         "https://docs.stellar.org/consensus",
-        "https://example.com/soroban-tutorial",
-        "https://stellar-anchor-guide.com",
+        "https://example.com/data.json",
       ],
       "type": "string",
     },
     "price": {
-      "description": "Price in USDC (decimal string). Example: '5.00' charges 5 USDC per access.",
+      "description": "Price in USDC as a decimal string. Example: '5.00' charges 5 USDC per access.",
       "examples": [
         "5.00",
-        "10.50",
         "0.99",
         "25.00",
       ],
       "type": "string",
     },
     "title": {
-      "description": "Resource title shown in the catalog (concise, descriptive). Example: 'Intro to Stellar Consensus'",
+      "description": "Resource title shown in the catalog (concise, descriptive; 1–256 characters).",
       "examples": [
         "Intro to Stellar Consensus",
         "Soroban Smart Contract Tutorial",
-        "Stellar Anchor Guide",
       ],
       "type": "string",
     },
@@ -124,6 +133,14 @@ exports[`MCP tool metadata > mindvault_publish inputSchema 1`] = `
 exports[`MCP tool metadata > mindvault_search inputSchema 1`] = `
 {
   "properties": {
+    "bypassCache": {
+      "description": "Fetch a fresh page for this call and report cacheStatus=bypassed. This does not disable or clear shared caching.",
+      "type": "boolean",
+    },
+    "cursor": {
+      "description": "Opaque cursor returned as nextCursor. It is valid only with the same profile, network, API origin, and filters; discard it after switching profiles or changing filters.",
+      "type": "string",
+    },
     "limit": {
       "description": "Max number of resources to return (1–100, server default 20).",
       "examples": [

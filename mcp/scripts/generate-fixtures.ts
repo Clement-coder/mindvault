@@ -103,17 +103,30 @@ function agentStatusFixture(): object {
  * Horizon balances: the object the mock returns for GET /accounts/:pk.
  *
  * Tests that exercise wallet-balance checks use this to assert the mock
- * reports a funded account with both USDC and native XLM.
+ * reports a funded account with both USDC and native XLM. Includes a
+ * counterfeit USDC entry (same code, different issuer) to verify the
+ * server identifies canonical USDC by issuer, not symbol alone (#1053).
  */
 function horizonBalancesFixture(): object {
   return {
     _meta: {
       generatedBy: "scripts/generate-fixtures.ts",
       description:
-        "Snapshot of the mock Horizon GET /accounts/:pk response — a funded testnet account with USDC and native XLM.",
+        "Snapshot of the mock Horizon GET /accounts/:pk response — a funded testnet account with USDC and native XLM. Includes a counterfeit USDC entry to verify the server identifies canonical USDC by issuer, not symbol alone (#1053).",
     },
     balances: [
-      { asset_type: "credit_alphanum4", asset_code: "USDC", balance: "1000.0000000" },
+      {
+        asset_type: "credit_alphanum4",
+        asset_code: "USDC",
+        asset_issuer: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+        balance: "1000.0000000",
+      },
+      {
+        asset_type: "credit_alphanum4",
+        asset_code: "USDC",
+        asset_issuer: "GFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE",
+        balance: "5000.0000000",
+      },
       { asset_type: "native", balance: "100.0000000" },
     ],
   };

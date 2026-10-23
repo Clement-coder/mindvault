@@ -32,6 +32,13 @@ import { DEFAULT_COOLDOWN_MS, DEFAULT_MAX_ATTEMPTS } from "./rpcFailover.js";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_FILES } from "./auditLogRotation.js";
 import { DEFAULT_CATALOG_CACHE_CONFIG } from "./catalogCache.js";
 import { DEFAULT_MAX_RESPONSE_BYTES } from "./responseSize.js";
+import {
+  DEFAULT_STATE_BACKUP_MAX_AGE_DAYS,
+  DEFAULT_STATE_BACKUP_MAX_FILES,
+  DEFAULT_STATE_BACKUP_MAX_BYTES,
+  DEFAULT_AUDIT_LOG_MAX_AGE_DAYS,
+  DEFAULT_RECEIPT_RETENTION_DAYS,
+} from "./retention.js";
 
 /** One environment variable, as an operator reads it in a reference page. */
 export interface EnvVarDoc {
@@ -133,6 +140,36 @@ export const ENV_VAR_DOCS: EnvVarDoc[] = [
     description: "Endpoint tries per call during failover. 0 tries every configured endpoint.",
     default: `${DEFAULT_MAX_ATTEMPTS} (unlimited)`,
     source: "mcp/src/rpcFailover.ts",
+  },
+  {
+    name: "MINDVAULT_URL_ALLOWLIST",
+    description:
+      "Comma-separated hosts that skip the outbound-URL local/reserved-address guard used by publish and metadata flows (#1078). An entry may be a host, a leading-dot domain, or an IP literal; the http(s) scheme is still enforced. Leave unset in production so loopback, link-local, and private addresses stay rejected.",
+    default: "unset — every private, loopback, and link-local address is rejected",
+    source: "mcp/src/outboundUrl.ts",
+  },
+
+  // ── Proxy ──────────────────────────────────────────────────────────────────
+  {
+    name: "HTTP_PROXY",
+    description:
+      "Standard proxy URL for `http:` requests. Also accepted lowercase (http_proxy). Credentials in the URL are redacted from logs and diagnostics. Unset means direct connection.",
+    default: "unset — direct connection",
+    source: "mcp/src/proxy.ts",
+  },
+  {
+    name: "HTTPS_PROXY",
+    description:
+      "Standard proxy URL for `https:` requests. Also accepted lowercase (https_proxy). Credentials in the URL are redacted from logs and diagnostics. Unset means direct connection.",
+    default: "unset — direct connection",
+    source: "mcp/src/proxy.ts",
+  },
+  {
+    name: "NO_PROXY",
+    description:
+      "Comma-separated hosts that bypass the proxy, matching the conventional semantics: `*` bypasses everything, a leading dot matches a domain suffix, and `host:port` requires the port to match. Also accepted lowercase (no_proxy).",
+    default: "unset — no host bypasses the proxy",
+    source: "mcp/src/proxy.ts",
   },
 
   // ── Guardrails & policies ──────────────────────────────────────────────────
@@ -245,6 +282,13 @@ export const ENV_VAR_DOCS: EnvVarDoc[] = [
     source: "mcp/src/toolTimeoutOverrides.ts",
   },
   {
+    name: "MINDVAULT_TRANSPORT_TIMEOUT_MAX_MS",
+    description:
+      "Maximum allowed value for any per-tool timeout override. Overrides exceeding this effective request deadline fail at startup. 0 disables the cap.",
+    default: "300000",
+    source: "mcp/src/toolTimeoutOverrides.ts",
+  },
+  {
     name: "MINDVAULT_TOOL_DURATION_BUDGET_MS",
     description:
       "Duration budget a tool call should finish within; exceeded calls are counted by the metrics recorder.",
@@ -313,6 +357,38 @@ export const ENV_VAR_DOCS: EnvVarDoc[] = [
     description: "Rotated audit-log generations kept besides the live file.",
     default: `${DEFAULT_MAX_FILES} (files)`,
     source: "mcp/src/auditLogRotation.ts",
+  },
+  {
+    name: "MINDVAULT_STATE_BACKUP_MAX_AGE_DAYS",
+    description: "Age limit for ~/.mindvault/backups/state-*.backup files.",
+    default: `${DEFAULT_STATE_BACKUP_MAX_AGE_DAYS} (days)`,
+    source: "mcp/src/retention.ts",
+  },
+  {
+    name: "MINDVAULT_STATE_BACKUP_MAX_FILES",
+    description: "Count limit for state backups; oldest backups beyond N are deleted.",
+    default: `${DEFAULT_STATE_BACKUP_MAX_FILES} (files)`,
+    source: "mcp/src/retention.ts",
+  },
+  {
+    name: "MINDVAULT_STATE_BACKUP_MAX_BYTES",
+    description: "Total-size cap for the state backups directory; oldest deleted until under cap.",
+    default: `${DEFAULT_STATE_BACKUP_MAX_BYTES} (bytes)`,
+    source: "mcp/src/retention.ts",
+  },
+  {
+    name: "MINDVAULT_AUDIT_LOG_MAX_AGE_DAYS",
+    description:
+      "Age limit for rotated audit generations (audit.jsonl.1, .2, …); never the live/active audit file.",
+    default: `${DEFAULT_AUDIT_LOG_MAX_AGE_DAYS} (days)`,
+    source: "mcp/src/retention.ts",
+  },
+  {
+    name: "MINDVAULT_RECEIPT_RETENTION_DAYS",
+    description:
+      "Age limit for receipt records in the purchases store; records older than the limit are pruned.",
+    default: `${DEFAULT_RECEIPT_RETENTION_DAYS} (days)`,
+    source: "mcp/src/retention.ts",
   },
   {
     name: "MINDVAULT_USER_AGENT",

@@ -103,6 +103,19 @@ describe("catalog search", () => {
     expect(result.map((r) => r.id)).toEqual(expect.arrayContaining(["1", "3"]));
   });
 
+  it("matches canonically equivalent Unicode search terms", async () => {
+    currentRows = [
+      {
+        ...allResources[0],
+        id: "5",
+        title: "Café Guide",
+        description: "A guide with composed accents",
+      },
+    ];
+    const result = await listCatalog({ search: "Cafe\u0301   guide" });
+    expect(result.map((r) => r.id)).toEqual(["5"]);
+  });
+
   it("returns an empty array when no resources match", async () => {
     currentRows = [];
     const result = await listCatalog({ search: "nonexistent" });

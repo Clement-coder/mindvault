@@ -6,8 +6,13 @@ describe("single-flight requests (#1040)", () => {
     const flight = createSingleFlight<number>();
     let calls = 0;
     let release!: (value: number) => void;
-    const gate = new Promise<number>((resolve) => { release = resolve; });
-    const load = () => { calls++; return gate; };
+    const gate = new Promise<number>((resolve) => {
+      release = resolve;
+    });
+    const load = () => {
+      calls++;
+      return gate;
+    };
     const first = flight.run("catalog", load);
     const second = flight.run("catalog", load);
     await Promise.resolve();
@@ -32,7 +37,10 @@ describe("single-flight requests (#1040)", () => {
   it("clears rejected requests and allows retries", async () => {
     const flight = createSingleFlight<number>();
     let calls = 0;
-    const fail = () => { calls++; return Promise.reject(new Error("offline")); };
+    const fail = () => {
+      calls++;
+      return Promise.reject(new Error("offline"));
+    };
     const a = flight.run("a", fail);
     const b = flight.run("a", fail);
     await expect(a).rejects.toThrow("offline");

@@ -1,13 +1,20 @@
 {
   "_meta": {
     "generatedBy": "scripts/generate-fixtures.ts",
-    "description": "Snapshot of the mock Horizon GET /accounts/:pk response — a funded testnet account with USDC and native XLM."
+    "description": "Snapshot of the mock Horizon GET /accounts/:pk response — a funded testnet account with USDC and native XLM. Includes a counterfeit USDC entry to verify the server identifies canonical USDC by issuer, not symbol alone (#1053)."
   },
   "balances": [
     {
       "asset_type": "credit_alphanum4",
       "asset_code": "USDC",
+      "asset_issuer": "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
       "balance": "1000.0000000"
+    },
+    {
+      "asset_type": "credit_alphanum4",
+      "asset_code": "USDC",
+      "asset_issuer": "GFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE",
+      "balance": "5000.0000000"
     },
     {
       "asset_type": "native",

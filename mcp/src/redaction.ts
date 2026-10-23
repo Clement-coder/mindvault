@@ -38,6 +38,10 @@ export function redactSecrets(input: string): string {
 
   let redacted = input;
 
+  // Strip URL userinfo (`scheme://user:pass@host` → `scheme://host`) first so
+  // the scheme and host survive, then apply the catch-all patterns.
+  redacted = redacted.replace(/(\b[a-z][a-z0-9+.-]*:\/\/)[^/@\s]+@/gi, "$1");
+
   for (const pattern of SECRET_PATTERNS) {
     redacted = redacted.replace(pattern, "[REDACTED]");
   }

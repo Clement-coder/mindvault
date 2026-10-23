@@ -165,7 +165,8 @@ export const DEBUG_BUNDLE_OUTPUT_SCHEMA = {
         entries: { type: "array", items: { type: "object" } },
         truncated: {
           type: "boolean",
-          description: "True when older entries were omitted by the bounded 256 KiB audit-log read.",
+          description:
+            "True when older entries were omitted by the bounded 256 KiB audit-log read.",
         },
       },
       required: ["enabled", "filePath", "exists", "requested", "entries"],

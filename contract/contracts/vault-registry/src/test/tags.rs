@@ -807,6 +807,26 @@ fn set_terms_hash_accepts_max_length() {
     assert_eq!(client.get_terms_hash(&creator), terms);
 }
 
+#[test]
+fn terms_hash_validation_counts_utf8_bytes_and_allows_empty() {
+    let (env, creator, client) = setup();
+    let empty = String::from_str(&env, "");
+    client.set_terms_hash(&creator, &empty);
+    assert_eq!(client.get_terms_hash(&creator), empty);
+
+    let at_byte_limit = String::from_str(&env, &"é".repeat((MAX_TERMS_HASH_LEN / 2) as usize));
+    assert_eq!(at_byte_limit.len(), MAX_TERMS_HASH_LEN);
+    client.set_terms_hash(&creator, &at_byte_limit);
+    assert_eq!(client.get_terms_hash(&creator), at_byte_limit);
+
+    let over_byte_limit = String::from_str(&env, &"é".repeat((MAX_TERMS_HASH_LEN / 2 + 1) as usize));
+    assert_eq!(over_byte_limit.len(), MAX_TERMS_HASH_LEN + 2);
+    assert_eq!(
+        client.try_set_terms_hash(&creator, &over_byte_limit),
+        Err(Ok(Error::TermsHashTooLong))
+    );
+}
+
 // Admin bootstrap/uninitialized-state behavior is covered by
 // `admin_transfer_nominate_then_accept` (bootstrap via the first
 // `nominate_new_admin` call) — see the two-step admin model above.

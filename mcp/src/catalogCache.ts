@@ -19,6 +19,13 @@ export interface CatalogSnapshot {
   savedAtMs: number;
 }
 
+export interface CatalogCacheContext {
+  profile: string;
+  network: string;
+  contractId: string;
+  apiOrigin: string;
+}
+
 export interface PreviewSnapshot {
   meta: unknown;
   savedAtMs: number;
@@ -96,8 +103,12 @@ export function resolveCatalogCacheConfig(
 }
 
 let config: CatalogCacheConfig = { ...DEFAULT_CATALOG_CACHE_CONFIG };
-let catalog: CatalogSnapshot | null = null;
-let previews: Record<string, PreviewSnapshot> = {};
+const catalog = new Map<string, CatalogSnapshot>();
+const previews = new Map<string, PreviewSnapshot>();
+
+function scopedKey(key: string, context?: CatalogCacheContext): string {
+  return `${JSON.stringify(context ?? null)}:${key}`;
+}
 
 /** Apply a cache lifetime. Called once at startup from the environment. */
 export function configureCatalogCache(next: CatalogCacheConfig): void {
@@ -127,8 +138,12 @@ export function isStale(savedAtMs: number, nowMs: number = Date.now()): boolean 
 }
 
 /** Record a successful catalog read. The raw resource array is snapshotted. */
-export function recordCatalogSnapshot(resources: unknown[]): void {
-  catalog = { resources, savedAtMs: Date.now() };
+export function recordCatalogSnapshot(
+  resources: unknown[],
+  key = "catalog",
+  context?: CatalogCacheContext,
+): void {
+  catalog.set(scopedKey(key, context), { resources, savedAtMs: Date.now() });
 }
 
 /**
@@ -138,18 +153,28 @@ export function recordCatalogSnapshot(resources: unknown[]): void {
  * An expired snapshot is dropped rather than merely hidden, so the memory is
  * released and a later call cannot resurrect it.
  */
-export function getCatalogSnapshot(nowMs: number = Date.now()): CatalogSnapshot | null {
-  if (!catalog) return null;
-  if (isExpired(catalog.savedAtMs, nowMs)) {
-    catalog = null;
+export function getCatalogSnapshot(
+  nowMs: number = Date.now(),
+  key = "catalog",
+  context?: CatalogCacheContext,
+): CatalogSnapshot | null {
+  const cacheKey = scopedKey(key, context);
+  const snapshot = catalog.get(cacheKey);
+  if (!snapshot) return null;
+  if (isExpired(snapshot.savedAtMs, nowMs)) {
+    catalog.delete(cacheKey);
     return null;
   }
-  return { savedAtMs: catalog.savedAtMs, resources: [...catalog.resources] };
+  return { savedAtMs: snapshot.savedAtMs, resources: [...snapshot.resources] };
 }
 
 /** Record a successful preview read for a resource id. */
-export function recordPreviewSnapshot(resourceId: string, meta: unknown): void {
-  previews[resourceId] = { meta, savedAtMs: Date.now() };
+export function recordPreviewSnapshot(
+  resourceId: string,
+  meta: unknown,
+  context?: CatalogCacheContext,
+): void {
+  previews.set(scopedKey(resourceId, context), { meta, savedAtMs: Date.now() });
 }
 
 /**
@@ -159,11 +184,13 @@ export function recordPreviewSnapshot(resourceId: string, meta: unknown): void {
 export function getPreviewSnapshot(
   resourceId: string,
   nowMs: number = Date.now(),
+  context?: CatalogCacheContext,
 ): PreviewSnapshot | null {
-  const snap = previews[resourceId];
+  const cacheKey = scopedKey(resourceId, context);
+  const snap = previews.get(cacheKey);
   if (!snap) return null;
   if (isExpired(snap.savedAtMs, nowMs)) {
-    delete previews[resourceId];
+    previews.delete(cacheKey);
     return null;
   }
   return { meta: snap.meta, savedAtMs: snap.savedAtMs };
@@ -223,7 +250,7 @@ export function catalogCacheLabel(
  * next.
  */
 export function _clearCatalogCache(): void {
-  catalog = null;
-  previews = {};
+  catalog.clear();
+  previews.clear();
   config = { ...DEFAULT_CATALOG_CACHE_CONFIG };
 }

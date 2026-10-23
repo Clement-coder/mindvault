@@ -29,3 +29,29 @@ router.get("/registry/status", async (_req, res) => {
 });
 
 export default router;
+
+// Issue #1034: catalog comparison across testnet and mainnet profiles
+export function compareCatalogs(
+  testnet: Array<{ id: string; price: string; title?: string }>,
+  mainnet: Array<{ id: string; price: string; title?: string }>,
+) {
+  const tMap = new Map(testnet.map((r) => [r.id, r]));
+  const mMap = new Map(mainnet.map((r) => [r.id, r]));
+  const onlyTestnet = [...tMap.keys()].filter((k) => !mMap.has(k));
+  const onlyMainnet = [...mMap.keys()].filter((k) => !tMap.has(k));
+  const diffs: Array<{ id: string; testnet: any; mainnet: any }> = [];
+  for (const id of tMap.keys()) {
+    if (!mMap.has(id)) continue;
+    const t = tMap.get(id)!;
+    const m = mMap.get(id)!;
+    if (t.price !== m.price || t.title !== m.title) {
+      diffs.push({ id, testnet: t, mainnet: m });
+    }
+  }
+  return {
+    onlyTestnet,
+    onlyMainnet,
+    diffs,
+    counts: { testnet: testnet.length, mainnet: mainnet.length },
+  };
+}

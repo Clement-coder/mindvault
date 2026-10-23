@@ -114,6 +114,41 @@ mismatch — and is handled so it never reaches a client as an invalid payload:
 A success with no `structuredContent` from a tool that declares a schema is a
 mismatch too. Results that already conform are sent unchanged.
 
+## Null versus omitted
+
+A field's schema says which of the two a client can see, and handlers follow
+it exactly:
+
+- **Required and nullable** (`type: [..., "null"]` and listed in `required`):
+  always present. A value the upstream service, the local store, or the
+  ledger did not provide is sent as `null`, never left out.
+- **Optional** (not in `required`): may be omitted. Omitted means "not
+  applicable to this result", for example `lease` on a `mindvault_lease_status`
+  miss, or `csv` on a JSON receipt export.
+
+`JSON.stringify` drops a property whose value is `undefined`, so a handler that
+copies an optional upstream value straight into a required field silently
+omits it, and the output contract above turns the whole result into an error.
+Handlers therefore coalesce with `?? null`. Fields this applies to (#1065):
+
+| Tool                         | Fields that are `null`, never omitted                                                                                                       |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mindvault_preview`          | `id`, `title`, `description`, `price` (`null` instead of `"$undefined USDC"`), `type`, `verificationStatus`, `accessUrl`                    |
+| `mindvault_purchase_history` | `purchases[].txHash`, `receiptRef`, `explorerUrl`. A stored receipt missing `txHash` or `receiptRef` is kept with `null`, no longer dropped |
+| `mindvault_export_receipts`  | `receipts[].title`, `txHash`, `receiptRef`, `explorerUrl`; every key of `filters` when that filter is unset                                 |
+| `mindvault_buy`              | `txHash`, `settlement.txHash`, `settlement.status`                                                                                          |
+| `mindvault_tx_status`        | `ledgerCloseTime` when the RPC reports no close time                                                                                        |
+| `mindvault_debug_bundle`     | `environment` when `includeEnvironment: false`                                                                                              |
+
+The purchase store also keeps its `epoch` when it is rewritten. Before, with
+`MINDVAULT_PURCHASES_EPOCH` set, each new receipt was saved without the
+epoch, so the next read treated the file as another wallet's history and
+dropped every earlier receipt.
+
+[`mcp/src/nullableFields.test.ts`](../mcp/src/nullableFields.test.ts) runs each
+of these handlers with the value populated, explicitly `null`, and absent, and
+checks the result against the advertised schema and that the field is present.
+
 ## Which tools emit a payload
 
 | Group         | Tools                                                                                                                                     | Typical fields                                                                                                                                                                    |
@@ -155,3 +190,6 @@ ListTools with extra schemas (they are not in `TOOL_DEFINITIONS`).
   its advertised schema (real handler output wherever the handler runs
   offline), mismatch logging without payload secrets, and a real SDK client
   receiving a mismatch as a readable error
+- [`mcp/src/nullableFields.test.ts`](../mcp/src/nullableFields.test.ts) —
+  null, absent, and populated values for every required nullable receipt,
+  settlement, preview, and diagnostic field

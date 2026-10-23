@@ -12,10 +12,12 @@ import { tmpdir } from "os";
 import { join } from "path";
 import {
   buildReceiptExport,
+  defaultReceiptFields,
   exportReceiptsTool,
   normalizeReceiptExportOptions,
   receiptsToCsv,
   receiptsToNdjson,
+  selectReceiptFields,
   sumAmounts,
   toExportedReceipt,
   ReceiptExportError,
@@ -23,6 +25,8 @@ import {
   RECEIPT_EXPORT_MAX_LIMIT,
   RECEIPT_EXPORT_OUTPUT_SCHEMA,
   RECEIPT_EXPORT_SCHEMA,
+  RECEIPT_ROW_FIELDS,
+  RECEIPT_SENSITIVE_FIELDS,
   type ExportedReceipt,
 } from "./receipts.js";
 import {
@@ -114,6 +118,7 @@ describe("toExportedReceipt", () => {
       txHash: "abc123",
       receiptRef: "pay-1",
       explorerUrl: "https://stellar.expert/explorer/testnet/tx/abc123",
+      profile: "(unscoped)",
     });
   });
 
@@ -238,13 +243,27 @@ describe("buildReceiptExport", () => {
     expect(result.format).toBe("json");
     expect(result.currency).toBe("USDC");
     expect(result.count).toBe(1);
+    expect(result.totalMatching).toBe(1);
+    expect(result.nextOffset).toBeNull();
     expect(result.totalAmount).toBe("1.5");
+    expect(result.fields).toEqual([
+      "resourceId",
+      "title",
+      "amount",
+      "currency",
+      "network",
+      "purchasedAt",
+      "txHash",
+      "receiptRef",
+      "explorerUrl",
+    ]);
     expect(result.filters).toEqual({
       resourceId: null,
       network: null,
       since: null,
       until: null,
       limit: null,
+      offset: null,
       groupBy: null,
     });
     expect(result.csv).toBeUndefined();
@@ -418,6 +437,37 @@ describe("exportReceiptsTool", () => {
   it("surfaces a bad filter as a deterministic error", () => {
     expect(() => exportReceiptsTool({ limit: -1 })).toThrow(ReceiptExportError);
   });
+
+  it("carries the offset through the tool so a client can walk the export", () => {
+    for (let i = 0; i < 5; i++) {
+      recordPurchase({
+        resourceId: `res-${i}`,
+        amount: "1",
+        network: "stellar:testnet",
+        txHash: null,
+      });
+    }
+    const first = JSON.parse(exportReceiptsTool({ limit: 2 }));
+    expect(first.nextOffset).toBe(2);
+    const second = JSON.parse(exportReceiptsTool({ limit: 2, offset: first.nextOffset }));
+    expect(second.count).toBe(2);
+    expect(second.filters.offset).toBe(2);
+  });
+
+  it("carries fields and includeSensitive through the tool", () => {
+    recordPurchase({
+      resourceId: "res-001",
+      amount: "1",
+      network: "stellar:testnet",
+      txHash: null,
+      profile: "buyer.alice",
+    });
+    const selected = JSON.parse(exportReceiptsTool({ fields: "resourceId,amount" }));
+    expect(selected.receipts[0]).toEqual({ resourceId: "res-001", amount: "1" });
+
+    const sensitive = JSON.parse(exportReceiptsTool({ includeSensitive: true }));
+    expect(sensitive.receipts[0].profile).toBe("buyer.alice");
+  });
 });
 
 describe("advertised output schema", () => {
@@ -460,5 +510,236 @@ describe("advertised output schema", () => {
     for (const key of Object.keys(produced)) {
       expect(advertised, `${key} is returned but not advertised`).toContain(key);
     }
+  });
+
+  it("advertises the resumable-pagination and field-selection envelope fields", () => {
+    const advertised = Object.keys(RECEIPT_EXPORT_OUTPUT_SCHEMA.properties);
+    for (const field of ["fields", "totalMatching", "nextOffset"]) {
+      expect(advertised, `${field} is not advertised`).toContain(field);
+    }
+    const filterProps = Object.keys(RECEIPT_EXPORT_OUTPUT_SCHEMA.properties.filters.properties);
+    expect(filterProps).toContain("offset");
+  });
+
+  it("advertises every selectable row field, including the sensitive one", () => {
+    const rowProperties = Object.keys(
+      RECEIPT_EXPORT_OUTPUT_SCHEMA.properties.receipts.items.properties,
+    );
+    for (const field of RECEIPT_ROW_FIELDS) {
+      expect(rowProperties, `${field} is selectable but not advertised`).toContain(field);
+    }
+    expect(rowProperties).toContain("profile");
+  });
+});
+
+describe("field selection (#1079)", () => {
+  it("includes every non-sensitive row field by default", () => {
+    expect(defaultReceiptFields(false)).toEqual([
+      "resourceId",
+      "title",
+      "amount",
+      "currency",
+      "network",
+      "purchasedAt",
+      "txHash",
+      "receiptRef",
+      "explorerUrl",
+    ]);
+  });
+
+  it("excludes sensitive fields by default", () => {
+    const fields = defaultReceiptFields(false);
+    for (const sensitive of RECEIPT_SENSITIVE_FIELDS) {
+      expect(fields).not.toContain(sensitive);
+    }
+  });
+
+  it("includeSensitive widens the default set to every field", () => {
+    expect(defaultReceiptFields(true)).toEqual([...RECEIPT_ROW_FIELDS]);
+  });
+
+  it("keeps only the selected fields, in selection order", () => {
+    const row = toExportedReceipt(storedReceipt(), "testnet");
+    const projected = selectReceiptFields(row, ["amount", "resourceId"]);
+    expect(Object.keys(projected)).toEqual(["amount", "resourceId"]);
+    expect(projected).toEqual({ amount: "1.50", resourceId: "res-001" });
+  });
+
+  it("projects an absent selected field as an explicit null, not a dropped key", () => {
+    const row = toExportedReceipt(storedReceipt({ txHash: null }), "testnet");
+    const projected = selectReceiptFields(row, ["txHash"]);
+    expect(projected).toEqual({ txHash: null });
+    expect("txHash" in projected).toBe(true);
+  });
+
+  it("parses a comma-separated fields string, trimming and de-duplicating", () => {
+    const options = normalizeReceiptExportOptions({
+      fields: " resourceId , amount ,resourceId",
+    });
+    expect(options.fields).toEqual(["resourceId", "amount"]);
+  });
+
+  it("accepts fields as an array", () => {
+    const options = normalizeReceiptExportOptions({ fields: ["amount", "purchasedAt"] });
+    expect(options.fields).toEqual(["amount", "purchasedAt"]);
+  });
+
+  it("lets a caller name a sensitive field explicitly to opt in", () => {
+    const options = normalizeReceiptExportOptions({ fields: "resourceId,profile" });
+    expect(options.fields).toEqual(["resourceId", "profile"]);
+  });
+
+  it("rejects an unknown field name deterministically, listing the known fields", () => {
+    expect(() => normalizeReceiptExportOptions({ fields: "resourceId,nope" })).toThrow(
+      /unknown field "nope"/,
+    );
+    expect(() => normalizeReceiptExportOptions({ fields: "resourceId,nope" })).toThrow(
+      /resourceId/,
+    );
+  });
+
+  it("rejects an empty selection after trimming", () => {
+    expect(() => normalizeReceiptExportOptions({ fields: " , " })).toThrow(/at least one field/);
+  });
+
+  it("rejects a non-string field array", () => {
+    expect(() => normalizeReceiptExportOptions({ fields: [42] })).toThrow(/array of field-name/);
+  });
+
+  it("strips sensitive fields from the rows by default", () => {
+    const result = buildReceiptExport(
+      [storedReceipt({ profile: "buyer.alice" })],
+      { format: "json" },
+      NOW,
+      "testnet",
+    );
+    expect(result.fields).not.toContain("profile");
+    expect(result.receipts[0]).not.toHaveProperty("profile");
+  });
+
+  it("includeSensitive carries the profile field into the rows", () => {
+    const result = buildReceiptExport(
+      [storedReceipt({ profile: "buyer.alice" })],
+      { format: "json", includeSensitive: true },
+      NOW,
+      "testnet",
+    );
+    expect(result.fields).toContain("profile");
+    expect(result.receipts[0].profile).toBe("buyer.alice");
+  });
+
+  it("renders only the selected columns in the csv header and rows", () => {
+    const result = buildReceiptExport(
+      [storedReceipt({ profile: "buyer.alice" })],
+      { format: "csv", fields: ["resourceId", "amount"] },
+      NOW,
+      "testnet",
+    );
+    const [header, row] = result.csv!.split("\r\n");
+    expect(header).toBe("resourceId,amount");
+    expect(row).toBe("res-001,1.50");
+    expect(result.csv).not.toContain("profile");
+    expect(result.csv).not.toContain("buyer.alice");
+  });
+
+  it("renders only the selected keys as ndjson", () => {
+    const result = buildReceiptExport(
+      [storedReceipt()],
+      { format: "ndjson", fields: ["resourceId", "amount"] },
+      NOW,
+      "testnet",
+    );
+    expect(JSON.parse(result.ndjson!)).toEqual({ resourceId: "res-001", amount: "1.50" });
+  });
+
+  it("exports the profile value in csv only when it is selected", () => {
+    const result = buildReceiptExport(
+      [storedReceipt({ profile: "buyer.alice" })],
+      { format: "csv", fields: ["resourceId", "profile"] },
+      NOW,
+      "testnet",
+    );
+    const [header, row] = result.csv!.split("\r\n");
+    expect(header).toBe("resourceId,profile");
+    expect(row).toBe("res-001,buyer.alice");
+  });
+});
+
+describe("resumable pagination (#1079)", () => {
+  function receipts(count: number): PurchaseReceipt[] {
+    return Array.from({ length: count }, (_, i) =>
+      storedReceipt({ resourceId: `res-${i}`, amount: "1" }),
+    );
+  }
+
+  it("reports every matching row count and a null nextOffset on the last page", () => {
+    const result = buildReceiptExport(receipts(3), { format: "json", limit: 5 }, NOW, "testnet");
+    expect(result.count).toBe(3);
+    expect(result.totalMatching).toBe(3);
+    expect(result.nextOffset).toBeNull();
+  });
+
+  it("reports totalMatching larger than count on a partial page", () => {
+    const result = buildReceiptExport(receipts(5), { format: "json", limit: 2 }, NOW, "testnet");
+    expect(result.count).toBe(2);
+    expect(result.totalMatching).toBe(5);
+  });
+
+  it("returns the offset that resumes the export without gaps or repeats", () => {
+    const all = receipts(5);
+    const first = buildReceiptExport(all, { format: "json", limit: 2 }, NOW, "testnet");
+    expect(first.nextOffset).toBe(2);
+
+    const second = buildReceiptExport(
+      all,
+      { format: "json", limit: 2, offset: first.nextOffset! },
+      NOW,
+      "testnet",
+    );
+    expect(second.nextOffset).toBe(4);
+    expect(second.filters.offset).toBe(2);
+
+    const third = buildReceiptExport(
+      all,
+      { format: "json", limit: 2, offset: second.nextOffset! },
+      NOW,
+      "testnet",
+    );
+    expect(third.count).toBe(1);
+    expect(third.nextOffset).toBeNull();
+
+    const ids = [
+      ...first.receipts.map((r) => r.resourceId),
+      ...second.receipts.map((r) => r.resourceId),
+      ...third.receipts.map((r) => r.resourceId),
+    ];
+    expect(ids).toEqual(["res-0", "res-1", "res-2", "res-3", "res-4"]);
+  });
+
+  it("echoes the offset filter", () => {
+    const result = buildReceiptExport(receipts(5), { format: "json", offset: 3 }, NOW, "testnet");
+    expect(result.filters.offset).toBe(3);
+    expect(result.receipts.map((r) => r.resourceId)).toEqual(["res-3", "res-4"]);
+  });
+
+  it("treats an offset past the end as an empty, still-resumable document", () => {
+    const result = buildReceiptExport(receipts(2), { format: "json", offset: 10 }, NOW, "testnet");
+    expect(result.count).toBe(0);
+    expect(result.totalMatching).toBe(2);
+    expect(result.nextOffset).toBeNull();
+  });
+
+  it("sums only the rows on the page", () => {
+    const all = receipts(4).map((r) => ({ ...r, amount: "2" }));
+    const page = buildReceiptExport(all, { format: "json", limit: 3 }, NOW, "testnet");
+    expect(page.totalAmount).toBe("6");
+  });
+
+  it("rejects a negative offset", () => {
+    expect(() => normalizeReceiptExportOptions({ offset: -1 })).toThrow(/offset/);
+  });
+
+  it("rejects a non-integer offset", () => {
+    expect(() => normalizeReceiptExportOptions({ offset: 1.5 })).toThrow(/offset/);
   });
 });

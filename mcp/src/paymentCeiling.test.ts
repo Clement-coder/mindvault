@@ -3,6 +3,9 @@ import {
   DEFAULT_MAX_AUTO_PAY_USDC,
   assertAutoPaymentWithinCeiling,
   assertTransactionFeeWithinCeiling,
+  assertChallengePriceWithinCeiling,
+  parsePriceFromPaymentRequired,
+  PriceChangedCeilingError,
 } from "./paymentCeiling.js";
 import { MIN_USDC_BALANCE, MIN_NATIVE_XLM, assertMinimumBalance } from "./paymentPreflight.js";
 
@@ -108,5 +111,128 @@ describe("minimum balance guard", () => {
         operation: "buy",
       }),
     ).toBeNull();
+  });
+});
+
+// ── #1025: Ceiling recomputation after server price changes ──────────────────
+
+/** Encode an object the same way @x402/express emits PAYMENT-REQUIRED. */
+function encodePaymentRequired(payload: Record<string, unknown>): string {
+  return Buffer.from(JSON.stringify(payload)).toString("base64");
+}
+
+describe("parsePriceFromPaymentRequired", () => {
+  it("extracts a top-level string price", () => {
+    const header = encodePaymentRequired({ price: "7.50", payTo: "GA..." });
+    expect(parsePriceFromPaymentRequired(header)).toBe("7.50");
+  });
+
+  it("extracts a top-level numeric price", () => {
+    const header = encodePaymentRequired({ price: 3, payTo: "GA..." });
+    expect(parsePriceFromPaymentRequired(header)).toBe("3");
+  });
+
+  it("extracts maxAmountRequired from schemes array (stroops)", () => {
+    // 5 USDC = 50_000_000 stroops
+    const header = encodePaymentRequired({
+      schemes: [{ details: { maxAmountRequired: "50000000" } }],
+    });
+    expect(parsePriceFromPaymentRequired(header)).toBe("5");
+  });
+
+  it("handles fractional stroops correctly", () => {
+    // 1.5 USDC = 15_000_000 stroops
+    const header = encodePaymentRequired({
+      schemes: [{ details: { maxAmountRequired: "15000000" } }],
+    });
+    expect(parsePriceFromPaymentRequired(header)).toBe("1.5");
+  });
+
+  it("returns null for absent header", () => {
+    expect(parsePriceFromPaymentRequired(null)).toBeNull();
+    expect(parsePriceFromPaymentRequired(undefined)).toBeNull();
+    expect(parsePriceFromPaymentRequired("")).toBeNull();
+  });
+
+  it("returns null for unparseable base64", () => {
+    expect(parsePriceFromPaymentRequired("not-valid-base64!!!")).toBeNull();
+  });
+
+  it("returns null when JSON parses but has no price field", () => {
+    const header = encodePaymentRequired({ payTo: "GA..." });
+    expect(parsePriceFromPaymentRequired(header)).toBeNull();
+  });
+});
+
+describe("assertChallengePriceWithinCeiling (#1025)", () => {
+  const env5 = { MINDVAULT_MAX_AUTO_PAY_USDC: "5" } as NodeJS.ProcessEnv;
+
+  it("passes when the challenge price is within the ceiling", () => {
+    const header = encodePaymentRequired({ price: "4.99" });
+    expect(() =>
+      assertChallengePriceWithinCeiling({ headerValue: header, previewPrice: "4.99", env: env5 }),
+    ).not.toThrow();
+  });
+
+  it("passes when the challenge price equals the ceiling exactly", () => {
+    const header = encodePaymentRequired({ price: "5.00" });
+    expect(() =>
+      assertChallengePriceWithinCeiling({ headerValue: header, previewPrice: "5.00", env: env5 }),
+    ).not.toThrow();
+  });
+
+  it("throws PriceChangedCeilingError when challenge price exceeds ceiling", () => {
+    // Preview was within ceiling (3 USDC), but server now charges 6 USDC
+    const header = encodePaymentRequired({ price: "6.00" });
+    expect(() =>
+      assertChallengePriceWithinCeiling({ headerValue: header, previewPrice: "3.00", env: env5 }),
+    ).toThrow(PriceChangedCeilingError);
+  });
+
+  it("error message includes preview price, actual price, and ceiling", () => {
+    const header = encodePaymentRequired({ price: "6.00" });
+    let thrown: unknown;
+    try {
+      assertChallengePriceWithinCeiling({ headerValue: header, previewPrice: "3.00", env: env5 });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(PriceChangedCeilingError);
+    const e = thrown as PriceChangedCeilingError;
+    expect(e.previewPrice).toBe("3.00");
+    expect(e.actualPrice).toBe("6.00");
+    expect(e.ceiling).toBe("5");
+    expect(e.message).toContain("3.00 USDC");
+    expect(e.message).toContain("6.00 USDC");
+    expect(e.message).toContain("5 USDC");
+    expect(e.message).toContain("maxAutoPayUsdc");
+  });
+
+  it("passes when maxAutoPayUsdc covers the new challenge price", () => {
+    const header = encodePaymentRequired({ price: "6.00" });
+    expect(() =>
+      assertChallengePriceWithinCeiling({
+        headerValue: header,
+        previewPrice: "3.00",
+        maxAutoPayUsdc: "6.00",
+        env: env5,
+      }),
+    ).not.toThrow();
+  });
+
+  it("is a no-op when the header is absent (cannot verify, skip check)", () => {
+    expect(() =>
+      assertChallengePriceWithinCeiling({ headerValue: null, previewPrice: "3.00", env: env5 }),
+    ).not.toThrow();
+  });
+
+  it("is a no-op when the header is unparseable", () => {
+    expect(() =>
+      assertChallengePriceWithinCeiling({
+        headerValue: "garbage!!!",
+        previewPrice: "3.00",
+        env: env5,
+      }),
+    ).not.toThrow();
   });
 });

@@ -114,6 +114,14 @@ describe("sanitizeEnvironment", () => {
     expect(environment.MINDVAULT_URL).not.toContain(SECRET);
     expect(environment.MINDVAULT_URL).toContain("REDACTED");
   });
+
+  it("keeps the proxy host but strips credentials from a proxy URL (#1075)", () => {
+    const { environment } = sanitizeEnvironment({
+      HTTPS_PROXY: "http://alice:s3cret@proxy.corp:8443",
+    });
+    expect(environment.HTTPS_PROXY).toBe("http://proxy.corp:8443");
+    expect(environment.HTTPS_PROXY).not.toContain("s3cret");
+  });
 });
 
 describe("summarizeProfiles", () => {
@@ -192,7 +200,11 @@ describe("collectAuditTail", () => {
     const result = collectAuditTail({ MINDVAULT_AUDIT_LOG_FILE: file }, 5);
     expect(result.truncated).toBe(true);
     expect(result.entries.map((entry) => entry.toolName)).toEqual([
-      "recent-1", "recent-2", "recent-3", "recent-4", "recent-5",
+      "recent-1",
+      "recent-2",
+      "recent-3",
+      "recent-4",
+      "recent-5",
     ]);
     expect(JSON.stringify(result)).not.toContain("x".repeat(100));
   });

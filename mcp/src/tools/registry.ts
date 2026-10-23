@@ -12,6 +12,7 @@ import {
   _isMock,
   jsonFetch,
   NETWORK,
+  networkPreset,
   REGISTRY_CONTRACT_ID,
   REGISTRY_NETWORK_PASSPHRASE,
   SOROBAN_RPC_URL,
@@ -29,6 +30,7 @@ import { mainnetAllowedFromEnv, formatMainnetDiagnostics } from "../mainnetGuard
 import { mockRegistryCount, mockRegistryList, mockRegistryLookup } from "../mock.js";
 import { type AgentWallet } from "../profiles.js";
 import { stroopsToUsdc } from "../usdcAmount.js";
+import { findCanonicalUsdc } from "../usdcIdentity.js";
 
 export interface BalanceDetails {
   status: "missing" | "no-trustline" | "zero" | "funded";
@@ -95,9 +97,7 @@ export async function getBalanceDetails(publicKey: string): Promise<BalanceDetai
   const reserve = baseReserve + subentryCount * entryReserve;
   const available = Math.max(0, parseFloat(xlm) - reserve);
 
-  const usdcBalance = balances.find(
-    (b: any) => b.asset_type === "credit_alphanum4" && b.asset_code === "USDC",
-  );
+  const usdcBalance = findCanonicalUsdc(balances, networkPreset.usdcClassicIssuer);
 
   if (!usdcBalance) {
     return {
@@ -159,7 +159,7 @@ export async function getAccountBalances(
   if (!res.ok) return { usdc: "0", native: "0", funded: false };
   const data: any = await res.json();
   const balances: any[] = data.balances ?? [];
-  const usdc = balances.find((b) => b.asset_type === "credit_alphanum4" && b.asset_code === "USDC");
+  const usdc = findCanonicalUsdc(balances, networkPreset.usdcClassicIssuer);
   const native = balances.find((b) => b.asset_type === "native");
   return { usdc: usdc?.balance ?? "0", native: native?.balance ?? "0", funded: true };
 }
@@ -765,4 +765,249 @@ export async function previewMetadataHashOutcome(resourceId: string): Promise<st
   const pointer: string | null = typeof res.data?.metadata === "string" ? res.data.metadata : null;
   const report = pointer ? describeMetadataPointerHash(pointer) : null;
   return JSON.stringify({ resourceId, pointer, report }, null, 2);
+}
+
+/**
+ * Field-level metadata diff between the off-chain API catalog and the
+ * on-chain vault-registry record for a single resource.
+ *
+ * Design constraints (issue #1035):
+ *  - Read-only: no state changes, no payments.
+ *  - Identifies the comparison sources (API base URL, contract ID) and
+ *    the network (Stellar network passphrase, x402 network) so operators
+ *    know exactly which pair of records they are comparing.
+ *  - Handles missing records on either side without throwing.
+ *  - Never exposes protected resource content: the diff covers only the
+ *    fields an operator needs to detect sync drift (price, listing status,
+ *    metadata pointer, owner/creator, tags). The resource's paywalled
+ *    payload is never fetched or included.
+ */
+export async function metadataDiff(resourceId: string): Promise<string> {
+  if (!resourceId) throw new Error("resourceId is required.");
+
+  // ── Off-chain: API catalog ────────────────────────────────────────────────
+  const apiRes = await jsonFetch(`${BASE_URL}/resources/${resourceId}/meta`);
+  const apiData = apiRes.ok ? (apiRes.data as Record<string, unknown> | null) : null;
+
+  // ── On-chain: vault-registry contract ────────────────────────────────────
+  let onchainData: any = null;
+  let onchainError: string | null = null;
+  if (!_isMock()) {
+    try {
+      const client = createRegistryClient({
+        contractId: REGISTRY_CONTRACT_ID,
+        rpcUrl: SOROBAN_RPC_URL,
+        networkPassphrase: REGISTRY_NETWORK_PASSPHRASE,
+      });
+      const tx = await client.get({ id: resourceId });
+      if (tx.result.isOk()) {
+        onchainData = tx.result.unwrap();
+      } else {
+        onchainError = tx.result.unwrapErr().message;
+      }
+    } catch (err: any) {
+      onchainError = err?.message ?? String(err);
+    }
+  } else {
+    // Mock mode: synthesise a minimal on-chain record from the API response
+    // so the diff tool is testable without a live Soroban RPC.
+    if (apiData) {
+      // Convert the API's decimal USDC price string to stroops so the diff
+      // comparison produces "match" for price when both sides agree.
+      const { usdcToStroops } = await import("../usdcAmount.js");
+      const priceStroops =
+        typeof apiData.price === "string" ? (usdcToStroops(String(apiData.price)) ?? 0n) : 0n;
+      onchainData = {
+        id: resourceId,
+        creator: apiData.ownerAddress ?? null,
+        price: priceStroops,
+        metadata: apiData.accessUrl ?? null,
+        listed: apiData.verificationStatus === "verified",
+        tags: Array.isArray(apiData.tags) ? apiData.tags : [],
+      };
+    }
+  }
+
+  // ── Context block (always present) ───────────────────────────────────────
+  const context = {
+    apiSource: BASE_URL,
+    onchainSource: REGISTRY_CONTRACT_ID,
+    network: STELLAR_NETWORK,
+    x402Network: NETWORK,
+    rpc: SOROBAN_RPC_URL,
+  };
+
+  // ── Missing on both sides ─────────────────────────────────────────────────
+  if (!apiData && !onchainData) {
+    return JSON.stringify(
+      {
+        resourceId,
+        apiFound: false,
+        onchainFound: false,
+        onchainError,
+        fields: [],
+        discrepancyCount: 0,
+        summary: `Resource "${resourceId}" was not found in the API catalog or on the on-chain registry.`,
+        ...context,
+      },
+      null,
+      2,
+    );
+  }
+
+  // ── Missing only in API ───────────────────────────────────────────────────
+  if (!apiData) {
+    const onchainPrice = stroopsToUsdc(BigInt(onchainData.price as unknown as bigint));
+    return JSON.stringify(
+      {
+        resourceId,
+        apiFound: false,
+        onchainFound: true,
+        onchainError: null,
+        fields: [
+          fieldEntry("id", null, onchainData.id),
+          fieldEntry("creator", null, onchainData.creator),
+          fieldEntry("price", null, `${onchainPrice} USDC`),
+          fieldEntry("metadata", null, onchainData.metadata),
+          fieldEntry("listed", null, onchainData.listed),
+          fieldEntry("tags", null, onchainData.tags ?? []),
+        ],
+        discrepancyCount: 6,
+        summary: `Resource "${resourceId}" exists on-chain but is missing from the API catalog. All on-chain fields are unmatched.`,
+        ...context,
+      },
+      null,
+      2,
+    );
+  }
+
+  // ── Missing only on-chain ─────────────────────────────────────────────────
+  if (!onchainData) {
+    return JSON.stringify(
+      {
+        resourceId,
+        apiFound: true,
+        onchainFound: false,
+        onchainError,
+        fields: [
+          fieldEntry("id", apiData.id ?? null, null),
+          fieldEntry("price", apiData.price ?? null, null),
+          fieldEntry("metadata", apiData.accessUrl ?? null, null),
+          fieldEntry("listed", apiData.verificationStatus === "verified", null),
+          fieldEntry("tags", apiData.tags ?? [], null),
+        ],
+        discrepancyCount: 5,
+        summary: `Resource "${resourceId}" exists in the API catalog but has not been registered on-chain yet.`,
+        ...context,
+      },
+      null,
+      2,
+    );
+  }
+
+  // ── Both sides present: field-level diff ─────────────────────────────────
+  const onchainPrice = stroopsToUsdc(BigInt(onchainData.price as unknown as bigint));
+
+  // Normalise the API price to 7-decimal USDC form so "5" and "5.0000000" compare equal.
+  const apiPriceNorm = apiData.price != null ? normalisePriceUsdc(String(apiData.price)) : null;
+
+  const fields: FieldDiff[] = [
+    // id
+    fieldEntry("id", String(apiData.id ?? ""), String(onchainData.id ?? "")),
+
+    // price — both sides expressed as "<decimal> USDC" for human-readable diff
+    fieldEntry("price", apiPriceNorm, `${onchainPrice} USDC`),
+
+    // metadata pointer — API stores as accessUrl; on-chain stores as metadata
+    fieldEntry(
+      "metadata",
+      typeof apiData.accessUrl === "string" ? apiData.accessUrl : null,
+      typeof onchainData.metadata === "string" ? onchainData.metadata : null,
+    ),
+
+    // listing status — API uses verificationStatus; on-chain uses a boolean listed flag
+    fieldEntry("listed", apiData.verificationStatus === "verified", Boolean(onchainData.listed)),
+
+    // owner/creator — API uses ownerAddress; on-chain uses creator
+    fieldEntry(
+      "creator",
+      typeof apiData.ownerAddress === "string" ? apiData.ownerAddress : null,
+      typeof onchainData.creator === "string" ? onchainData.creator : null,
+    ),
+
+    // tags
+    fieldEntry(
+      "tags",
+      Array.isArray(apiData.tags) ? (apiData.tags as string[]) : [],
+      Array.isArray(onchainData.tags) ? (onchainData.tags as string[]) : [],
+    ),
+  ];
+
+  const discrepancyCount = fields.filter((f) => f.status === "mismatch").length;
+  const summary =
+    discrepancyCount === 0
+      ? "All compared fields match between the API catalog and the on-chain registry."
+      : `Found ${discrepancyCount} field discrepanc${discrepancyCount === 1 ? "y" : "ies"} between the API catalog and the on-chain registry.`;
+
+  return JSON.stringify(
+    {
+      resourceId,
+      apiFound: true,
+      onchainFound: true,
+      onchainError: null,
+      fields,
+      discrepancyCount,
+      summary,
+      ...context,
+    },
+    null,
+    2,
+  );
+}
+
+/**
+ * Normalise a USDC decimal string (e.g. "5" or "5.00") to the 7-decimal form
+ * that `stroopsToUsdc` always returns (e.g. "5.0000000 USDC"), so the price
+ * comparison produces "match" when both sides represent the same amount.
+ */
+function normalisePriceUsdc(decimal: string): string {
+  const n = parseFloat(decimal);
+  if (!Number.isFinite(n)) return `${decimal} USDC`;
+  return `${n.toFixed(7)} USDC`;
+}
+
+/** A single field comparison entry in the diff output. */
+interface FieldDiff {
+  field: string;
+  status: "match" | "mismatch" | "missing_api" | "missing_onchain";
+  api: unknown;
+  onchain: unknown;
+}
+
+/**
+ * Build a FieldDiff entry, determining whether the two values match.
+ * Arrays are compared by sorted JSON serialization so tag order does not
+ * produce spurious mismatches.
+ */
+function fieldEntry(field: string, api: unknown, onchain: unknown): FieldDiff {
+  if (api === null && onchain !== null) {
+    return { field, status: "missing_api", api, onchain };
+  }
+  if (onchain === null && api !== null) {
+    return { field, status: "missing_onchain", api, onchain };
+  }
+  if (api === null && onchain === null) {
+    return { field, status: "match", api, onchain };
+  }
+
+  let match: boolean;
+  if (Array.isArray(api) && Array.isArray(onchain)) {
+    match =
+      JSON.stringify([...(api as unknown[])].sort()) ===
+      JSON.stringify([...(onchain as unknown[])].sort());
+  } else {
+    match = String(api) === String(onchain);
+  }
+
+  return { field, status: match ? "match" : "mismatch", api, onchain };
 }

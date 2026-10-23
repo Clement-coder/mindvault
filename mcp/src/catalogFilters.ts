@@ -4,6 +4,8 @@
  * and adds tags + listed for client-side parity with on-chain / meta fields.
  */
 
+import { normalizeCatalogSearchTerm } from "./catalogSearch.js";
+
 export const CATALOG_SORT_VALUES = ["newest", "price_asc", "price_desc", "title"] as const;
 export type CatalogSort = (typeof CATALOG_SORT_VALUES)[number];
 
@@ -26,6 +28,10 @@ export interface CatalogFilters {
   tags?: string[];
   /** Listing state; matched client-side when present on results. */
   listed?: boolean;
+  /** Opaque pagination cursor bound to the active profile and filters. */
+  cursor?: string;
+  /** Skip this call's read cache without changing shared cache policy. */
+  bypassCache?: boolean;
 }
 
 export type ParseCatalogFiltersResult =
@@ -165,6 +171,11 @@ export function parseCatalogFilters(
     return { ok: false, error: "Invalid offset: must be a non-negative integer." };
   }
 
+  const cursor = typeof raw.cursor === "string" ? raw.cursor.trim() : "";
+  if (cursor && offset !== undefined) {
+    return { ok: false, error: "Invalid catalog pagination: provide cursor or offset, not both." };
+  }
+
   const tags = parseTags(raw.tags);
   if (tags === "invalid") {
     return {
@@ -193,6 +204,8 @@ export function parseCatalogFilters(
     offset,
     tags,
     listed,
+    cursor: cursor || undefined,
+    ...(raw.bypassCache === true ? { bypassCache: true } : {}),
   };
 
   if (options.requireCriteria) {
@@ -207,7 +220,8 @@ export function parseCatalogFilters(
       filters.limit !== undefined ||
       filters.offset !== undefined ||
       (filters.tags && filters.tags.length > 0) ||
-      filters.listed !== undefined,
+      filters.listed !== undefined ||
+      filters.cursor,
     );
     if (!hasCriteria) {
       return {
@@ -271,13 +285,13 @@ export function applyClientCatalogFilters<T extends Record<string, unknown>>(
   items: T[],
   filters: CatalogFilters,
 ): T[] {
-  const q = filters.query?.toLowerCase();
+  const q = filters.query ? normalizeCatalogSearchTerm(filters.query) : undefined;
   const wantedTags = filters.tags?.map((t) => t.toLowerCase()) ?? [];
   const skippedOnly = filters.verificationStatus === "skipped";
 
   return items.filter((r) => {
     if (q) {
-      const hay = `${r.title ?? ""} ${r.description ?? ""}`.toLowerCase();
+      const hay = normalizeCatalogSearchTerm(`${r.title ?? ""} ${r.description ?? ""}`);
       if (!hay.includes(q)) return false;
     }
     if (skippedOnly && r.verificationStatus !== "skipped") return false;
@@ -429,5 +443,15 @@ export const catalogFilterInputProperties = {
     description:
       "Filter by listing state. The public catalog is listed=true only; listed=false yields no public catalog matches (use mindvault_registry_lookup for a specific resource).",
     examples: [true, false],
+  },
+  cursor: {
+    type: "string",
+    description:
+      "Opaque cursor returned as nextCursor. It is valid only with the same profile, network, API origin, and filters; discard it after switching profiles or changing filters.",
+  },
+  bypassCache: {
+    type: "boolean",
+    description:
+      "Fetch a fresh page for this call and report cacheStatus=bypassed. This does not disable or clear shared caching.",
   },
 } as const;

@@ -9,6 +9,23 @@ fn setup_with_admin<'a>() -> (Env, Address, Address, VaultRegistryClient<'a>) {
     (env, creator, admin, client)
 }
 
+#[test]
+fn index_repair_page_schema_carries_bounded_cursor_progress() {
+    assert_eq!(INDEX_REPAIR_PAGE_CAP, 20);
+    let progress = IndexRepairProgress {
+        next_cursor: INDEX_REPAIR_PAGE_CAP,
+        total: INDEX_REPAIR_PAGE_CAP + 3,
+    };
+    let page = IndexRepairPage {
+        processed: INDEX_REPAIR_PAGE_CAP,
+        next_cursor: Some(progress.next_cursor),
+    };
+
+    assert_eq!(page.processed, INDEX_REPAIR_PAGE_CAP);
+    assert_eq!(page.next_cursor, Some(INDEX_REPAIR_PAGE_CAP));
+    assert!(page.next_cursor.unwrap() < progress.total);
+}
+
 /// Register a resource with a valid cuid2-shaped id and a valid metadata
 /// pointer, no tags. Returns the id.
 fn register_default<'a>(

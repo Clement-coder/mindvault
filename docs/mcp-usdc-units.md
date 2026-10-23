@@ -14,6 +14,10 @@ times more or less than it should. The dangerous direction is quiet: a stroop
 count read as a decimal balance reports a wallet as richly funded and waves an
 unaffordable payment through.
 
+Payment and refund amounts recorded by the vault-registry are also stroops.
+Refund records are cumulative per payment receipt, and the contract rejects a
+refund that would make the total exceed the original settled payment amount.
+
 Source: [`mcp/src/usdcAmount.ts`](../mcp/src/usdcAmount.ts).
 
 ## One conversion, tagged at the boundary
@@ -82,3 +86,46 @@ compile.
 
 See also: [mcp-rpc-failover.md](mcp-rpc-failover.md),
 [mcp-receipt-export.md](mcp-receipt-export.md).
+
+## USDC identity: issuer, not symbol (#1053)
+
+On Stellar, an asset is identified by the pair `(asset_code, asset_issuer)`, not
+by the code alone. Anyone can issue a `credit_alphanum4` token with the code
+`"USDC"` from a throwaway account. Without checking the issuer, a counterfeit
+token would be reported as the same USDC that x402 payments settle in — and an
+attacker could trick an agent into trusting a worthless balance.
+
+The MCP server now identifies canonical USDC by matching both fields against
+the network preset:
+
+```ts
+// Before (vulnerable):
+balances.find((b) => b.asset_type === "credit_alphanum4" && b.asset_code === "USDC");
+
+// After (issuer-checked):
+findCanonicalUsdc(balances, networkPreset.usdcClassicIssuer);
+```
+
+The `usdcClassicIssuer` is set per network in
+[`packages/registry-client/src/networks.ts`](../packages/registry-client/src/networks.ts):
+
+| Network | `usdcClassicIssuer`                                        |
+| ------- | ---------------------------------------------------------- |
+| testnet | `GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5` |
+| mainnet | `GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN` |
+
+A Horizon balance entry is only the canonical USDC when its `asset_code` is
+`"USDC"` **and** its `asset_issuer` matches the preset. A counterfeit entry with
+the same code but a different issuer is never selected as the payment asset.
+
+Source: [`mcp/src/usdcIdentity.ts`](../mcp/src/usdcIdentity.ts).
+
+### Coverage
+
+- [`mcp/src/usdcIdentity.test.ts`](../mcp/src/usdcIdentity.test.ts) — the
+  predicate and finder: canonical match, counterfeit rejection, missing
+  `asset_issuer`, wrong asset type, wrong code, network-awareness
+- [`mcp/src/index.test.ts`](../mcp/src/index.test.ts) — end-to-end: counterfeit
+  USDC alone reports no-trustline; canonical selected when both are present
+- [`mcp/src/generateFixtures.test.ts`](../mcp/src/generateFixtures.test.ts) —
+  fixture contains a counterfeit entry that is never selected

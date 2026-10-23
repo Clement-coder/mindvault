@@ -178,7 +178,12 @@ describe("stdout contamination regression", () => {
         subentry_count: 0,
         balances: [
           { asset_type: "native", balance: "10.0000000" },
-          { asset_type: "credit_alphanum4", asset_code: "USDC", balance: "5.00" },
+          {
+            asset_type: "credit_alphanum4",
+            asset_code: "USDC",
+            asset_issuer: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+            balance: "5.00",
+          },
         ],
       }),
     );

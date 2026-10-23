@@ -74,9 +74,10 @@ export async function watchPendingTransaction<T extends PendingTransactionSnapsh
   };
 
   try {
-    unsubscribe = options.subscribe?.((next) => {
+    const stop = options.subscribe?.((next) => {
       snapshot = next;
     });
+    unsubscribe = typeof stop === "function" ? stop : undefined;
     attempts = 1;
     await emit(options.isTerminal(snapshot) ? "terminal" : "progress", snapshot, false);
     while (!options.isTerminal(snapshot)) {

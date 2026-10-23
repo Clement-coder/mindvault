@@ -6,3 +6,6 @@
 # everyone who runs the test benefits from these saved cases.
 cc 1f536339cc4347f9de7f05792525b866964f08377493d8ef374d4cc4030cb14f # shrinks to id_str = "a", body_len = 505, ch = "A"
 cc 7be424e549468a9368671187f132047b0c93874fa12f6d0976f1e8fe03eb10d4 # shrinks to tag_count = 2, max_tag_len = 1, include_duplicate = true
+cc 29e5b408548107a725dca7b707246fbf60ca34cd0f25c7a16688ce7d3520ce42 # shrinks to ops = [15, 32]
+cc 9daecd784123a7f5225e30a2384250f2d5990f163f8361df44afec44e4699849 # shrinks to ops = [79, 208]
+cc 3b82f7008b7c5b79be96babc403c96e576c0d89a913f34fd7c1c6ea85a6a7639 # shrinks to ops = [143, 32]

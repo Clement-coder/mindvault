@@ -225,6 +225,8 @@ describe("registry mutations after RPC loss", () => {
       expect(rpc.sent).toBe(1);
       expect(result).toMatchObject({
         status: "submitted",
+        // #1056: submitted-but-unconfirmed path must report txPhase:"submitted", not "settled".
+        txPhase: "submitted",
         resourceId: "res-1",
         ...fields,
         txHash: HASH,
@@ -247,6 +249,9 @@ describe("registry mutations after RPC loss", () => {
     async (_tool, _l, run) => {
       const result = JSON.parse(await run());
       expect(result.status).toBe("success");
+      // #1056: confirmed settlement must report txPhase:"settled" and confirmed:true.
+      expect(result.txPhase).toBe("settled");
+      expect(result.confirmed).toBe(true);
       expect(result.txHash).toBe(HASH);
       expect(result.statusLookup).toBeUndefined();
     },

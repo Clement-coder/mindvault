@@ -62,9 +62,9 @@ describe("StrKey validation: no network calls for invalid addresses", () => {
   beforeEach(() => {
     // Intercept any outbound fetch so we can assert it is never called for
     // a request that should have been rejected in validation.
-    fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(
-      new Error("fetch must not be called for an invalid Stellar address"),
-    );
+    fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("fetch must not be called for an invalid Stellar address"));
   });
 
   afterEach(() => {

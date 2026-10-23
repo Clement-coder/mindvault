@@ -20,15 +20,15 @@ it cannot overwrite wallet or API-key fields.
 
 ## Tools
 
-| Tool                      | What it does                                                                                                                                                                              |
-| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mindvault_setup_wallet`  | Create a wallet. Optional `profile` arg creates/switches to that named profile before creating it.                                                                                        |
-| `mindvault_use_profile`   | Switch the active profile (`name` required), creating it if it does not exist.                                                                                                            |
-| `mindvault_list_profiles` | List all profiles, marking the active one and showing each wallet address and registration state.                                                                                         |
-| `mindvault_wallet_info`   | Show the active profile name, wallet address, USDC balance, and whether it is registered.                                                                                                 |
-| `mindvault_reset`         | Clear the active profile's credentials, or pass `all=true` to remove every profile and delete state. Requires `confirm=true` — see [Reset confirmation guard](#reset-confirmation-guard). |
-| `mindvault_backup_state`  | Export an encrypted backup of `~/.mindvault/state.json` (passphrase min 8 chars). No plaintext secrets in the blob.                                                                       |
-| `mindvault_restore_state` | Restore state from a `mindvault_backup_state` blob. Integrity-checked before any write.                                                                                                   |
+| Tool                      | What it does                                                                                                                                                                               |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `mindvault_setup_wallet`  | Create a wallet. Optional `profile` arg creates/switches to that named profile before creating it.                                                                                         |
+| `mindvault_use_profile`   | Switch the active profile (`name` required), creating it if it does not exist.                                                                                                             |
+| `mindvault_list_profiles` | List all profiles, marking the active one and showing each wallet address and registration state.                                                                                          |
+| `mindvault_wallet_info`   | Show the active profile name, wallet address, USDC balance, and whether it is registered.                                                                                                  |
+| `mindvault_reset`         | Clear the active profile's credentials, or pass `all=true` to remove every profile and delete state. Requires `confirm=true` — see [Reset confirmation guard](#reset-confirmation-guard).  |
+| `mindvault_backup_state`  | Export an encrypted backup of `~/.mindvault/state.json` (passphrase min 8 chars). No plaintext secrets in the blob.                                                                        |
+| `mindvault_restore_state` | Restore state from a `mindvault_backup_state` blob. Integrity-checked and profile-structure-validated before any write. Rejects backups with duplicate or conflicting profile identifiers. |
 
 ## Moving environments (backup / restore)
 
@@ -37,6 +37,20 @@ the source and restore it on the destination. The blob is AES-256-GCM ciphertext
 keyed from your passphrase (scrypt); wallet secret keys and API keys never appear
 in plaintext. Wrong passphrase or a tampered blob fails the integrity check
 before any state is written. Existing `mindvault_reset` behavior is unchanged.
+
+### Backup validation
+
+Before any state is written, `mindvault_restore_state` validates the decrypted
+backup's profile structure:
+
+- `profiles` must be a plain object (not an array or scalar).
+- Every profile name must match `[A-Za-z0-9._-]{1,64}`.
+- No two profile names may be **case-insensitively identical** (e.g. `default`
+  and `Default`). Such a backup would silently overwrite one identity with
+  another and is rejected with a field-level error naming each conflicting key.
+
+All validation failures occur before the write callback is invoked, so existing
+state on disk and in memory is never modified by an invalid backup.
 
 ```text
 # Source environment
@@ -66,8 +80,12 @@ it stores. That is checked at both boundaries where a keypair can enter:
   line — and `ownsAddress: false` in its structured output — when they disagree,
   so a balance for an unsignable address never reads as spendable funds.
 
-`mindvault_import_wallet` derives the address from the secret it is given, so an
-imported wallet is consistent by construction.
+`mindvault_import_wallet` derives the address from the secret it is given and is
+**two-step** for the same reason as `mindvault_reset`: calling it without
+`confirm` shows the derived address, target profile, and network binding but
+writes nothing, so the agent can verify the address belongs to the intended
+wallet before committing. Passing `confirm: true` persists the wallet. The secret
+key never appears in any response (preview or confirmed).
 
 ## Reset confirmation guard
 

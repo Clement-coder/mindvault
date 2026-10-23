@@ -20,6 +20,14 @@ import {
   validateNetworkConfig,
 } from "@mindvault/registry-client";
 import { isExplicitMainnetDenial, unsafeMainnetAllow } from "./mainnetGuardrails.js";
+import {
+  effectiveRequestDeadline,
+  parseToolTimeouts,
+  parseTransportTimeoutMax,
+  resolveTransportTimeoutMax,
+  TOOL_TIMEOUTS_ENV_VAR,
+  TRANSPORT_TIMEOUT_MAX_ENV_VAR,
+} from "./toolTimeoutOverrides.js";
 
 export type DiagnosticSeverity = "error" | "warning";
 
@@ -39,12 +47,16 @@ const BOOLEAN_VALUES = new Set(["1", "0", "true", "false", "yes", "no", "on", "o
 /** Stellar secret keys: 'S' + 55 base32 chars. Redacted so they never leak. */
 const STELLAR_SECRET_KEY = /\bS[A-Z2-7]{55}\b/g;
 
+/** URL userinfo (`scheme://user:pass@host` → `scheme://host`), e.g. proxy creds. */
+const URL_USERINFO = /(\b[a-z][a-z0-9+.-]*:\/\/)[^/@\s]+@/gi;
+
 /**
  * Mask anything that looks like a secret in free text. Currently Stellar secret
- * keys; kept as a single helper so every message passes through one redactor.
+ * keys and URL userinfo (proxy credentials); kept as a single helper so every
+ * message passes through one redactor.
  */
 export function redactSecrets(text: string): string {
-  return text.replace(STELLAR_SECRET_KEY, "S***REDACTED***");
+  return text.replace(URL_USERINFO, "$1").replace(STELLAR_SECRET_KEY, "S***REDACTED***");
 }
 
 /** True when a string parses as an absolute http(s) URL. */
@@ -160,6 +172,59 @@ export function collectStartupDiagnostics(
         message: `Not a valid URL: ${JSON.stringify(redactSecrets(value))}.`,
         expected: "an absolute http(s) URL (e.g. https://mindvault.example.com)",
       });
+    }
+  }
+
+  // Retention settings (#1044) must be positive integers no smaller than
+  // their documented minimums when set. Unset is a deliberate no-op — the
+  // retention module falls back to its safe defaults — so only a
+  // present-but-invalid value (non-numeric, fractional, or below the floor)
+  // is surfaced. A value exactly at its minimum is valid. Names and floors
+  // mirror RETENTION_ENV_VARS / MIN_* in retention.ts.
+  const retentionValidations: Array<{
+    variable: string;
+    min: number;
+    expected: string;
+  }> = [
+    {
+      variable: "MINDVAULT_STATE_BACKUP_MAX_AGE_DAYS",
+      min: 1,
+      expected: "a positive integer (minimum 1 day)",
+    },
+    {
+      variable: "MINDVAULT_STATE_BACKUP_MAX_FILES",
+      min: 1,
+      expected: "a positive integer (minimum 1 file)",
+    },
+    {
+      variable: "MINDVAULT_STATE_BACKUP_MAX_BYTES",
+      min: 10240,
+      expected: "a positive integer (minimum 10240 bytes)",
+    },
+    {
+      variable: "MINDVAULT_AUDIT_LOG_MAX_AGE_DAYS",
+      min: 1,
+      expected: "a positive integer (minimum 1 day)",
+    },
+    {
+      variable: "MINDVAULT_RECEIPT_RETENTION_DAYS",
+      min: 1,
+      expected: "a positive integer (minimum 1 day)",
+    },
+  ];
+  for (const { variable, min, expected } of retentionValidations) {
+    const value = env[variable];
+    if (typeof value === "string" && value.trim() !== "") {
+      const trimmed = value.trim();
+      const parsed = Number(trimmed);
+      if (!/^\d+$/.test(trimmed) || !Number.isFinite(parsed) || parsed < min) {
+        diagnostics.push({
+          variable,
+          severity: "error",
+          message: `Not a valid retention limit: ${JSON.stringify(redactSecrets(trimmed))}.`,
+          expected,
+        });
+      }
     }
   }
 

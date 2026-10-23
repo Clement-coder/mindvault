@@ -81,16 +81,24 @@ export const USDC_SPENDING_TOOLS = [
  *
  * `mindvault_setup_wallet` is deliberately absent: account creation runs
  * through the sponsored-account service, so the agent's own wallet funds
- * nothing.
+ * nothing. `mindvault_terms` is listed for `operation: "set"`; the dispatcher
+ * never gates its `"get"` read, as with the mainnet guardrail.
+ *
+ * `toolSideEffects.test.ts` checks this list against every handler that
+ * submits a Stellar transaction (#1063).
  */
 export const FEE_SPENDING_TOOLS = [
   "mindvault_register_onchain",
   "mindvault_update_metadata",
   "mindvault_set_price",
   "mindvault_transfer_ownership",
+  "mindvault_accept_transfer",
+  "mindvault_cancel_transfer",
   "mindvault_set_listed",
+  "mindvault_set_tags",
   "mindvault_freeze",
   "mindvault_royalty",
+  "mindvault_terms",
 ] as const;
 
 /** What a tool spends, or `null` when it spends nothing. */

@@ -38,9 +38,11 @@ export const CATALOG_LIST_OUTPUT_SCHEMA = {
   properties: {
     items: { type: "array", items: CATALOG_ITEM_SCHEMA },
     notice: { type: ["string", "null"] },
+    cacheStatus: { type: "string", enum: ["live", "bypassed", "offline"] },
+    nextCursor: { type: ["string", "null"] },
     truncated: { type: "boolean" },
   },
-  required: ["items", "notice", "truncated"],
+  required: ["items", "notice", "cacheStatus", "nextCursor", "truncated"],
 } as const;
 
 export const WALLET_SETUP_OUTPUT_SCHEMA = {
@@ -211,8 +213,18 @@ export const PREVIEW_OUTPUT_SCHEMA = {
     verificationStatus: {},
     accessUrl: {},
     offlineCache: { type: "string" },
+    cacheStatus: { type: "string", enum: ["live", "bypassed", "offline"] },
   },
-  required: ["id", "title", "description", "price", "type", "verificationStatus", "accessUrl"],
+  required: [
+    "id",
+    "title",
+    "description",
+    "price",
+    "type",
+    "verificationStatus",
+    "accessUrl",
+    "cacheStatus",
+  ],
 } as const;
 
 const DRY_RUN_SCHEMA = {
@@ -321,6 +333,16 @@ const LEASE_BUY_SUCCESS_SCHEMA = {
   type: "object",
   properties: {
     status: { type: "string", const: "success" },
+    txPhase: {
+      type: "string",
+      enum: ["simulated", "submitted", "included", "settled"],
+      description:
+        '"settled" = USDC transfer polled to SUCCESS on-chain before this result was returned.',
+    },
+    confirmed: {
+      type: "boolean",
+      description: 'true only when txPhase is "settled". Deprecated: prefer txPhase.',
+    },
     resourceId: { type: "string" },
     tier: { type: "string" },
     creator: { type: "string" },
@@ -408,6 +430,8 @@ export const PURCHASE_HISTORY_OUTPUT_SCHEMA = {
           receiptRef: { type: ["string", "null"] },
           title: { type: "string" },
           profile: { type: "string" },
+          clientIdempotencyKey: { type: "string" },
+          status: { type: "string", enum: ["pending", "settled", "failed"] },
           // Pre-resolved Stellar Expert URL for the settlement transaction.
           // Null when txHash was not recorded. Pass txHash to mindvault_tx_status
           // to check live on-chain settlement status.
@@ -421,6 +445,7 @@ export const PURCHASE_HISTORY_OUTPUT_SCHEMA = {
           "timestamp",
           "receiptRef",
           "explorerUrl",
+          "status",
         ],
       },
     },
@@ -464,6 +489,40 @@ export const REGISTRY_LIST_OUTPUT_SCHEMA = {
     rpc: {},
   },
   required: ["source", "start", "limit", "count", "resources", "contract"],
+} as const;
+
+export const REGISTRY_CREATOR_PAGE_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    source: { type: "string" },
+    creator: { type: "string" },
+    count: { type: "integer" },
+    resources: { type: "array" },
+    nextCursor: { type: ["string", "null"] },
+    message: { type: "string" },
+    contract: {},
+    network: {},
+    rpc: {},
+  },
+  required: ["source", "creator", "count", "resources", "nextCursor", "contract"],
+} as const;
+
+export const REGISTRY_TAG_SEARCH_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    source: { type: "string" },
+    prefix: { type: "string" },
+    cursor: { type: "integer" },
+    limit: { type: "integer" },
+    count: { type: "integer" },
+    resources: { type: "array" },
+    nextCursor: { type: ["integer", "null"] },
+    message: { type: "string" },
+    contract: {},
+    network: {},
+    rpc: {},
+  },
+  required: ["source", "prefix", "cursor", "limit", "count", "resources", "nextCursor", "contract"],
 } as const;
 
 export const REGISTRY_COUNT_OUTPUT_SCHEMA = {
@@ -657,7 +716,13 @@ const ONCHAIN_MUTATION_SUCCESS = {
     status: {
       type: "string",
       description:
-        '"success" once confirmed; "submitted" when the transaction was accepted but its outcome could not be read (poll timeout or RPC outage) — check it with statusLookup instead of resubmitting.',
+        '"success" once settled on-chain; "submitted" when the transaction was accepted but its outcome could not be read (poll timeout or RPC outage) — check it with statusLookup instead of resubmitting.',
+    },
+    txPhase: {
+      type: "string",
+      enum: ["simulated", "submitted", "included", "settled"],
+      description:
+        'Explicit transaction phase. "settled" = getTransaction returned SUCCESS (confirmed on-chain). "submitted" = accepted by RPC but outcome not yet read. Never "simulated" on the settled path.',
     },
     resourceId: { type: "string" },
     txHash: { type: ["string", "null"] },
@@ -665,7 +730,10 @@ const ONCHAIN_MUTATION_SUCCESS = {
     price: { type: "string" },
     newCreator: { type: "string" },
     listed: { type: "boolean" },
-    confirmed: { type: "boolean" },
+    confirmed: {
+      type: "boolean",
+      description: 'true only when txPhase is "settled". Deprecated: prefer txPhase.',
+    },
     reason: { type: "string", enum: ["confirmation_timeout", "rpc_unavailable"] },
     statusLookup: TX_STATUS_LOOKUP_SCHEMA,
     message: { type: "string" },
@@ -747,6 +815,7 @@ export const TEXT_ONLY_TOOLS = [
   "mindvault_verify_install",
   "mindvault_registry_health",
   "mindvault_check_state_permissions",
+  "mindvault_compare_state_backup",
   "mindvault_register",
   "mindvault_rotate_publisher_key",
   "mindvault_set_tags",
@@ -834,7 +903,9 @@ export const PROFILE_EXPORT_OUTPUT_SCHEMA = {
           network: { type: "string", enum: ["testnet", "mainnet"] },
           preferences: {
             type: "object",
-            propertyNames: { pattern: "^(?!.*(secret|private|seed|credential|apikey|token|password)).*$" },
+            propertyNames: {
+              pattern: "^(?!.*(secret|private|seed|credential|apikey|token|password)).*$",
+            },
             additionalProperties: { type: ["string", "number", "boolean", "null"] },
           },
         },
@@ -851,58 +922,124 @@ export const PROFILE_IMPORT_OUTPUT_SCHEMA = {
   required: ["imported"],
 } as const;
 
-/**
- * Output schema for mindvault_wallet_allowance (#1052).
- *
- * All amounts carry explicit `asset` and `network` fields so a consumer
- * never has to infer which token or chain an amount refers to.
- */
-export const WALLET_ALLOWANCE_OUTPUT_SCHEMA = {
+/** Output schema for mindvault_rpc_health (#1020). */
+const RPC_ENDPOINT_SCHEMA = {
   type: "object",
   properties: {
-    /** Active profile name. */
+    name: { type: "string" },
+    url: { type: "string" },
+    ok: { type: "boolean" },
+    latencyMs: { type: ["integer", "null"] },
+    networkId: { type: ["string", "null"] },
+    message: { type: "string" },
+  },
+  required: ["name", "url", "ok", "latencyMs", "message"],
+} as const;
+
+export const RPC_HEALTH_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: {
     profile: { type: "string" },
-    /** Stellar public key of the active wallet. */
-    address: { type: "string" },
-    /** x402 network identifier, e.g. "stellar:testnet". */
+    horizonUrl: { type: "string" },
+    sorobanRpcUrl: { type: "string" },
+    allOk: { type: "boolean" },
+    endpoints: {
+      type: "array",
+      items: RPC_ENDPOINT_SCHEMA,
+    },
+    summary: { type: "string" },
+  },
+  required: ["profile", "horizonUrl", "sorobanRpcUrl", "allOk", "endpoints", "summary"],
+} as const;
+
+export const METADATA_DIFF_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    resourceId: { type: "string" },
+    apiFound: { type: "boolean" },
+    onchainFound: { type: "boolean" },
+    onchainError: { type: ["string", "null"] },
+    fields: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          field: { type: "string" },
+          status: {
+            type: "string",
+            enum: ["match", "mismatch", "missing_api", "missing_onchain"],
+          },
+          api: {},
+          onchain: {},
+        },
+        required: ["field", "status", "api", "onchain"],
+      },
+    },
+    discrepancyCount: { type: "integer" },
+    summary: { type: "string" },
+    apiSource: { type: "string" },
+    onchainSource: { type: "string" },
     network: { type: "string" },
-    /** Always "USDC" — the only payment asset MindVault uses. */
-    asset: { type: "string", const: "USDC" },
-    /** USDC SAC contract ID for the active network. */
-    assetContractId: { type: "string" },
-    /** Live USDC balance as a decimal string (e.g. "12.5000000"). */
-    usdcBalance: { type: "string" },
-    /**
-     * Estimated USDC spend over the past 24 h from local receipts, scoped to
-     * the active profile and network. Labeled as an estimate because receipts
-     * are written locally on payment submission; on-chain settlement may
-     * differ if a transaction is retried or a refund is issued.
-     */
-    estimatedPendingSpend: { type: "string" },
-    /** Number of receipts that contributed to estimatedPendingSpend. */
-    receiptCount: { type: "integer" },
-    /**
-     * Configured automatic payment ceiling in USDC (from
-     * MINDVAULT_MAX_AUTO_PAY_USDC, default "10"). Payments above this value
-     * require an explicit maxAutoPayUsdc override on buy/lease calls.
-     */
-    paymentCeiling: { type: "string" },
-    /** ISO-8601 timestamp this snapshot was produced. */
-    snapshotAt: { type: "string" },
-    /** Human-readable note when balance data could not be loaded. */
-    note: { type: ["string", "null"] },
+    x402Network: { type: "string" },
+    rpc: { type: "string" },
   },
   required: [
-    "profile",
-    "address",
+    "resourceId",
+    "apiFound",
+    "onchainFound",
+    "onchainError",
+    "fields",
+    "discrepancyCount",
+    "summary",
+    "apiSource",
+    "onchainSource",
     "network",
-    "asset",
-    "assetContractId",
-    "usdcBalance",
-    "estimatedPendingSpend",
-    "receiptCount",
-    "paymentCeiling",
-    "snapshotAt",
-    "note",
+    "x402Network",
+    "rpc",
   ],
+} as const;
+
+/**
+ * The explanation a contract error code gets (#1021).
+ *
+ * `known` is false for a code this build does not define, and the code the
+ * caller asked about is still reported — an unknown code is a fact about the
+ * deployment, not a reason to hide the number. `knownCodes` is present only
+ * for an unknown input, where it is what lets the agent correct itself.
+ */
+export const REGISTRY_ERROR_EXPLANATION_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    code: { type: ["integer", "null"] },
+    name: { type: ["string", "null"] },
+    known: { type: "boolean" },
+    description: { type: ["string", "null"] },
+    category: {
+      type: ["string", "null"],
+      enum: [
+        "registration",
+        "validation",
+        "authorization",
+        "admin",
+        "payment",
+        "moderation",
+        "network",
+        null,
+      ],
+    },
+    retry: { type: ["string", "null"], enum: ["safe", "unsafe", "conditional", null] },
+    nextSteps: { type: "string" },
+    knownCodes: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          code: { type: "integer" },
+          name: { type: "string" },
+        },
+        required: ["code", "name"],
+      },
+    },
+  },
+  required: ["code", "name", "known", "description", "category", "retry", "nextSteps"],
 } as const;

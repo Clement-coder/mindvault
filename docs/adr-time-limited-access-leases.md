@@ -256,6 +256,14 @@ records the lease on-chain with the payment hash. The off-chain lease table,
 the paywall short-circuit and the expiry sweeper (follow-ups 1 to 3) are still
 open.
 
+**Fee-config freeze (#991).** When a lease is created, the resource's current
+price is locked into `Lease.amount`. A subsequent `set_fee_config` that raises
+the combined `platform_fee_bps + royalty_bps` to or above that resource's price
+would retroactively invalidate the lease's pricing. The contract now tracks an
+`ActiveLeasePriceFloor` (the minimum resource price among resources with open
+leases) and rejects conflicting fee changes with `LeaseFeeConfigConflict`.
+See [ADR: Fee Config](adr-fee-config.md#negative--limitations) for details.
+
 ## References
 
 - [x402 protocol spec](https://www.x402.org/)

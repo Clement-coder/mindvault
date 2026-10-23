@@ -155,15 +155,42 @@ describe.skipIf(skipFileChecks)("generated fixture files", () => {
     expect(parseFloat(fixture.agent.pricePerVerification)).toBeGreaterThan(0);
   });
 
-  it("horizon-balances.json contains a USDC and a native balance", () => {
+  it("horizon-balances.json contains a canonical USDC and a native balance", () => {
     const fixture = loadFixture("horizon-balances.json") as {
-      balances: Array<{ asset_type: string; asset_code?: string; balance: string }>;
+      balances: Array<{
+        asset_type: string;
+        asset_code?: string;
+        asset_issuer?: string;
+        balance: string;
+      }>;
     };
     expect(Array.isArray(fixture.balances)).toBe(true);
-    const usdc = fixture.balances.find((b) => b.asset_code === "USDC");
+    const usdc = fixture.balances.find(
+      (b) =>
+        b.asset_code === "USDC" &&
+        b.asset_issuer === "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+    );
     const native = fixture.balances.find((b) => b.asset_type === "native");
     expect(usdc).toBeDefined();
     expect(native).toBeDefined();
+  });
+
+  it("horizon-balances.json includes a counterfeit USDC that is not the canonical issuer", () => {
+    const fixture = loadFixture("horizon-balances.json") as {
+      balances: Array<{
+        asset_type: string;
+        asset_code?: string;
+        asset_issuer?: string;
+        balance: string;
+      }>;
+    };
+    const counterfeit = fixture.balances.find(
+      (b) =>
+        b.asset_code === "USDC" &&
+        b.asset_issuer !== "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+    );
+    expect(counterfeit).toBeDefined();
+    expect(counterfeit!.balance).toBe("5000.0000000");
   });
 
   it("all fixture files carry a _meta.generatedBy field", () => {

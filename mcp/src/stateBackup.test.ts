@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { createCipheriv, randomBytes, scryptSync } from "crypto";
 import * as fs from "fs";
 import {
   chmodSync,
@@ -23,6 +24,7 @@ import {
   quarantineStateFile,
   preserveLegacyState,
   writeAtomically,
+  validateBackupProfiles,
 } from "./stateBackup.js";
 import { STATE_VERSION, type ProfileState } from "./profiles.js";
 
@@ -337,5 +339,236 @@ describe("legacy state preservation (#601)", () => {
   it("writes the legacy snapshot with mode 0600 like the state file itself", () => {
     preserveLegacyState(legacy);
     expect(statSync(LEGACY_FILE).mode & 0o7777).toBe(0o600);
+  });
+});
+
+describe("validateBackupProfiles (#1047)", () => {
+  it("returns valid for a well-formed multi-profile object", () => {
+    const result = validateBackupProfiles({
+      version: 1,
+      activeProfile: "default",
+      profiles: {
+        default: { wallet: { publicKey: "GPUB", secretKey: "SSECRET" } },
+        buyer: { wallet: { publicKey: "GBUY", secretKey: "SBUY" } },
+      },
+    });
+    expect(result.valid).toBe(true);
+    expect(result.errors).toEqual([]);
+  });
+
+  it("returns valid when profiles is absent (empty state)", () => {
+    expect(validateBackupProfiles({ version: 1, activeProfile: "default" }).valid).toBe(true);
+    expect(validateBackupProfiles({}).valid).toBe(true);
+    expect(validateBackupProfiles(null).valid).toBe(true);
+  });
+
+  it("returns valid for an explicitly empty profiles object", () => {
+    expect(validateBackupProfiles({ profiles: {} }).valid).toBe(true);
+  });
+
+  it("rejects when profiles is a non-object type (array)", () => {
+    const result = validateBackupProfiles({ profiles: ["default", "buyer"] });
+    expect(result.valid).toBe(false);
+    expect(result.errors[0].field).toBe("profiles");
+    expect(result.errors[0].message).toMatch(/plain object/);
+  });
+
+  it("rejects when profiles is a string", () => {
+    const result = validateBackupProfiles({ profiles: "bad" });
+    expect(result.valid).toBe(false);
+    expect(result.errors[0].field).toBe("profiles");
+  });
+
+  it("rejects a profile name that fails the pattern (spaces)", () => {
+    const result = validateBackupProfiles({ profiles: { "bad name": {} } });
+    expect(result.valid).toBe(false);
+    const err = result.errors.find((e) => e.field === "profiles.bad name");
+    expect(err).toBeDefined();
+    expect(err!.message).toMatch(/valid profile name/);
+  });
+
+  it("rejects a profile name that is too long (65 chars)", () => {
+    const longName = "a".repeat(65);
+    const result = validateBackupProfiles({ profiles: { [longName]: {} } });
+    expect(result.valid).toBe(false);
+    expect(result.errors[0].field).toBe(`profiles.${longName}`);
+  });
+
+  it("rejects profile names that are case-insensitive duplicates", () => {
+    const result = validateBackupProfiles({
+      profiles: {
+        default: {},
+        Default: {},
+      },
+    });
+    expect(result.valid).toBe(false);
+    const err = result.errors.find((e) => e.field === "profiles.Default");
+    expect(err).toBeDefined();
+    expect(err!.message).toMatch(/conflicts with.*default/i);
+    expect(err!.message).toMatch(/case-insensitive duplicate/);
+  });
+
+  it("rejects multiple case-insensitive conflicts in a single pass", () => {
+    const result = validateBackupProfiles({
+      profiles: {
+        alice: {},
+        Alice: {},
+        ALICE: {},
+        bob: {},
+        Bob: {},
+      },
+    });
+    expect(result.valid).toBe(false);
+    // Two collisions on alice/Alice/ALICE, one on bob/Bob.
+    const aliceErrors = result.errors.filter((e) => e.field.toLowerCase().includes("alice"));
+    const bobErrors = result.errors.filter((e) => e.field.toLowerCase().includes("bob"));
+    expect(aliceErrors.length).toBeGreaterThanOrEqual(1);
+    expect(bobErrors.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("collects multiple distinct errors for different problems", () => {
+    const result = validateBackupProfiles({
+      profiles: {
+        "bad name": {},
+        default: {},
+        Default: {},
+      },
+    });
+    expect(result.valid).toBe(false);
+    expect(result.errors.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("restoreState rejects duplicate/conflicting profile identifiers (#1047)", () => {
+  const STATE_DIR = join(homedir(), ".mindvault");
+  const STATE_FILE = join(STATE_DIR, "state.json");
+  const PASS = "test-passphrase-ok";
+
+  const initial: ProfileState = {
+    version: STATE_VERSION,
+    activeProfile: "default",
+    profiles: {
+      default: {
+        wallet: { publicKey: "GORIGINAL", secretKey: "SORIGINAL" },
+      },
+    },
+  };
+
+  beforeEach(() => {
+    mkdirSync(STATE_DIR, { recursive: true });
+    writeFileSync(STATE_FILE, JSON.stringify(initial, null, 2), { mode: 0o600 });
+  });
+
+  afterEach(() => {
+    if (existsSync(STATE_FILE)) rmSync(STATE_FILE);
+  });
+
+  /**
+   * Build a backup blob that contains a hand-crafted payload, bypassing the
+   * normal exportState path so we can inject arbitrary profile structures.
+   */
+  function buildBlobFromPayload(payload: unknown): string {
+    const SCRYPT_N = 1 << 14;
+    const SCRYPT_R = 8;
+    const SCRYPT_P = 1;
+    const SCRYPT_MAXMEM = 64 * 1024 * 1024;
+    const KEY_LEN = 32;
+    const SALT_LEN = 16;
+    const NONCE_LEN = 12;
+    const salt = randomBytes(SALT_LEN);
+    const nonce = randomBytes(NONCE_LEN);
+    const key = scryptSync(PASS, salt, KEY_LEN, {
+      N: SCRYPT_N,
+      r: SCRYPT_R,
+      p: SCRYPT_P,
+      maxmem: SCRYPT_MAXMEM,
+    });
+    const cipher = createCipheriv("aes-256-gcm", key, nonce);
+    const data = Buffer.concat([cipher.update(JSON.stringify(payload), "utf8"), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    const blob = Buffer.concat([data, tag]);
+    return `v1:${salt.toString("base64")}:${nonce.toString("base64")}:${blob.toString("base64")}`;
+  }
+
+  it("rejects a backup with case-insensitive duplicate profile IDs, leaving state file unchanged", () => {
+    const maliciousBlob = buildBlobFromPayload({
+      version: 1,
+      activeProfile: "default",
+      profiles: {
+        default: { wallet: { publicKey: "GNEW", secretKey: "SNEW" } },
+        Default: { wallet: { publicKey: "GNEW2", secretKey: "SNEW2" } },
+      },
+    });
+
+    let wrote = false;
+    expect(() =>
+      restoreState(maliciousBlob, PASS, () => {
+        wrote = true;
+      }),
+    ).toThrow(StateBackupError);
+    expect(wrote).toBe(false);
+
+    // Disk state must be untouched.
+    const ondisk = JSON.parse(readFileSync(STATE_FILE, "utf-8"));
+    expect(ondisk.profiles.default.wallet.publicKey).toBe("GORIGINAL");
+  });
+
+  it("includes field-level information in the error message", () => {
+    const blob = buildBlobFromPayload({
+      version: 1,
+      activeProfile: "default",
+      profiles: {
+        publisher: {},
+        Publisher: {},
+      },
+    });
+
+    let errorMsg = "";
+    try {
+      restoreState(blob, PASS, () => {});
+    } catch (err) {
+      errorMsg = (err as Error).message;
+    }
+    expect(errorMsg).toContain("profiles.Publisher");
+    expect(errorMsg).toMatch(/conflicts with.*publisher/i);
+  });
+
+  it("rejects a backup whose profiles value is not an object", () => {
+    const blob = buildBlobFromPayload({
+      version: 1,
+      activeProfile: "default",
+      profiles: ["default", "buyer"],
+    });
+
+    let wrote = false;
+    expect(() =>
+      restoreState(blob, PASS, () => {
+        wrote = true;
+      }),
+    ).toThrow(StateBackupError);
+    expect(wrote).toBe(false);
+
+    const ondisk = JSON.parse(readFileSync(STATE_FILE, "utf-8"));
+    expect(ondisk.profiles.default.wallet.publicKey).toBe("GORIGINAL");
+  });
+
+  it("accepts a valid multi-profile backup with distinct case-insensitive names", () => {
+    const blob = buildBlobFromPayload({
+      version: 1,
+      activeProfile: "publisher",
+      profiles: {
+        publisher: { wallet: { publicKey: "GPUB", secretKey: "SPUB" }, apiKey: "key-1" },
+        buyer: { wallet: { publicKey: "GBUY", secretKey: "SBUY" } },
+        staging: { network: "testnet" },
+      },
+    });
+
+    let restored: ProfileState | null = null;
+    const msg = restoreState(blob, PASS, (s) => {
+      restored = s;
+    });
+    expect(restored).not.toBeNull();
+    expect(msg).toContain("3 profile");
+    expect(msg).toContain("publisher");
   });
 });

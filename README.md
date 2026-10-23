@@ -59,37 +59,39 @@ MindVault includes an MCP server that lets any AI system (Claude Code, Codex, or
 
 Available tools:
 
-| Tool                           | Description                                                                | Example                                                         |
-| ------------------------------ | -------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| `mindvault_setup_wallet`       | Create a Stellar wallet using the sponsored account protocol               | `"Create a wallet for me"`                                      |
-| `mindvault_wallet_info`        | Check wallet address and USDC balance                                      | `"What's my wallet balance?"`                                   |
-| `mindvault_wallet_balances`    | List balances for every configured agent wallet plus the platform wallet   | `"Show all wallet balances"`                                    |
-| `mindvault_browse`             | List catalog resources (same filters and sort options as search)           | `"List the cheapest resources first"`                           |
-| `mindvault_search`             | Search catalog by keyword, price, type, status, owner, tags, listed        | `"Find verified links under 1 USDC"`                            |
-| `mindvault_preview`            | Get details and price for a resource                                       | `"Preview resource swcn98besxpp6t1u8e77fqz3"`                   |
-| `mindvault_register`           | Register as a publisher using the agent's wallet                           | `"Register me as Alice, alice@example.com"`                     |
-| `mindvault_publish`            | Publish a resource and pay for verification via x402                       | `"Publish 'My Dataset' for 5 USDC at https://example.com/data"` |
-| `mindvault_publish_status`     | Poll verification and on-chain sync status after publish                   | `"Check publish status for swcn98besxpp6t1u8e77fqz3"`           |
-| `mindvault_buy`                | Pay USDC and access a resource via x402 (optional wait for settlement)     | `"Buy resource swcn98besxpp6t1u8e77fqz3"`                       |
-| `mindvault_buy_lease`          | Buy an hour, day, or week access lease, paid to the creator in USDC        | `"Lease swcn98besxpp6t1u8e77fqz3 for a day"`                    |
-| `mindvault_lease_status`       | Read the on-chain lease for a resource and holder and whether it is active | `"Is my lease on swcn98besxpp6t1u8e77fqz3 still active?"`       |
-| `mindvault_purchase_history`   | List locally persisted purchase receipts (filter by resource/network)      | `"Show my purchase history for stellar:testnet"`                |
-| `mindvault_export_receipts`    | Export purchase receipts as a schema-versioned JSON or CSV document        | `"Export August's receipts as CSV"`                             |
-| `mindvault_metrics`            | Read opt-in tool metrics, optionally reset, exported as JSON or OTLP       | `"Show metrics"`                                                |
-| `mindvault_server_endpoints`   | Introspect this deployment's HTTP API from its published OpenAPI spec      | `"What endpoints does the server expose?"`                      |
-| `mindvault_register_onchain`   | Retry on-chain registration for a published, verified resource             | `"Register resource swcn98besxpp6t1u8e77fqz3 on-chain"`         |
-| `mindvault_update_metadata`    | Update on-chain metadata pointer for a resource                            | `"Update metadata for swcn98besxpp6t1u8e77fqz3 to ipfs://..."`  |
-| `mindvault_set_price`          | Update on-chain USDC price for a resource                                  | `"Set price for swcn98besxpp6t1u8e77fqz3 to 10 USDC"`           |
-| `mindvault_transfer_ownership` | Transfer ownership of a registered resource to a new owner address         | `"Transfer swcn98besxpp6t1u8e77fqz3 to GA6H..."`                |
-| `mindvault_set_listed`         | Manage catalog availability by listing/delisting a resource on-chain       | `"Delist resource swcn98besxpp6t1u8e77fqz3"`                    |
-| `mindvault_agent_status`       | Check the verification agent's earnings and activity                       | `"What's the agent's status?"`                                  |
-| `mindvault_registry_info`      | Return the on-chain vault-registry contract details                        | `"Show me registry info"`                                       |
-| `mindvault_registry_lookup`    | Look up a resource directly from the on-chain vault registry by ID         | `"Look up resource swcn98besxpp6t1u8e77fqz3 on-chain"`          |
-| `mindvault_registry_list`      | Page through resources registered on-chain (Soroban `list`)                | `"List on-chain registry resources start 0 limit 20"`           |
-| `mindvault_tx_status`          | Look up a Stellar transaction status by hash                               | `"Check tx a1b2c3d4..."`                                        |
-| `mindvault_reset`              | Clear the persisted wallet and publisher API key; needs confirm: true      | `"Reset my agent credentials"`                                  |
-| `mindvault_verify_install`     | Verify the MCP server install and configuration (local checks, no network) | `"Verify my install"`                                           |
-| `mindvault_debug_bundle`       | Export a sanitized debug bundle for bug reports (secrets removed, offline) | `"Export a debug bundle for this ticket"`                       |
+| Tool                              | Description                                                                | Example                                                         |
+| --------------------------------- | -------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| `mindvault_setup_wallet`          | Create a Stellar wallet using the sponsored account protocol               | `"Create a wallet for me"`                                      |
+| `mindvault_wallet_info`           | Check wallet address and USDC balance                                      | `"What's my wallet balance?"`                                   |
+| `mindvault_wallet_balances`       | List balances for every configured agent wallet plus the platform wallet   | `"Show all wallet balances"`                                    |
+| `mindvault_browse`                | List catalog resources (same filters and sort options as search)           | `"List the cheapest resources first"`                           |
+| `mindvault_search`                | Search catalog by keyword, price, type, status, owner, tags, listed        | `"Find verified links under 1 USDC"`                            |
+| `mindvault_preview`               | Get details and price for a resource                                       | `"Preview resource swcn98besxpp6t1u8e77fqz3"`                   |
+| `mindvault_register`              | Register as a publisher using the agent's wallet                           | `"Register me as Alice, alice@example.com"`                     |
+| `mindvault_publish`               | Publish a resource and pay for verification via x402                       | `"Publish 'My Dataset' for 5 USDC at https://example.com/data"` |
+| `mindvault_publish_status`        | Poll verification and on-chain sync status after publish                   | `"Check publish status for swcn98besxpp6t1u8e77fqz3"`           |
+| `mindvault_buy`                   | Pay USDC and access a resource via x402 (optional wait for settlement)     | `"Buy resource swcn98besxpp6t1u8e77fqz3"`                       |
+| `mindvault_buy_lease`             | Buy an hour, day, or week access lease, paid to the creator in USDC        | `"Lease swcn98besxpp6t1u8e77fqz3 for a day"`                    |
+| `mindvault_lease_status`          | Read the on-chain lease for a resource and holder and whether it is active | `"Is my lease on swcn98besxpp6t1u8e77fqz3 still active?"`       |
+| `mindvault_purchase_history`      | List locally persisted purchase receipts (filter by resource/network)      | `"Show my purchase history for stellar:testnet"`                |
+| `mindvault_export_receipts`       | Export purchase receipts as a schema-versioned JSON or CSV document        | `"Export August's receipts as CSV"`                             |
+| `mindvault_metrics`               | Read opt-in tool metrics, optionally reset, exported as JSON or OTLP       | `"Show metrics"`                                                |
+| `mindvault_server_endpoints`      | Introspect this deployment's HTTP API from its published OpenAPI spec      | `"What endpoints does the server expose?"`                      |
+| `mindvault_register_onchain`      | Retry on-chain registration for a published, verified resource             | `"Register resource swcn98besxpp6t1u8e77fqz3 on-chain"`         |
+| `mindvault_update_metadata`       | Update on-chain metadata pointer for a resource                            | `"Update metadata for swcn98besxpp6t1u8e77fqz3 to ipfs://..."`  |
+| `mindvault_set_price`             | Update on-chain USDC price for a resource                                  | `"Set price for swcn98besxpp6t1u8e77fqz3 to 10 USDC"`           |
+| `mindvault_transfer_ownership`    | Transfer ownership of a registered resource to a new owner address         | `"Transfer swcn98besxpp6t1u8e77fqz3 to GA6H..."`                |
+| `mindvault_set_listed`            | Manage catalog availability by listing/delisting a resource on-chain       | `"Delist resource swcn98besxpp6t1u8e77fqz3"`                    |
+| `mindvault_agent_status`          | Check the verification agent's earnings and activity                       | `"What's the agent's status?"`                                  |
+| `mindvault_registry_info`         | Return the on-chain vault-registry contract details                        | `"Show me registry info"`                                       |
+| `mindvault_registry_lookup`       | Look up a resource directly from the on-chain vault registry by ID         | `"Look up resource swcn98besxpp6t1u8e77fqz3 on-chain"`          |
+| `mindvault_registry_list`         | Page through resources registered on-chain (Soroban `list`)                | `"List on-chain registry resources start 0 limit 20"`           |
+| `mindvault_registry_creator_page` | Page one creator's on-chain resources, filtered by listed/lifecycle state  | `"List my on-chain resources, listed only"`                     |
+| `mindvault_registry_tag_search`   | Find on-chain resources whose tag starts with a prefix                     | `"Find on-chain resources tagged dat*"`                         |
+| `mindvault_tx_status`             | Look up a Stellar transaction status by hash                               | `"Check tx a1b2c3d4..."`                                        |
+| `mindvault_reset`                 | Clear the persisted wallet and publisher API key; needs confirm: true      | `"Reset my agent credentials"`                                  |
+| `mindvault_verify_install`        | Verify the MCP server install and configuration (local checks, no network) | `"Verify my install"`                                           |
+| `mindvault_debug_bundle`          | Export a sanitized debug bundle for bug reports (secrets removed, offline) | `"Export a debug bundle for this ticket"`                       |
 
 ### Install
 

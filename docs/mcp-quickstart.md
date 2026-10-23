@@ -4,6 +4,11 @@ This walkthrough takes you from a fresh MCP install to a working agent-to-agent 
 
 Everything below uses the tools exposed by the MindVault MCP server (`mcp/`). The server defaults to the hosted backend at `https://mindvault-hyr3.onrender.com` and the testnet vault-registry contract — no env vars required for the happy path.
 
+For public string limits passed through to the registry, lengths are measured
+in UTF-8 bytes, not displayed characters. Empty values are accepted only for
+some fields; see the [contract string validation matrix](../contract/README.md#bounded-text-validation)
+before constructing metadata, tags, terms hashes, or receipt identifiers.
+
 ## Prerequisites
 
 - The MCP server is installed and registered with your client (see [README → MCP Server](../README.md#mcp-server) for `claude mcp add` / `codex mcp add` commands).
@@ -247,13 +252,25 @@ Returns `{ count, purchases }` (newest first). Empty history returns `count: 0` 
 
 ### 12b. `mindvault_export_receipts`
 
-Export those receipts as a schema-versioned document for reconciliation — JSON, or RFC 4180 CSV in the envelope's `csv` field. Optional `resourceId`, `network`, `since`, `until`, and `limit` filters.
+Export those receipts as a schema-versioned document for reconciliation — JSON, or RFC 4180 CSV in the envelope's `csv` field (or Newline-Delimited JSON in `ndjson`). Optional `resourceId`, `network`, `since`, `until`, and `limit` filters.
 
 ```json
 { "format": "csv", "since": "2026-08-01", "until": "2026-08-31" }
 ```
 
-Returns a `mindvault.receipt-export/v1` envelope with `count`, an exact `totalAmount`, an explicit `currency`, and one normalized row per purchase (including the Stellar Expert link). The tool advertises an `outputSchema`, so the same envelope also arrives as MCP `structuredContent`. See [mcp-receipt-export.md](mcp-receipt-export.md).
+Select exactly the columns you need with `fields`; sensitive fields (the local wallet `profile`) are excluded unless you name them or pass `includeSensitive: true`:
+
+```json
+{ "format": "json", "fields": "resourceId,amount,purchasedAt" }
+```
+
+Export a history larger than one page with `limit` + `offset`; the envelope's `nextOffset` is the value to pass next, and is `null` on the last page:
+
+```json
+{ "limit": 500, "offset": 0 }
+```
+
+Returns a `mindvault.receipt-export/v1` envelope with `count`, `totalMatching`, `nextOffset`, an exact `totalAmount`, an explicit `currency`, the echoed `fields`, and one normalized row per purchase (including the Stellar Expert link). The tool advertises an `outputSchema`, so the same envelope also arrives as MCP `structuredContent`. See [mcp-receipt-export.md](mcp-receipt-export.md).
 
 ---
 

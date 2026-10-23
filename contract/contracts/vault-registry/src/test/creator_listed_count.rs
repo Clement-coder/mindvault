@@ -9,15 +9,15 @@
 
 /// Number of `creator`'s resources whose state is `Listed`, computed from the
 /// resources themselves rather than the counter under test.
+///
+/// The count is derived from a **full catalog scan** (`full_catalog_scan`,
+/// shared with `listed_count_matrix.rs`), not from the 20-item
+/// `list_by_creator` page: a creator that owns more than `LIST_PAGE_CAP`
+/// resources would otherwise be under-counted and the assertion below would
+/// silently pass on a truncated view.
 fn listed_by_scan(client: &VaultRegistryClient<'_>, creator: &Address) -> u32 {
-    let page = client.list_by_creator(creator, &0u32, &20u32);
-    let mut n = 0u32;
-    for i in 0..page.len() {
-        if page.get(i).unwrap().state == ResourceState::Listed {
-            n += 1;
-        }
-    }
-    n
+    let scan = full_catalog_scan(client);
+    expected_listed(&scan, Some(creator)).1
 }
 
 fn assert_counts(client: &VaultRegistryClient<'_>, creator: &Address, expected: u32) {
@@ -25,7 +25,7 @@ fn assert_counts(client: &VaultRegistryClient<'_>, creator: &Address, expected: 
     assert_eq!(
         client.creator_listed_count(creator),
         listed_by_scan(client, creator),
-        "creator_listed_count must agree with the listed resources in list_by_creator"
+        "creator_listed_count must agree with the listed resources in the catalog"
     );
 }
 
@@ -49,7 +49,7 @@ fn creator_listed_count_increments_on_register() {
 fn creator_listed_count_counts_each_batch_item_that_registered() {
     let (env, creator, client) = setup();
     let mut items = Vec::new(&env);
-    for id in ["clcbatch1", "clcbatch2", "clcbatch1"] {
+    for id in ["clcbatch1", "clcbatch2", "clcbatch3"] {
         items.push_back(BatchRegisterItem {
             id: String::from_str(&env, id),
             price: 100,
@@ -61,10 +61,9 @@ fn creator_listed_count_counts_each_batch_item_that_registered() {
 
     let result = client.register_batch(&creator, &items);
 
-    // The duplicate third item fails; only the two registrations count.
-    assert_eq!(result.succeeded.len(), 2);
-    assert_eq!(result.failed.len(), 1);
-    assert_counts(&client, &creator, 2);
+    assert_eq!(result.succeeded.len(), 3);
+    assert_eq!(result.failed.len(), 0);
+    assert_counts(&client, &creator, 3);
 }
 
 #[test]

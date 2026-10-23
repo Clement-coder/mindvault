@@ -59,12 +59,15 @@ const { browse, buy, walletInfo, txStatus, networkProfile, _setAgentWallet } =
   await import("./index.js");
 
 function mockResponse(data: unknown, ok = true, status = 200, headers?: Record<string, string>) {
+  const body = typeof data === "string" ? data : JSON.stringify(data);
   return {
     ok,
     status,
     statusText: ok ? "OK" : "Error",
-    text: () => Promise.resolve(typeof data === "string" ? data : JSON.stringify(data)),
+    text: () => Promise.resolve(body),
     json: () => Promise.resolve(data),
+    // jsonFetch reads bodies through readBoundedResponse, which needs bytes.
+    arrayBuffer: () => Promise.resolve(new TextEncoder().encode(body).buffer),
     headers: new Headers({ "content-type": "application/json", ...headers }),
   } as Response;
 }
@@ -127,7 +130,12 @@ describe("idempotent reads retry", () => {
           subentry_count: 1,
           balances: [
             { asset_type: "native", balance: "5.0" },
-            { asset_type: "credit_alphanum4", asset_code: "USDC", balance: "10.0" },
+            {
+              asset_type: "credit_alphanum4",
+              asset_code: "USDC",
+              asset_issuer: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+              balance: "10.0",
+            },
           ],
         }),
       );
@@ -150,6 +158,50 @@ describe("idempotent reads retry", () => {
   });
 });
 
+// Deterministic failures stop at the first attempt; transient ones use the
+// whole bounded budget (#1072). One row per status, through a real tool.
+const STATUS_TABLE: { status: number; category: RegExp; attempts: number }[] = [
+  { status: 400, category: /Category: validation/, attempts: 1 },
+  { status: 401, category: /Category: auth/, attempts: 1 },
+  { status: 403, category: /Category: auth/, attempts: 1 },
+  { status: 404, category: /Category: not_found/, attempts: 1 },
+  { status: 422, category: /Category: validation/, attempts: 1 },
+  { status: 429, category: /Category: rate_limit/, attempts: 3 },
+  { status: 500, category: /Category: server/, attempts: 3 },
+  { status: 503, category: /Category: server/, attempts: 3 },
+];
+
+describe("deterministic failures are not retried as transient (#1072)", () => {
+  it.each(STATUS_TABLE)(
+    "browse on HTTP $status makes $attempts attempt(s)",
+    async ({ status, category, attempts }) => {
+      const fetchMock = vi.fn().mockResolvedValue(mockResponse({ error: "nope" }, false, status));
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(browse()).rejects.toThrow(category);
+      expect(fetchMock).toHaveBeenCalledTimes(attempts);
+    },
+  );
+
+  it.each([401, 403])("Soroban getTransaction on HTTP %i is issued once", async (status) => {
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse({}, false, status));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(txStatus("abc123")).rejects.toThrow();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("a thrown contract validation error is not replayed", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValue(new Error("HostError: Error(Contract, #32) NetworkIdMismatch"));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(txStatus("abc123")).rejects.toThrow();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("non-idempotent calls are issued exactly once", () => {
   it("never replays an x402 payment, even on a transient failure", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation((url) => {
@@ -159,7 +211,12 @@ describe("non-idempotent calls are issued exactly once", () => {
           mockResponse({
             balances: [
               { asset_type: "native", balance: "10.0" },
-              { asset_type: "credit_alphanum4", asset_code: "USDC", balance: "999.00" },
+              {
+                asset_type: "credit_alphanum4",
+                asset_code: "USDC",
+                asset_issuer: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+                balance: "999.00",
+              },
             ],
           }),
         );
@@ -187,7 +244,12 @@ describe("non-idempotent calls are issued exactly once", () => {
           mockResponse({
             balances: [
               { asset_type: "native", balance: "10.0" },
-              { asset_type: "credit_alphanum4", asset_code: "USDC", balance: "999.00" },
+              {
+                asset_type: "credit_alphanum4",
+                asset_code: "USDC",
+                asset_issuer: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+                balance: "999.00",
+              },
             ],
           }),
         );

@@ -247,7 +247,11 @@ describe("exportAllProfiles", () => {
       profiles: [{ name: "alpha", network: "testnet", preferences: { theme: "dark" } }],
     });
     const imported = importProfileState(
-      { version: STATE_VERSION, activeProfile: "alpha", profiles: { alpha: { wallet, apiKey: "old" } } },
+      {
+        version: STATE_VERSION,
+        activeProfile: "alpha",
+        profiles: { alpha: { wallet, apiKey: "old" } },
+      },
       payload,
     );
     expect(imported.state.profiles.alpha).toEqual({

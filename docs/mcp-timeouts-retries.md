@@ -189,10 +189,45 @@ opt-in per call site, and the payment path never opts in.
 - A malformed value falls back to the default rather than failing startup.
 
 Retried conditions: transport failures (`fetch failed`, `ECONNREFUSED`,
-`ENOTFOUND`, …), request timeouts, and HTTP 408, 425, 429, 500, 502, 503, 504.
-A caller-initiated abort is never retried — the caller asked to stop. Client
-errors (400, 401, 402, 403, 404, 409, 422) are not retried because retrying
-cannot fix them.
+`ECONNRESET`, `ENOTFOUND`, `socket hang up`, …), request timeouts, and HTTP
+408, 425, 429, 500, 502, 503, 504. A caller-initiated abort is never retried —
+the caller asked to stop. Client errors (400, 401, 402, 403, 404, 409, 422) are
+not retried because retrying cannot fix them.
+
+#### Deterministic failures stop at the first attempt
+
+A failure that describes the request itself fails the same way on every
+attempt, so retrying it only delays the error by the whole backoff schedule
+(and, for a rejected credential, presents it to the API again).
+[`isRetryableError`](../mcp/src/retry.ts) decides in this order, and the first
+match wins:
+
+| Failure                                                                                                   | Attempts  | Backoff   |
+| --------------------------------------------------------------------------------------------------------- | --------- | --------- |
+| Caller abort (`AbortError`)                                                                               | 1         | none      |
+| Request deadline (`TimeoutError`)                                                                         | all       | jittered  |
+| `ToolValidationError`, `UnknownToolError`, `ResponseSizeLimitError`, `SyntaxError` (malformed input/body) | 1         | none      |
+| Mapped error with an HTTP status: retryable set above, otherwise not (401/403 → `auth`, 400/422 …)        | by status | by status |
+| Mapped `auth`, `validation`, `payment`, `not_found`, `conflict`, `contract` category                      | 1         | none      |
+| Mapped `network`, `timeout`, `rate_limit`, `server` category                                              | all       | jittered  |
+| Error carrying `status` / `statusCode` / `response.status`                                                | by status | by status |
+| Soroban contract or host error (`Error(Contract, #n)`, `Error(Auth, …)`, `HostError`)                     | 1         | none      |
+| Socket `errno` code (`ECONNREFUSED`, `ECONNRESET`, `ETIMEDOUT`, `EAI_AGAIN`, `ENOTFOUND`, `EPIPE`, …)     | all       | jittered  |
+| Transport message (`fetch failed`, `network error`, `socket hang up`, `timed out`) or such a `cause`      | all       | jittered  |
+| Anything else                                                                                             | 1         | none      |
+
+The message check is deliberately narrow. It used to match any `network` or
+`timeout` substring, so a contract's `NetworkIdMismatch`, a host
+`Error(Auth, …)` mentioning the network, or an argument error about a timeout
+value was replayed as if the connection had dropped. The category or status of
+a mapped error is now checked before its text, so an `auth` failure whose
+guidance mentions the network is not retried either.
+
+With the default policy a deterministic failure makes one request and sleeps
+not at all; a transient one makes `MINDVAULT_RETRY_ATTEMPTS` requests with the
+jittered backoff above. `mcp/src/retryClassification.test.ts` pins both, per
+failure kind, and `mcp/src/toolRetries.test.ts` checks the request count per
+HTTP status through `mindvault_browse` and `mindvault_tx_status`.
 
 When a server sends `Retry-After`, it is honoured in place of computed backoff,
 clamped to the max delay so a mistaken or hostile header cannot stall a call.
@@ -252,11 +287,19 @@ status. Fields only the failed endpoint carries come back `null` — the
 ### A submitted transaction that cannot be confirmed
 
 Registry mutations (`mindvault_update_metadata`, `mindvault_set_price`,
-`mindvault_transfer_ownership`, `mindvault_set_listed`, `mindvault_set_tags`)
-and the `register_batch` step of `mindvault_publish_batch` sign a transaction,
-submit it with `sendTransaction`, then poll `getTransaction` until it lands.
-A submit is never retried. It is not idempotent, and a second submit would be
-a second transaction.
+`mindvault_transfer_ownership`, `mindvault_set_listed`, `mindvault_accept_transfer`,
+`mindvault_cancel_transfer`) and the `register_batch` step of `mindvault_publish_batch`
+sign a transaction, submit it with `sendTransaction`, then poll `getTransaction`
+until it lands. A submit is never retried. It is not idempotent, and a second
+submit would be a second transaction.
+
+All of these mutations go through `signAndSendTracked` (in
+[`mcp/src/submittedTransaction.ts`](../mcp/src/submittedTransaction.ts)), which
+captures the transaction hash the moment `sendTransaction` returns via the SDK's
+`onSubmitted` hook. This is the single entry point for all anchor retry paths:
+manual retries (an agent calling the tool again after a failure) and automatic
+retries (the SDK's own internal polling) are both bounded by the same submitted-hash
+invariant. Neither path can bypass it.
 
 If the poll times out, or the RPC goes away after the network accepted the
 transaction, the outcome is unknown but the transaction hash is known. The tool
@@ -328,6 +371,13 @@ MindVault MCP: retrying GET /resources — attempt 2/3 failed (HTTP 503); next a
   RPC loss and poll timeout after submit, run through the SDK's own
   `SentTransaction`, return the hash and a `mindvault_tx_status` lookup
   instead of an error
+- [`mcp/src/tools/anchorRetry.test.ts`](../mcp/src/tools/anchorRetry.test.ts) —
+  all six single-resource registry mutations (`update_metadata`, `set_price`,
+  `transfer_ownership`, `set_listed`, `accept_transfer`, `cancel_transfer`)
+  exhausted through both entry points (submitted-but-unconfirmed and confirmed):
+  every unconfirmed path returns `status: "submitted"` with the hash and
+  `statusLookup`, never resubmits, and the confirmed path returns
+  `status: "success"` with `txPhase: "settled"`
 - [`mcp/src/publishStatusRetry.test.ts`](../mcp/src/publishStatusRetry.test.ts) —
   `mindvault_publish_status` stopping at a terminal status while a companion
   request exhausts its retries
