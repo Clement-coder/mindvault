@@ -111,6 +111,8 @@ export const TOOL_SIDE_EFFECTS: Readonly<Record<string, ToolSideEffects>> = {
   mindvault_check_consistency: READ,
   mindvault_verify_attestation: READ,
   mindvault_registry_lookup: READ,
+  // Explains a contract error from a table; it reads nothing and writes nothing.
+  mindvault_explain_error_code: READ,
   mindvault_registry_list: READ,
   mindvault_registry_count: READ,
   mindvault_registry_creator_page: READ,

@@ -1,5 +1,4 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 export function writeFileAtomicSync(targetPath: string, data: string | Buffer) {
@@ -12,7 +11,9 @@ export function writeFileAtomicSync(targetPath: string, data: string | Buffer) {
   try {
     const fd = fs.openSync(tmp, "w", 0o600);
     try {
-      fs.writeSync(fd, data);
+      // fs.writeSync overloads don't accept string|Buffer as a union; cast to
+      // the shared NodeJS.ArrayBufferView | string supertype via unknown.
+      fs.writeSync(fd, data as unknown as string);
       fs.fsyncSync(fd);
     } finally {
       fs.closeSync(fd);

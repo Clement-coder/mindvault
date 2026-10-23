@@ -1,5 +1,11 @@
 # Vault registry: emergency pause decision
 
+> **Status: superseded.** The registry now has an admin-controlled emergency
+> pause (`set_paused`, `set_paused_until`). The published scope of that pause —
+> the method-to-pause matrix — is in
+> [`contract/README.md`](../contract/README.md#pause-scope-matrix). This
+> document is kept as the original architecture spike for issue #109.
+
 Issue #109 asked whether the `vault-registry` Soroban contract needs an
 admin-controlled pause on write paths. This document records the architecture
 spike and the decision **not** to implement pause in the contract at this time.
@@ -35,14 +41,14 @@ enforces compliance gates, or must halt an active exploit in a single shared poo
 
 ## Evaluation
 
-| Criterion | Assessment |
-|-----------|--------------|
-| Funds at risk in contract | No — registry stores metadata only |
-| Need to halt payments | No — payments are off-contract (x402) |
-| Per-resource abuse | Handled by creator auth + delist; no global kill switch needed |
-| Operational incident | Worst case: bad entries remain readable; creators can delist; deploy new contract version if needed |
-| Backward compatibility | Admin + pause changes trust assumptions for integrators |
-| Complexity / audit surface | Non-trivial for marginal benefit in this trust model |
+| Criterion                  | Assessment                                                                                          |
+| -------------------------- | --------------------------------------------------------------------------------------------------- |
+| Funds at risk in contract  | No — registry stores metadata only                                                                  |
+| Need to halt payments      | No — payments are off-contract (x402)                                                               |
+| Per-resource abuse         | Handled by creator auth + delist; no global kill switch needed                                      |
+| Operational incident       | Worst case: bad entries remain readable; creators can delist; deploy new contract version if needed |
+| Backward compatibility     | Admin + pause changes trust assumptions for integrators                                             |
+| Complexity / audit surface | Non-trivial for marginal benefit in this trust model                                                |
 
 ## Alternatives considered
 

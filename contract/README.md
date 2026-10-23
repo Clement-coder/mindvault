@@ -1334,6 +1334,9 @@ When paused, every write method (`register`, `set_price`, `update_metadata`,
 `repair_index`, `set_terms_hash`, `record_payment`, `record_payment_idempotent`)
 returns `Error::ContractPaused` (code `40`) without modifying any state.
 
+The payment, refund, lease and anchor methods are covered too — see the
+**Pause scope matrix** below for the exact scope of the pause.
+
 Read-only methods (`get`, `exists`, `list*`, `count`, `get_owner`, `registry_info`,
 `contract_version`, `get_terms_hash`, `get_payment_receipt`, `is_flagged`,
 `flag_details`, `is_paused`, `is_verifier`, `admin`, `pending_admin`) remain
@@ -1347,6 +1350,42 @@ data `(pause_until: u64, admin: Address)`.
 
 Only the current admin can call `set_paused`. Errors `AdminNotSet` if no admin
 has been set, or `Unauthorized` if the caller does not match the stored admin.
+
+### Pause scope matrix
+
+The emergency pause is global and it is not advisory: while the registry is
+paused, every state-changing method in the payment, refund, lease and anchor
+families is refused with `Error::ContractPaused` (code `40`) and leaves the
+registry completely unchanged — no receipt, no secondary index, no refund
+record, no lease, no anchor, no counter. The matrix below is the published
+scope of the pause; the contract test `pause_scope_matrix_refuses_every_money_path_and_changes_nothing`
+runs every row twice, once on a live registry (the control) and once on a
+paused registry, and compares the registry state before and after the paused
+calls. `readme_pause_scope_matrix_matches_contract` fails when this table and
+that matrix drift apart.
+
+| Method | Family | Authority | Refused while paused |
+| --- | --- | --- | --- |
+| `record_payment` | payment | settler, payer | yes |
+| `record_payment_idempotent` | payment | settler, payer | yes |
+| `settle_payment` | payment | settler | yes |
+| `set_refund_window` | refund | admin | yes |
+| `record_creator_refund` | refund | creator | yes |
+| `record_admin_refund` | refund | admin | yes |
+| `buy_lease` | lease | holder | yes |
+| `record_lease` | lease | settler, holder | yes |
+| `settle_lease` | lease | settler | yes |
+| `revoke_lease` | lease | creator | yes |
+| `anchor_purchase_receipt` | anchor | verifier | yes |
+| `attempt_anchor_purchase_receipt` | anchor | verifier | yes |
+| `override_purchase_receipt_anchor` | anchor | admin | yes |
+| `record_anchor_failure` | anchor | settler | yes |
+| `retry_anchor_purchase_receipt` | anchor | settler | yes |
+
+Read-only methods are never refused by the pause: `get`, `exists`, `count`,
+`list*`, `get_payment`, `get_refund`, `get_lease`, `get_purchase_receipt`,
+`get_anchor_failure` and `is_paused` keep answering while the registry is
+paused, so a monitor can still see the state the pause is protecting.
 
 ### Generating bindings
 
