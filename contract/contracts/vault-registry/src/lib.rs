@@ -122,6 +122,13 @@ pub const MAX_BATCH_METADATA_UPDATES: u32 = 10;
 pub const MAX_BATCH_RESOURCE_STATES: u32 = 20;
 /// Maximum number of resource ids accepted by `check_tag_index` in one call.
 pub const MAX_TAG_INDEX_CHECK: u32 = 20;
+/// Maximum number of resource ids accepted by `repair_tag_index` in one call.
+/// Rejected with [`Error::BatchTooLarge`] before any storage is written so an
+/// oversized payload cannot leave a half-rebuilt index behind.
+pub const MAX_TAG_INDEX_REPAIR: u32 = 200;
+/// Inclusive upper bound for the operator-defined maintenance reason code
+/// accepted by `set_maintenance_status`.
+pub const MAX_MAINTENANCE_REASON_CODE: u32 = 255;
 
 // ── Fee / royalty configuration ──────────────────────────────────────────────
 /// Fee basis-point ceiling: 50 % (5 000 bp). Neither platform_fee_bps nor
@@ -263,6 +270,7 @@ pub const METHOD_SCHEMA: &[(&str, &str)] = &[
         "current admin (or new_admin for bootstrap)",
     ),
     ("accept_admin", "pending admin"),
+    ("cancel_admin_nomination", "admin"),
     ("bootstrap_dual_admin", "admin + recovery_admin"),
     ("recovery_admin", "—"),
     ("set_recovery_admin", "admin"),
@@ -460,6 +468,7 @@ pub const EVENT_SCHEMA: &[(&str, &str)] = &[
     ("setptrs", "MetadataPointers { pointers, primary }"),
     ("nomadmin", "new_admin: Address"),
     ("accadmin", "new_admin: Address"),
+    ("nomcncl", "(nominee: Address, admin: Address)"),
     ("netinit", "network_id: BytesN<32>"),
     ("freeze", "()"),
     (
@@ -484,6 +493,10 @@ pub const EVENT_SCHEMA: &[(&str, &str)] = &[
     ("pause_until", "(pause_until: u64, admin: Address)"),
     ("payment_pause", "(paused: bool, admin: Address)"),
     ("payment_pause_until", "(pause_until: u64, admin: Address)"),
+    (
+        "mntstat",
+        "MaintenanceStatusEvent { kind, reason_code, admin }",
+    ),
     (
         "anchor",
         "PurchaseReceiptAnchor { resource_id, buyer, receipt_hash, ledger }",
@@ -593,6 +606,41 @@ pub enum FlagReason {
     Copyright = 1,
     Malicious = 2,
     Other = 3,
+}
+
+/// Registry-level maintenance posture: which kind of pause is in effect.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum MaintenanceKind {
+    /// No maintenance posture recorded (or explicitly cleared).
+    None = 0,
+    /// Indefinite emergency pause (`set_paused(admin, true)`).
+    Emergency = 1,
+    /// Deadline-bounded scheduled pause (`set_paused_until`).
+    Scheduled = 2,
+}
+
+/// Auditable registry-level maintenance status: distinguishes scheduled from
+/// emergency pause and carries a bounded operator-defined reason code.
+///
+/// Reason-code compatibility: codes in `0..=MAX_MAINTENANCE_REASON_CODE` are
+/// a stable, append-only namespace. A published code never changes meaning;
+/// new codes are only appended. Consumers must ignore unknown codes rather
+/// than treating them as errors, so future codes stay backward compatible.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaintenanceStatus {
+    pub kind: MaintenanceKind,
+    pub reason_code: u32,
+}
+
+/// Structured payload emitted by `set_maintenance_status()`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaintenanceStatusEvent {
+    pub kind: MaintenanceKind,
+    pub reason_code: u32,
+    pub admin: Address,
 }
 
 /// Wrapper for an optional [`FlagReason`] value, used as the `dispute_flag`
@@ -1016,6 +1064,8 @@ pub enum DataKey {
     Paused,
     /// Unix timestamp at which a scheduled pause automatically expires.
     PauseUntil,
+    /// Registry-level maintenance status (kind + bounded reason code).
+    MaintenanceStatus,
     /// Settler role grant, authorizing `record_payment` / `settle_payment`.
     Settler(Address),
     /// Immutable purchase receipt anchor for `(resource_id, buyer)`.
@@ -3115,6 +3165,13 @@ impl VaultRegistry {
     /// with the correct current id list as a no-op. See
     /// `docs/tag-index-repair-design.md` for the full strategy.
     ///
+    /// Idempotent across retries: the input is de-duplicated and processed in
+    /// canonical (byte-sorted) id order, so a call whose id list is a
+    /// permutation of, or contains duplicates of, a previous call rebuilds
+    /// exactly the same `TagIndex` entries. The `retagidx` event carries the
+    /// unique id count — never the raw input length — so repeated retries
+    /// with duplicated ids cannot inflate the reported breadth.
+    ///
     /// An empty `ids` list is a documented no-op: it returns `Ok(())` and
     /// deliberately emits **no** `retagidx` event. There is nothing to index, so
     /// every `TagIndex` entry is left exactly as it was, and suppressing the
@@ -3126,6 +3183,8 @@ impl VaultRegistry {
     /// performed" and must not infer that the tag index is empty.
     ///
     /// Errors deterministically:
+    /// - [`Error::BatchTooLarge`] — more than [`MAX_TAG_INDEX_REPAIR`] ids,
+    ///   rejected before any storage is read or written
     /// - [`Error::NotFound`] — any id in `ids` is not a registered resource
     /// - [`Error::AdminNotSet`] — no admin has been bootstrapped
     /// - [`Error::ContractPaused`] — the registry is paused
@@ -3134,12 +3193,21 @@ impl VaultRegistry {
         admin.require_auth();
         Self::require_not_paused(&env)?;
 
+        if ids.len() > MAX_TAG_INDEX_REPAIR {
+            return Err(Error::BatchTooLarge);
+        }
+
         let len = ids.len();
         if len == 0 {
             return Ok(());
         }
 
-        // Validate every id exists before touching anything
+        // Validate every id exists before touching anything, then collect the
+        // unique ids in canonical (byte-sorted) order. Sorting here is what
+        // makes retries with reordered or duplicated input converge to the
+        // same index, and the unique count is what the `retagidx` event
+        // reports so duplicates cannot inflate it.
+        let mut unique: alloc::vec::Vec<String> = alloc::vec::Vec::new();
         for i in 0..len {
             let id = ids.get(i).unwrap();
             if !env
@@ -3149,7 +3217,11 @@ impl VaultRegistry {
             {
                 return Err(Error::NotFound);
             }
+            if !unique.contains(&id) {
+                unique.push(id);
+            }
         }
+        unique.sort_by(|a, b| Self::string_bytes(a).cmp(&Self::string_bytes(b)));
 
         // Collect current tags for each id (read canonical Resource data).
         // Build a tag -> Vec<id> map in a simple parallel-vec structure that
@@ -3163,8 +3235,7 @@ impl VaultRegistry {
             (0..keys.len()).find(|&k| keys.get(k).unwrap() == *t)
         };
 
-        for i in 0..len {
-            let id = ids.get(i).unwrap();
+        for id in unique.iter() {
             let resource: Resource = env
                 .storage()
                 .persistent()
@@ -3179,7 +3250,7 @@ impl VaultRegistry {
                         // Deduplicate: only add if not already present
                         let mut already = false;
                         for k in 0..id_vec.len() {
-                            if id_vec.get(k).unwrap() == id {
+                            if id_vec.get(k).unwrap() == *id {
                                 already = true;
                                 break;
                             }
@@ -3207,7 +3278,8 @@ impl VaultRegistry {
             Self::bump_persistent(&env, &tag_key);
         }
 
-        env.events().publish((symbol_short!("retagidx"),), len);
+        env.events()
+            .publish((symbol_short!("retagidx"),), unique.len() as u32);
         Ok(())
     }
 
@@ -3744,6 +3816,35 @@ impl VaultRegistry {
         Self::bump_instance(&env);
         env.events()
             .publish((symbol_short!("accadmin"),), new_admin);
+        Ok(())
+    }
+
+    /// Cancel a pending admin nomination before it is accepted. Only the
+    /// current admin may call this. Clears `pending_admin`, its expiry, and
+    /// its nominated-at ledger so the nominee can no longer call
+    /// `accept_admin` (which then fails with `AdminNominationExpired`).
+    ///
+    /// Errors [`Error::PendingAdminNotSet`] when no nomination is in flight,
+    /// so "nothing to cancel" is a stable, distinguishable failure rather
+    /// than a silent no-op. Emits `nomcncl` with `(nominee, admin)` for
+    /// indexers.
+    pub fn cancel_admin_nomination(env: Env, admin: Address) -> Result<(), Error> {
+        Self::require_current_admin(&env, &admin)?;
+        let nominee: Address = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::PendingAdmin)
+            .ok_or(Error::PendingAdminNotSet)?;
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingAdminExpiry);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingAdminNominatedAt);
+        Self::bump_instance(&env);
+        env.events()
+            .publish((symbol_short!("nomcncl"),), (nominee, admin));
         Ok(())
     }
 
@@ -6911,6 +7012,13 @@ impl VaultRegistry {
     /// Return whether the registry is paused after applying any scheduled
     /// deadline. Expired deadlines are treated as resumed without requiring a
     /// separate transaction to clear the stored state.
+    ///
+    /// Once a scheduled deadline is observed expired, the pause is cleared
+    /// immediately so a later ledger-timestamp rollback cannot reactivate it:
+    /// the effective pause state must never oscillate once the deadline has
+    /// passed. Deadline equality (`pause_until == timestamp`) counts as
+    /// expired, matching `set_paused_until`'s "at or before now resumes"
+    /// rule.
     /// Bumps the instance storage TTL to keep pause entries alive for active monitors.
     fn pause_is_active(env: &Env) -> bool {
         let paused = env
@@ -6929,7 +7037,18 @@ impl VaultRegistry {
             .storage()
             .instance()
             .get::<DataKey, u64>(&DataKey::PauseUntil)
-            .map(|pause_until| pause_until > env.ledger().timestamp())
+            .map(|pause_until| {
+                if pause_until > env.ledger().timestamp() {
+                    true
+                } else {
+                    // Deadline reached: latch the expiry by clearing the
+                    // scheduled pause so a timestamp rollback cannot
+                    // reactivate it.
+                    env.storage().instance().set(&DataKey::Paused, &false);
+                    env.storage().instance().remove(&DataKey::PauseUntil);
+                    false
+                }
+            })
             .unwrap_or(true);
 
         // Bump TTL on read to keep pause entries alive for active monitors
