@@ -397,6 +397,7 @@ pub const ERROR_SCHEMA: &[(u32, &str, &str)] = &[
     (53, "RecoveryAdminNotSet", "`recover_admin` was called but no recovery admin is configured."),
     (54, "UnsupportedResourceSchema", "A resource uses a schema version this deployment cannot safely read or upgrade."),
     (55, "RevisionOverflow", "A listing revision increment would exceed `u32::MAX`; the mutation is rejected without changing resource state."),
+    (56, "LeaseFeeConfigConflict", "`set_fee_config` was called with a combined fee bps ≥ the price of a resource with active leases; the change is rejected to preserve existing lease terms."),
 ];
 
 /// Canonical list of every event topic this contract emits, paired with a
@@ -1497,6 +1498,11 @@ pub enum Error {
     /// A listing revision increment would exceed `u32::MAX`. The mutation is
     /// rejected without changing resource state.
     RevisionOverflow = 55,
+    /// `set_fee_config` was called with a combined `platform_fee_bps +
+    /// royalty_bps` that is ≥ the price of a resource with one or more
+    /// active leases. The fee change is rejected to prevent invalidating
+    /// the price terms under which those leases were sold.
+    LeaseFeeConfigConflict = 56,
 }
 
 #[contract]
@@ -4051,6 +4057,20 @@ impl VaultRegistry {
         let destination = Self::load_fee_destination(&env);
         Self::validate_fee_destination_for_fee_config(&config, &destination)?;
 
+        // Prevent fee config changes that would invalidate active lease pricing.
+        // Each lease locks in a price calculated from the resource's price at
+        // purchase time. If the new fee config would cause the combined fee
+        // percentage to meet or exceed the minimum lease price tier across the
+        // catalog, we reject the change to preserve existing lease terms.
+        //
+        // This check scans the catalog for the minimum listed resource price
+        // and ensures the new combined fee bps stays strictly below that price
+        // (preserving the creator-share invariant for leases). It's conservative:
+        // we block any config that *could* conflict with an active lease, even
+        // if no such lease currently exists, because we cannot efficiently
+        // enumerate all active leases without a secondary index.
+        Self::validate_fee_config_for_leases(&env, &config)?;
+
         let old_config: OptFeeConfig = env
             .storage()
             .instance()
@@ -4183,6 +4203,51 @@ impl VaultRegistry {
         if destination.bps < MAX_FEE_DESTINATION_BPS && fee_config.fee_recipient.is_none() {
             return Err(Error::TotalFeeTooHigh);
         }
+        Ok(())
+    }
+
+    /// Validate that a fee config change won't invalidate active lease pricing.
+    ///
+    /// Each lease locks in a price calculated from the resource's price at purchase
+    /// time (stored in `lease.amount`). If the new combined fee percentage would
+    /// meet or exceed the price of ANY listed resource, we conservatively reject
+    /// the change, since we cannot efficiently enumerate all active leases without
+    /// a secondary index.
+    ///
+    /// This preserves the economic terms under which existing leases were sold:
+    /// if a lease was bought when fees were 10% and the resource was priced at 100,
+    /// increasing fees to 100% would retroactively invalidate that lease's pricing
+    /// assumptions, which we prevent here.
+    fn validate_fee_config_for_leases(env: &Env, config: &FeeConfig) -> Result<(), Error> {
+        let combined_fee_bps = config.platform_fee_bps + config.royalty_bps;
+        
+        // If there are no fees, there's no conflict
+        if combined_fee_bps == 0 {
+            return Ok(());
+        }
+
+        // Scan listed resources to find minimum price. We check listed resources
+        // because only listed resources can have leases sold on them.
+        let count: u32 = env.storage().instance().get(&DataKey::Count).unwrap_or(0);
+        
+        for i in 0..count {
+            let index_key = DataKey::Index(i);
+            if let Some(resource_id) = env.storage().persistent().get::<DataKey, String>(&index_key) {
+                if let Ok(resource) = Self::load(env, &resource_id) {
+                    // Only check listed resources (leases can only be created on listed resources)
+                    if resource.state == ResourceState::Listed {
+                        // The fee config is invalid if combined_fee_bps >= resource.price
+                        // (same invariant as validate_price, but we're checking it preemptively
+                        // for all resources that could have leases)
+                        let combined_fee = i128::from(combined_fee_bps);
+                        if combined_fee >= resource.price {
+                            return Err(Error::LeaseFeeConfigConflict);
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
