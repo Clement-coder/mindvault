@@ -23,7 +23,7 @@
  * infrequent relative to the network calls they describe.
  */
 
-import { appendFileSync, existsSync, mkdirSync, renameSync, rmSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, renameSync, rmSync, statSync, writeFileSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 /** Environment variables controlling the file sink. */
@@ -167,8 +167,40 @@ export class RotatingJsonlWriter {
 
     // Resuming an existing file rather than truncating it: a restart must not
     // destroy the audit trail of the session before it.
+    this.recoverInterruptedRotation();
     this.size = existsSync(this.config.path) ? statSync(this.config.path).size : 0;
     this.ready = true;
+  }
+
+  /** Complete an interrupted two-phase rotation before accepting new writes. */
+  private recoverInterruptedRotation(): void {
+    const { path, maxFiles } = this.config;
+    const journal = path + ".rotation-journal";
+    if (!existsSync(journal)) return;
+    const phase = readFileSync(journal, "utf8").trim();
+    if (phase !== "staging" && phase !== "publishing") {
+      throw new Error("Invalid audit rotation journal");
+    }
+    if (phase === "staging") {
+      // Each source is moved only once. A missing source with a present
+      // staging path means that step completed before the interruption.
+      for (let n = maxFiles; n >= 0; n--) {
+        const source = n === 0 ? path : rotatedPath(path, n);
+        const staged = path + ".rotation-stage-" + n;
+        if (!existsSync(staged) && existsSync(source)) renameSync(source, staged);
+      }
+      writeFileSync(journal + ".next", "publishing");
+      renameSync(journal + ".next", journal);
+    }
+    // Publishing is idempotent: completed moves have no staging source.
+    for (let n = maxFiles - 1; n >= 0; n--) {
+      const staged = path + ".rotation-stage-" + n;
+      if (existsSync(staged)) renameSync(staged, rotatedPath(path, n + 1));
+    }
+    rmSync(path + ".rotation-stage-" + maxFiles, { force: true });
+    rmSync(journal, { force: true });
+    rmSync(journal + ".next", { force: true });
+    this.size = 0;
   }
 
   /**
@@ -190,15 +222,11 @@ export class RotatingJsonlWriter {
       return;
     }
 
-    // The oldest generation falls off the end.
-    rmSync(rotatedPath(path, maxFiles), { force: true });
-
-    for (let generation = maxFiles - 1; generation >= 1; generation--) {
-      const from = rotatedPath(path, generation);
-      if (existsSync(from)) renameSync(from, rotatedPath(path, generation + 1));
-    }
-
-    if (existsSync(path)) renameSync(path, rotatedPath(path, 1));
+    // Journal the rotation before the first rename. On restart, staging
+    // and publishing are each safe to repeat after any completed operation.
+    const journal = path + ".rotation-journal";
+    writeFileSync(journal, "staging");
+    this.recoverInterruptedRotation();
     this.size = 0;
   }
 }
