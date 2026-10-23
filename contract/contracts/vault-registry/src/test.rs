@@ -4854,6 +4854,13 @@ fn full_workflow_emits_exactly_the_documented_events() {
     client.accept_admin(&admin2);
     record(&env, &client, &mut observed);
 
+    // Nominate then cancel a pending admin nomination (#980) -> "nomcncl".
+    let canceled = Address::generate(&env);
+    client.nominate_new_admin(&canceled);
+    record(&env, &client, &mut observed);
+    client.cancel_admin_nomination(&admin2);
+    record(&env, &client, &mut observed);
+
     client.set_registry_terms_hash(&String::from_str(&env, "regterms")); // -> "setregt"
     record(&env, &client, &mut observed);
 
@@ -4982,6 +4989,8 @@ fn full_workflow_emits_exactly_the_documented_events() {
     client.set_paused_until(&admin2, &200); // -> "pause", "pause_until"
     record(&env, &client, &mut observed);
     client.set_paused(&admin2, &false);
+    record(&env, &client, &mut observed);
+    client.set_maintenance_status(&admin2, &MaintenanceKind::Scheduled, &1u32); // -> "mntstat"
     record(&env, &client, &mut observed);
 
     // Network bootstrap and the creator reactivation path round out the
@@ -11793,5 +11802,6 @@ include!("test/flag_details.rs");
 include!("test/payment_idempotency.rs");
 include!("test/stellar_wave_804_805_806_808.rs");
 include!("test/stellar_wave_970_971_975_976.rs");
+include!("test/stellar_wave_977_978_979_980.rs");
 include!("test/creator_page_filtered.rs");
 include!("test/tag_prefix_search.rs");
