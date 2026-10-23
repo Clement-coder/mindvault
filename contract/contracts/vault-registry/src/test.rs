@@ -11791,6 +11791,8 @@ include!("test/creator_listed_count.rs");
 include!("test/memo_hash.rs");
 include!("test/flag_details.rs");
 include!("test/payment_idempotency.rs");
+include!("test/payment_pause_scope.rs");
+include!("test/simulation_mutation_validation.rs");
 include!("test/stellar_wave_804_805_806_808.rs");
 include!("test/stellar_wave_970_971_975_976.rs");
 include!("test/creator_page_filtered.rs");
