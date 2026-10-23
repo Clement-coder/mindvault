@@ -4470,6 +4470,51 @@ impl VaultRegistry {
         Ok(())
     }
 
+    /// Validate that a fee config change won't invalidate active lease pricing.
+    ///
+    /// Each lease locks in a price calculated from the resource's price at purchase
+    /// time (stored in `lease.amount`). If the new combined fee percentage would
+    /// meet or exceed the price of ANY listed resource, we conservatively reject
+    /// the change, since we cannot efficiently enumerate all active leases without
+    /// a secondary index.
+    ///
+    /// This preserves the economic terms under which existing leases were sold:
+    /// if a lease was bought when fees were 10% and the resource was priced at 100,
+    /// increasing fees to 100% would retroactively invalidate that lease's pricing
+    /// assumptions, which we prevent here.
+    fn validate_fee_config_for_leases(env: &Env, config: &FeeConfig) -> Result<(), Error> {
+        let combined_fee_bps = config.platform_fee_bps + config.royalty_bps;
+        
+        // If there are no fees, there's no conflict
+        if combined_fee_bps == 0 {
+            return Ok(());
+        }
+
+        // Scan listed resources to find minimum price. We check listed resources
+        // because only listed resources can have leases sold on them.
+        let count: u32 = env.storage().instance().get(&DataKey::Count).unwrap_or(0);
+        
+        for i in 0..count {
+            let index_key = DataKey::Index(i);
+            if let Some(resource_id) = env.storage().persistent().get::<DataKey, String>(&index_key) {
+                if let Ok(resource) = Self::load(env, &resource_id) {
+                    // Only check listed resources (leases can only be created on listed resources)
+                    if resource.state == ResourceState::Listed {
+                        // The fee config is invalid if combined_fee_bps >= resource.price
+                        // (same invariant as validate_price, but we're checking it preemptively
+                        // for all resources that could have leases)
+                        let combined_fee = i128::from(combined_fee_bps);
+                        if combined_fee >= resource.price {
+                            return Err(Error::LeaseFeeConfigConflict);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Store a hash of creator marketplace terms.
     pub fn set_terms_hash(env: Env, creator: Address, terms_hash: String) -> Result<(), Error> {
         creator.require_auth();
