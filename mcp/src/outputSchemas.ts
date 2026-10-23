@@ -998,3 +998,48 @@ export const METADATA_DIFF_OUTPUT_SCHEMA = {
     "rpc",
   ],
 } as const;
+
+/**
+ * The explanation a contract error code gets (#1021).
+ *
+ * `known` is false for a code this build does not define, and the code the
+ * caller asked about is still reported — an unknown code is a fact about the
+ * deployment, not a reason to hide the number. `knownCodes` is present only
+ * for an unknown input, where it is what lets the agent correct itself.
+ */
+export const REGISTRY_ERROR_EXPLANATION_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    code: { type: ["integer", "null"] },
+    name: { type: ["string", "null"] },
+    known: { type: "boolean" },
+    description: { type: ["string", "null"] },
+    category: {
+      type: ["string", "null"],
+      enum: [
+        "registration",
+        "validation",
+        "authorization",
+        "admin",
+        "payment",
+        "moderation",
+        "network",
+        null,
+      ],
+    },
+    retry: { type: ["string", "null"], enum: ["safe", "unsafe", "conditional", null] },
+    nextSteps: { type: "string" },
+    knownCodes: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          code: { type: "integer" },
+          name: { type: "string" },
+        },
+        required: ["code", "name"],
+      },
+    },
+  },
+  required: ["code", "name", "known", "description", "category", "retry", "nextSteps"],
+} as const;

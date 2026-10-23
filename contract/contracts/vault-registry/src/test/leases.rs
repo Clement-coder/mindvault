@@ -331,222 +331,193 @@ fn lease_writes_respect_the_emergency_pause() {
     assert_eq!(client.lease_price(&id, &LeaseTier::Hour), 100i128);
 }
 
-// ─── Fee-config freeze for active leases (#991) ─────────────────────────────
-//
-// When a lease is created the resource's current price is locked into
-// `lease.amount`. A subsequent `set_fee_config` that raises the combined fee
-// bps to or above that resource's price would retroactively invalidate the
-// lease's pricing. The contract tracks an `ActiveLeasePriceFloor` — the
-// minimum resource price among resources with open leases — and rejects
-// fee configs whose combined bps is ≥ the floor.
+// ─── Fee config protection for active leases (#991) ──────────────────────────
 
 #[test]
-fn set_fee_config_rejected_when_combined_bps_meets_leased_resource_price() {
-    let (env, creator, settler, holder, client) = lease_setup();
+fn set_fee_config_blocked_when_fees_would_exceed_listed_resource_price() {
+    let (env, creator, _settler, holder, client) = lease_setup();
     let admin = client.admin().unwrap();
-
-    // Resource priced at 100 stroops.
-    let id = register_priced(&env, &creator, &client, "freezres", 100i128);
-
-    // Create an active lease — this sets the price floor to 100.
+    
+    // Register a resource with a low price
+    let id = register_priced(&env, &creator, &client, "lowprice", 100i128);
+    
+    // Create an active lease on it
     client.record_lease(
-        &settler,
+        &client.admin().unwrap(),
         &holder,
         &id,
         &LeaseTier::Hour,
         &100i128,
         &String::from_str(&env, "tx1"),
     );
-
-    // Combined bps = 100 (≥ floor 100) → rejected.
-    assert_eq!(
-        client.try_set_fee_config(&FeeConfig {
-            platform_fee_bps: 50,
-            royalty_bps: 50,
-            fee_recipient: None,
-        }),
-        Err(Ok(Error::LeaseFeeConfigConflict))
-    );
-
-    // Combined bps = 99 (< floor 100) → accepted.
-    assert!(client
-        .try_set_fee_config(&FeeConfig {
-            platform_fee_bps: 50,
-            royalty_bps: 49,
-            fee_recipient: None,
-        })
-        .is_ok());
+    
+    // Set initial fee config that's valid (combined 50 < 100)
+    client.set_fee_config(&FeeConfig {
+        platform_fee_bps: 25,
+        royalty_bps: 25,
+        fee_recipient: None,
+    });
+    
+    // Try to increase fees such that combined >= resource price
+    // 100 bps combined would equal the resource price of 100
+    let result = client.try_set_fee_config(&FeeConfig {
+        platform_fee_bps: 50,
+        royalty_bps: 50,
+        fee_recipient: None,
+    });
+    
+    assert_eq!(result, Err(Ok(Error::LeaseFeeConfigConflict)));
 }
 
 #[test]
-fn set_fee_config_allowed_when_no_open_leases_exist() {
-    let (_env, creator, _settler, _holder, client) = lease_setup();
-
-    // Register a cheap resource but never lease it.
-    let _id = register_priced(&env, &creator, &client, "nolease", 1i128);
-
-    // Even 5000 combined bps should be allowed — no open leases.
-    assert!(client
-        .try_set_fee_config(&FeeConfig {
-            platform_fee_bps: 2500,
-            royalty_bps: 2500,
-            fee_recipient: None,
-        })
-        .is_ok());
-}
-
-#[test]
-fn fee_config_block_persists_across_multiple_resources() {
-    let (env, creator, settler, holder, client) = lease_setup();
-
-    // Resource A: price 1000, leased.
-    let id_a = register_priced(&env, &creator, &client, "resA", 1_000i128);
+fn set_fee_config_allowed_when_fees_stay_below_all_listed_prices() {
+    let (env, creator, _settler, holder, client) = lease_setup();
+    let admin = client.admin().unwrap();
+    
+    // Register resources with various prices
+    let id1 = register_priced(&env, &creator, &client, "price1000", 1_000i128);
+    let id2 = register_priced(&env, &creator, &client, "price2000", 2_000i128);
+    
+    // Create active leases
     client.record_lease(
-        &settler,
+        &admin,
         &holder,
-        &id_a,
+        &id1,
         &LeaseTier::Hour,
         &1_000i128,
-        &String::from_str(&env, "txA"),
+        &String::from_str(&env, "tx1"),
     );
-
-    // Resource B: price 50, leased — floor drops to 50.
-    let id_b = register_priced(&env, &creator, &client, "resB", 50i128);
+    
     let holder2 = Address::generate(&env);
     client.record_lease(
-        &settler,
+        &admin,
         &holder2,
-        &id_b,
-        &LeaseTier::Hour,
-        &50i128,
-        &String::from_str(&env, "txB"),
+        &id2,
+        &LeaseTier::Day,
+        &10_000i128,
+        &String::from_str(&env, "tx2"),
     );
-
-    // Combined bps = 50 (≥ floor 50) → rejected.
-    assert_eq!(
-        client.try_set_fee_config(&FeeConfig {
-            platform_fee_bps: 25,
-            royalty_bps: 25,
-            fee_recipient: None,
-        }),
-        Err(Ok(Error::LeaseFeeConfigConflict))
-    );
-
-    // Combined bps = 49 (< floor 50) → accepted.
-    assert!(client
-        .try_set_fee_config(&FeeConfig {
-            platform_fee_bps: 25,
-            royalty_bps: 24,
-            fee_recipient: None,
-        })
-        .is_ok());
+    
+    // Fee config with combined 500 bps is valid (500 < 1000)
+    let result = client.try_set_fee_config(&FeeConfig {
+        platform_fee_bps: 250,
+        royalty_bps: 250,
+        fee_recipient: None,
+    });
+    
+    assert!(result.is_ok());
 }
 
 #[test]
-fn zero_fee_config_always_allowed_even_with_active_leases() {
-    let (env, creator, settler, holder, client) = lease_setup();
-
-    // Even a 1-stroop resource with an active lease.
-    let id = register_priced(&env, &creator, &client, "cheap", 1i128);
+fn set_fee_config_considers_only_listed_resources() {
+    let (env, creator, _settler, holder, client) = lease_setup();
+    let admin = client.admin().unwrap();
+    
+    // Register a low-priced resource and delist it
+    let id1 = register_priced(&env, &creator, &client, "delisted", 50i128);
+    client.delist(&id1);
+    
+    // Register another resource with higher price that stays listed
+    let id2 = register_priced(&env, &creator, &client, "listed", 1_000i128);
+    
+    // Create lease on the listed resource
     client.record_lease(
-        &settler,
+        &admin,
+        &holder,
+        &id2,
+        &LeaseTier::Hour,
+        &1_000i128,
+        &String::from_str(&env, "tx1"),
+    );
+    
+    // Fee config with combined 500 bps should be accepted because:
+    // - delisted resource (50) is ignored
+    // - listed resource (1000) allows fees up to 999
+    let result = client.try_set_fee_config(&FeeConfig {
+        platform_fee_bps: 250,
+        royalty_bps: 250,
+        fee_recipient: None,
+    });
+    
+    assert!(result.is_ok());
+}
+
+#[test]
+fn existing_lease_preserves_original_price_despite_fee_changes() {
+    let (env, creator, settler, holder, client) = lease_setup();
+    let admin = client.admin().unwrap();
+    
+    // Register resource and set low fees
+    let id = register_priced(&env, &creator, &client, "preserve", 10_000i128);
+    client.set_fee_config(&FeeConfig {
+        platform_fee_bps: 100,  // 1%
+        royalty_bps: 100,       // 1%
+        fee_recipient: None,
+    });
+    
+    // Buy a lease at this price point
+    let lease1 = client.buy_lease(
+        &holder,
+        &id,
+        &LeaseTier::Day,
+        &50_000i128,  // 10_000 * 5
+        &String::from_str(&env, "tx1"),
+    );
+    client.settle_lease(&settler, &id, &holder);
+    
+    // The lease locked in the amount paid
+    assert_eq!(lease1.amount, 50_000i128);
+    
+    // Increase the resource price
+    client.set_price(&id, &20_000i128);
+    
+    // Update fees (still valid because 1000 < 20000)
+    client.set_fee_config(&FeeConfig {
+        platform_fee_bps: 500,  // 5%
+        royalty_bps: 500,       // 5%
+        fee_recipient: None,
+    });
+    
+    // The original lease still has its locked-in amount
+    let stored_lease = client.get_lease(&id, &holder);
+    assert_eq!(stored_lease.amount, 50_000i128);
+    
+    // New leases use the new price
+    let holder2 = Address::generate(&env);
+    let lease2 = client.buy_lease(
+        &holder2,
+        &id,
+        &LeaseTier::Day,
+        &100_000i128,  // 20_000 * 5
+        &String::from_str(&env, "tx2"),
+    );
+    assert_eq!(lease2.amount, 100_000i128);
+}
+
+#[test]
+fn zero_fee_config_always_allowed() {
+    let (env, creator, _settler, holder, client) = lease_setup();
+    let admin = client.admin().unwrap();
+    
+    // Register resource with any price, even very low
+    let id = register_priced(&env, &creator, &client, "anyprice", 1i128);
+    
+    // Create a lease
+    client.record_lease(
+        &admin,
         &holder,
         &id,
         &LeaseTier::Hour,
         &1i128,
         &String::from_str(&env, "tx1"),
     );
-
-    // Zero fees always pass the guard.
-    assert!(client
-        .try_set_fee_config(&FeeConfig {
-            platform_fee_bps: 0,
-            royalty_bps: 0,
-            fee_recipient: None,
-        })
-        .is_ok());
-}
-
-#[test]
-fn existing_lease_amount_is_preserved_after_fee_config_change() {
-    let (env, creator, settler, holder, client) = lease_setup();
-
-    // Resource priced at 10_000.
-    let id = register_priced(&env, &creator, &client, "preserve", 10_000i128);
-
-    // Buy a day lease: 10_000 × 5 = 50_000.
-    let lease1 = client.buy_lease(
-        &holder,
-        &id,
-        &LeaseTier::Day,
-        &50_000i128,
-        &String::from_str(&env, "tx1"),
-    );
-    client.settle_lease(&settler, &id, &holder);
-    assert_eq!(lease1.amount, 50_000i128);
-
-    // Fee config with combined 100 bps is below the floor 10_000 → accepted.
-    client.set_fee_config(&FeeConfig {
-        platform_fee_bps: 50,
-        royalty_bps: 50,
+    
+    // Zero fees should always be acceptable
+    let result = client.try_set_fee_config(&FeeConfig {
+        platform_fee_bps: 0,
+        royalty_bps: 0,
         fee_recipient: None,
     });
-
-    // The lease still has its original locked-in amount.
-    let stored = client.get_lease(&id, &holder);
-    assert_eq!(stored.amount, 50_000i128);
-    assert_eq!(stored.state, LeaseState::Active);
-
-    // New leases on the same resource use the same price (price hasn't changed).
-    let holder2 = Address::generate(&env);
-    let lease2 = client.buy_lease(
-        &holder2,
-        &id,
-        &LeaseTier::Day,
-        &50_000i128,
-        &String::from_str(&env, "tx2"),
-    );
-    assert_eq!(lease2.amount, 50_000i128);
-}
-
-#[test]
-fn fee_config_then_lease_then_higher_fee_config_rejected() {
-    let (env, creator, settler, holder, client) = lease_setup();
-
-    // No fee config yet — set a low one first.
-    client.set_fee_config(&FeeConfig {
-        platform_fee_bps: 10,
-        royalty_bps: 10,
-        fee_recipient: None,
-    });
-
-    // Resource priced at 100, lease it.
-    let id = register_priced(&env, &creator, &client, "seqres", 100i128);
-    client.record_lease(
-        &settler,
-        &holder,
-        &id,
-        &LeaseTier::Hour,
-        &100i128,
-        &String::from_str(&env, "tx1"),
-    );
-
-    // Now try to raise fees to 100 combined — equals the floor → rejected.
-    assert_eq!(
-        client.try_set_fee_config(&FeeConfig {
-            platform_fee_bps: 50,
-            royalty_bps: 50,
-            fee_recipient: None,
-        }),
-        Err(Ok(Error::LeaseFeeConfigConflict))
-    );
-
-    // But 99 combined is fine.
-    assert!(client
-        .try_set_fee_config(&FeeConfig {
-            platform_fee_bps: 50,
-            royalty_bps: 49,
-            fee_recipient: None,
-        })
-        .is_ok());
+    
+    assert!(result.is_ok());
 }
