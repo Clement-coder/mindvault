@@ -850,3 +850,59 @@ export const PROFILE_IMPORT_OUTPUT_SCHEMA = {
   properties: { imported: { type: "array", items: { type: "string" } } },
   required: ["imported"],
 } as const;
+
+/**
+ * Output schema for mindvault_wallet_allowance (#1052).
+ *
+ * All amounts carry explicit `asset` and `network` fields so a consumer
+ * never has to infer which token or chain an amount refers to.
+ */
+export const WALLET_ALLOWANCE_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    /** Active profile name. */
+    profile: { type: "string" },
+    /** Stellar public key of the active wallet. */
+    address: { type: "string" },
+    /** x402 network identifier, e.g. "stellar:testnet". */
+    network: { type: "string" },
+    /** Always "USDC" — the only payment asset MindVault uses. */
+    asset: { type: "string", const: "USDC" },
+    /** USDC SAC contract ID for the active network. */
+    assetContractId: { type: "string" },
+    /** Live USDC balance as a decimal string (e.g. "12.5000000"). */
+    usdcBalance: { type: "string" },
+    /**
+     * Estimated USDC spend over the past 24 h from local receipts, scoped to
+     * the active profile and network. Labeled as an estimate because receipts
+     * are written locally on payment submission; on-chain settlement may
+     * differ if a transaction is retried or a refund is issued.
+     */
+    estimatedPendingSpend: { type: "string" },
+    /** Number of receipts that contributed to estimatedPendingSpend. */
+    receiptCount: { type: "integer" },
+    /**
+     * Configured automatic payment ceiling in USDC (from
+     * MINDVAULT_MAX_AUTO_PAY_USDC, default "10"). Payments above this value
+     * require an explicit maxAutoPayUsdc override on buy/lease calls.
+     */
+    paymentCeiling: { type: "string" },
+    /** ISO-8601 timestamp this snapshot was produced. */
+    snapshotAt: { type: "string" },
+    /** Human-readable note when balance data could not be loaded. */
+    note: { type: ["string", "null"] },
+  },
+  required: [
+    "profile",
+    "address",
+    "network",
+    "asset",
+    "assetContractId",
+    "usdcBalance",
+    "estimatedPendingSpend",
+    "receiptCount",
+    "paymentCeiling",
+    "snapshotAt",
+    "note",
+  ],
+} as const;

@@ -1577,6 +1577,37 @@ exports[`tool schema snapshots > mindvault_client_config > input schema 1`] = `
 
 exports[`tool schema snapshots > mindvault_client_config > output schema 1`] = `null`;
 
+exports[`tool schema snapshots > mindvault_compare_state_backup > annotations 1`] = `
+{
+  "destructiveHint": false,
+  "idempotentHint": true,
+  "readOnlyHint": true,
+  "title": "Compare State Backup",
+}
+`;
+
+exports[`tool schema snapshots > mindvault_compare_state_backup > input schema 1`] = `
+{
+  "properties": {
+    "blob": {
+      "description": "Encrypted backup blob from mindvault_backup_state (v1:… format).",
+      "type": "string",
+    },
+    "passphrase": {
+      "description": "Passphrase used when the backup was created (min 8 characters).",
+      "type": "string",
+    },
+  },
+  "required": [
+    "blob",
+    "passphrase",
+  ],
+  "type": "object",
+}
+`;
+
+exports[`tool schema snapshots > mindvault_compare_state_backup > output schema 1`] = `null`;
+
 exports[`tool schema snapshots > mindvault_debug_bundle > annotations 1`] = `
 {
   "destructiveHint": false,
@@ -1976,6 +2007,140 @@ exports[`tool schema snapshots > mindvault_debug_bundle > output schema 1`] = `
         "metrics",
         "catalogCache",
         "auditLog",
+      ],
+      "type": "object",
+    },
+    {
+      "properties": {
+        "troubleshooting": {
+          "properties": {
+            "action": {
+              "type": "string",
+            },
+            "category": {
+              "type": "string",
+            },
+            "detail": {
+              "type": [
+                "string",
+                "null",
+              ],
+            },
+            "schema": {
+              "const": "mindvault.troubleshooting/v1",
+              "type": "string",
+            },
+            "source": {
+              "type": "string",
+            },
+            "status": {
+              "type": [
+                "integer",
+                "null",
+              ],
+            },
+            "summary": {
+              "type": "string",
+            },
+          },
+          "required": [
+            "schema",
+            "source",
+            "category",
+            "status",
+            "summary",
+            "detail",
+            "action",
+          ],
+          "type": "object",
+        },
+      },
+      "required": [
+        "troubleshooting",
+      ],
+      "type": "object",
+    },
+  ],
+  "type": "object",
+}
+`;
+
+exports[`tool schema snapshots > mindvault_export_profiles > annotations 1`] = `
+{
+  "destructiveHint": false,
+  "idempotentHint": true,
+  "readOnlyHint": true,
+  "title": "Export Profile Setup",
+}
+`;
+
+exports[`tool schema snapshots > mindvault_export_profiles > input schema 1`] = `
+{
+  "properties": {},
+  "required": [],
+  "type": "object",
+}
+`;
+
+exports[`tool schema snapshots > mindvault_export_profiles > output schema 1`] = `
+{
+  "anyOf": [
+    {
+      "properties": {
+        "activeProfile": {
+          "type": "string",
+        },
+        "profiles": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+              },
+              "network": {
+                "enum": [
+                  "testnet",
+                  "mainnet",
+                ],
+                "type": "string",
+              },
+              "preferences": {
+                "additionalProperties": {
+                  "type": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "null",
+                  ],
+                },
+                "propertyNames": {
+                  "pattern": "^(?!.*(secret|private|seed|credential|apikey|token|password)).*$",
+                },
+                "type": "object",
+              },
+            },
+            "required": [
+              "name",
+              "preferences",
+            ],
+            "type": "object",
+          },
+          "type": "array",
+        },
+        "schema": {
+          "const": "mindvault.profile-export",
+          "type": "string",
+        },
+        "version": {
+          "const": 1,
+          "type": "integer",
+        },
+      },
+      "required": [
+        "schema",
+        "version",
+        "activeProfile",
+        "profiles",
       ],
       "type": "object",
     },
@@ -2659,6 +2824,102 @@ exports[`tool schema snapshots > mindvault_freeze > output schema 1`] = `
           ],
           "type": "object",
         },
+      ],
+      "type": "object",
+    },
+    {
+      "properties": {
+        "troubleshooting": {
+          "properties": {
+            "action": {
+              "type": "string",
+            },
+            "category": {
+              "type": "string",
+            },
+            "detail": {
+              "type": [
+                "string",
+                "null",
+              ],
+            },
+            "schema": {
+              "const": "mindvault.troubleshooting/v1",
+              "type": "string",
+            },
+            "source": {
+              "type": "string",
+            },
+            "status": {
+              "type": [
+                "integer",
+                "null",
+              ],
+            },
+            "summary": {
+              "type": "string",
+            },
+          },
+          "required": [
+            "schema",
+            "source",
+            "category",
+            "status",
+            "summary",
+            "detail",
+            "action",
+          ],
+          "type": "object",
+        },
+      },
+      "required": [
+        "troubleshooting",
+      ],
+      "type": "object",
+    },
+  ],
+  "type": "object",
+}
+`;
+
+exports[`tool schema snapshots > mindvault_import_profiles > annotations 1`] = `
+{
+  "destructiveHint": false,
+  "idempotentHint": true,
+  "readOnlyHint": false,
+  "title": "Import Profile Setup",
+}
+`;
+
+exports[`tool schema snapshots > mindvault_import_profiles > input schema 1`] = `
+{
+  "properties": {
+    "data": {
+      "description": "JSON profile-export payload.",
+      "type": "string",
+    },
+  },
+  "required": [
+    "data",
+  ],
+  "type": "object",
+}
+`;
+
+exports[`tool schema snapshots > mindvault_import_profiles > output schema 1`] = `
+{
+  "anyOf": [
+    {
+      "properties": {
+        "imported": {
+          "items": {
+            "type": "string",
+          },
+          "type": "array",
+        },
+      },
+      "required": [
+        "imported",
       ],
       "type": "object",
     },

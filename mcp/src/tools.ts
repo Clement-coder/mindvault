@@ -52,6 +52,7 @@ import {
   WALLET_BALANCES_OUTPUT_SCHEMA,
   WALLET_INFO_OUTPUT_SCHEMA,
   WALLET_SETUP_OUTPUT_SCHEMA,
+  WALLET_ALLOWANCE_OUTPUT_SCHEMA,
 } from "./outputSchemas.js";
 import { RECEIPT_EXPORT_MAX_LIMIT, RECEIPT_EXPORT_OUTPUT_SCHEMA } from "./receipts.js";
 import {
@@ -148,6 +149,19 @@ const DEFINED_TOOLS: ToolDefinition[] = [
     outputSchema: WALLET_INFO_OUTPUT_SCHEMA as unknown as Record<string, unknown>,
     annotations: {
       title: "Wallet Info",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+    },
+  },
+  {
+    name: "mindvault_wallet_allowance",
+    description:
+      "Read-only snapshot of the active wallet's USDC balance, estimated pending spend over the past 24 h, and the configured automatic payment ceiling. All values include the asset (USDC) and network identity so consumers never have to infer them. Performs no signing or transfer.",
+    inputSchema: { type: "object", properties: {}, required: [] },
+    outputSchema: WALLET_ALLOWANCE_OUTPUT_SCHEMA as unknown as Record<string, unknown>,
+    annotations: {
+      title: "Wallet Allowance",
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,

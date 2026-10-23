@@ -266,6 +266,7 @@ export const TOOL_ARGUMENT_SPECS: Record<string, ToolArgumentSpec> = {
     confirmMainnet: CONFIRM_MAINNET,
   },
   mindvault_wallet_info: {},
+  mindvault_wallet_allowance: {},
   mindvault_use_profile: { name: { ...PROFILE_NAME, required: true } },
   mindvault_switch_network_profile: {
     name: { ...PROFILE_NAME, required: true },
