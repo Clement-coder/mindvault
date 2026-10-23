@@ -970,6 +970,9 @@ pub enum DataKey {
     PendingTransfer(String),
     Verifier(Address),
     NetworkId,
+    /// Paginated status-change history for a verifier address, appended to
+    /// on every `set_verification_status` call that involves this verifier.
+    VerifierHistory(Address),
     /// Canonical payment receipt, keyed by its caller-assigned `receipt_id`.
     PaymentReceipt(String),
     /// Secondary index mapping `(resource_id, payer)` to the `receipt_id` of
@@ -1024,6 +1027,9 @@ pub enum DataKey {
     /// enum code): this carries a digest of free-form detail a moderator
     /// recorded off-chain, analogous to `CreatorTerms`.
     FlagReasonHash(String),
+    /// Last moderator address that acted on the moderation state of a resource,
+    /// stored by resource id. Read by `flag_details`.
+    FlagModerator(String),
     /// Hash of a verifier's off-chain attestation document, provided during a
     /// status change via `set_verification_status`.
     AttestationHash(String),
@@ -1103,52 +1109,6 @@ pub struct MetadataUpdateEvent {
     pub new_metadata: String,
     /// Listing revision after this update (see `get_revision`).
     pub revision: u32,
-}
-
-/// One row of a bounded registry export (`export_page`).
-///
-/// A flattened projection of [`Resource`] for migration tooling: it carries
-/// only the fields an indexer needs to rebuild state elsewhere, and never
-/// the resource's metadata pointer.
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub struct ResourceExport {
-    /// Catalog index (`DataKey::Index`) the resource was registered under.
-    /// Strictly increasing within and across pages.
-    pub index: u32,
-    pub id: String,
-    pub creator: Address,
-    pub state: ResourceState,
-    pub listed: bool,
-    /// Listed price in USDC base units.
-    pub price: i128,
-    pub verified: VerificationStatus,
-    pub frozen: bool,
-    /// `true` while a moderator dispute flag is active. The flag reason is
-    /// not exported.
-    pub flagged: bool,
-    /// `Resource` storage schema the entry was last written with. Entries
-    /// below `RESOURCE_SCHEMA_VERSION` still need `migrate_resource`.
-    pub schema_version: u32,
-    /// Monotonic write counter (`Resource.version`).
-    pub version: u32,
-    pub created_at: u32,
-    pub updated_at: u32,
-}
-
-/// One bounded page of `export_page`.
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub struct ExportPage {
-    /// [`EXPORT_VIEW_VERSION`] of the `items` layout.
-    pub export_version: u32,
-    /// `RESOURCE_SCHEMA_VERSION` of the contract that produced the page.
-    pub resource_schema_version: u32,
-    /// Total catalog index slots (`count`) when the page was read.
-    pub total: u32,
-    pub items: Vec<ResourceExport>,
-    /// Catalog index to pass back as `cursor`; `None` once the end is reached.
-    pub next_cursor: Option<u32>,
 }
 
 /// Structured payload published with the `setprice` event.
@@ -1868,7 +1828,6 @@ impl VaultRegistry {
         }
 
         for (id, mut resource, metadata) in pending {
-            let revision = Self::bump_listing_revision(&env, &id)?;
             let old_metadata = resource.metadata.clone();
             resource.metadata = metadata.clone();
             Self::save(&env, &mut resource);

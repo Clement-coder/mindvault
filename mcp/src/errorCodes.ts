@@ -22,6 +22,14 @@
  */
 
 import type { ErrorCategory, ErrorSource, MappedError } from "./errorMapping.js";
+import { Errors as RegistryErrors } from "@mindvault/registry-client";
+
+/**
+ * The name of a vault-registry contract error, derived from the installed
+ * bindings' `Errors` table. Defined locally because the installed package
+ * version may not export `RegistryErrorName` directly.
+ */
+export type RegistryErrorName = (typeof RegistryErrors)[keyof typeof RegistryErrors]["message"];
 
 /**
  * Every failure the server can report.
@@ -434,3 +442,415 @@ export function toolErrorPayload(input: {
 export function formatCodeSuffix(code: ErrorCode): string {
   return ` [${code}]`;
 }
+
+// ── Registry contract error mapping ──────────────────────────────────────────
+
+/**
+ * A single entry in the versioned registry-error map.
+ *
+ * `code` is the MV_ code an SDK or agent should branch on. `message` is the
+ * stable, human-readable explanation that SDKs can surface verbatim — it will
+ * not change between contract upgrades unless the error's meaning genuinely
+ * changes (which would require a new `RegistryErrorName` anyway).
+ */
+export interface RegistryErrorMapEntry {
+  /** The on-chain discriminant (numeric). Stable across upgrades. */
+  discriminant: number;
+  /** The Rust enum variant name, mirrored from `packages/registry-client/src/errors.ts`. */
+  name: RegistryErrorName;
+  /** The MV_ code clients should branch on. */
+  code: ErrorCode;
+  /** Stable, SDK-safe explanation for the error. */
+  message: string;
+}
+
+/**
+ * Schema version for the registry error map.
+ *
+ * Increment this when entries are removed or their `code`/`message` changes in
+ * a semantically breaking way. Adding new entries is non-breaking and does not
+ * require a bump.
+ */
+export const REGISTRY_ERROR_MAP_VERSION = 1;
+
+/**
+ * Versioned mapping from every vault-registry contract error name to its
+ * MV_ code and a stable human-readable message.
+ *
+ * This is the single source of truth for how on-chain discriminants become
+ * SDK-presentable errors. Keys are `RegistryErrorName` values (variant names
+ * from the Rust `Error` enum). Discriminants are included for reference and
+ * are checked against `packages/registry-client/src/errors.ts` by tests.
+ *
+ * Rules:
+ *  - Every entry in the TypeScript `Errors` table must have a row here.
+ *  - Entries are never removed; when a contract upgrade retires an error the
+ *    entry is kept so older on-chain data stays classifiable.
+ *  - `code` and `message` are stable: adding new entries never changes existing
+ *    ones. Changing either requires a `REGISTRY_ERROR_MAP_VERSION` bump.
+ */
+export const REGISTRY_ERROR_MAP: Record<RegistryErrorName, RegistryErrorMapEntry> = {
+  AlreadyRegistered: {
+    discriminant: 1,
+    name: "AlreadyRegistered",
+    code: "MV_CONFLICT",
+    message: "A resource with this id is already registered on-chain.",
+  },
+  NotFound: {
+    discriminant: 2,
+    name: "NotFound",
+    code: "MV_NOT_FOUND",
+    message: "No resource, receipt, or key matches the given id.",
+  },
+  InvalidPrice: {
+    discriminant: 3,
+    name: "InvalidPrice",
+    code: "MV_ARGUMENT_INVALID",
+    message: "Price is zero, exceeds the maximum, or violates the creator-share invariant.",
+  },
+  MetadataTooLong: {
+    discriminant: 4,
+    name: "MetadataTooLong",
+    code: "MV_ARGUMENT_INVALID",
+    message: "Metadata pointer exceeds the 512-byte limit.",
+  },
+  InvalidTag: {
+    discriminant: 5,
+    name: "InvalidTag",
+    code: "MV_ARGUMENT_INVALID",
+    message: "Tag validation failed: too many tags, empty tag, tag too long, or duplicate.",
+  },
+  Unauthorized: {
+    discriminant: 6,
+    name: "Unauthorized",
+    code: "MV_AUTH_REJECTED",
+    message: "Caller is not authorized to perform this operation on this resource.",
+  },
+  PendingAdminNotSet: {
+    discriminant: 7,
+    name: "PendingAdminNotSet",
+    code: "MV_CONTRACT_ERROR",
+    message: "No pending admin nomination exists, or caller does not match the pending admin.",
+  },
+  PendingAdminAlreadySet: {
+    discriminant: 8,
+    name: "PendingAdminAlreadySet",
+    code: "MV_CONFLICT",
+    message: "A pending admin nomination is already active.",
+  },
+  SameAdmin: {
+    discriminant: 9,
+    name: "SameAdmin",
+    code: "MV_CONFLICT",
+    message: "Nominated new admin is already the current contract admin.",
+  },
+  TermsHashTooLong: {
+    discriminant: 10,
+    name: "TermsHashTooLong",
+    code: "MV_ARGUMENT_INVALID",
+    message: "Terms hash exceeds the 64-byte limit.",
+  },
+  InvalidResourceId: {
+    discriminant: 11,
+    name: "InvalidResourceId",
+    code: "MV_ARGUMENT_INVALID",
+    message:
+      "Resource id is empty, exceeds 24 bytes, or contains non-lowercase-alphanumeric characters.",
+  },
+  InvalidMetadataPointer: {
+    discriminant: 12,
+    name: "InvalidMetadataPointer",
+    code: "MV_ARGUMENT_INVALID",
+    message: "Metadata pointer does not start with a supported prefix.",
+  },
+  EmptyMetadata: {
+    discriminant: 13,
+    name: "EmptyMetadata",
+    code: "MV_ARGUMENT_INVALID",
+    message: "Metadata pointer must not be empty.",
+  },
+  AlreadyOwner: {
+    discriminant: 14,
+    name: "AlreadyOwner",
+    code: "MV_CONFLICT",
+    message: "Proposed new owner is already the current owner.",
+  },
+  NoPendingTransfer: {
+    discriminant: 15,
+    name: "NoPendingTransfer",
+    code: "MV_NOT_FOUND",
+    message: "No pending ownership transfer exists for this resource.",
+  },
+  ReservedId: {
+    discriminant: 16,
+    name: "ReservedId",
+    code: "MV_ARGUMENT_INVALID",
+    message: "Resource id collides with a reserved word (e.g. 'admin', 'registry').",
+  },
+  PriceExceedsMax: {
+    discriminant: 17,
+    name: "PriceExceedsMax",
+    code: "MV_ARGUMENT_INVALID",
+    message: "Price exceeds the contract maximum.",
+  },
+  AdminNotSet: {
+    discriminant: 18,
+    name: "AdminNotSet",
+    code: "MV_CONTRACT_ERROR",
+    message: "Operation requires an admin but none has been bootstrapped yet.",
+  },
+  NotVerifier: {
+    discriminant: 19,
+    name: "NotVerifier",
+    code: "MV_AUTH_REJECTED",
+    message: "Caller does not hold the verifier role.",
+  },
+  InvalidVerificationTransition: {
+    discriminant: 20,
+    name: "InvalidVerificationTransition",
+    code: "MV_CONFLICT",
+    message: "The requested verification status transition is not allowed.",
+  },
+  AlreadyFrozen: {
+    discriminant: 21,
+    name: "AlreadyFrozen",
+    code: "MV_CONFLICT",
+    message: "Resource metadata is already frozen.",
+  },
+  MetadataFrozen: {
+    discriminant: 22,
+    name: "MetadataFrozen",
+    code: "MV_CONFLICT",
+    message: "Metadata cannot be updated because it has been frozen.",
+  },
+  DuplicateInRepair: {
+    discriminant: 23,
+    name: "DuplicateInRepair",
+    code: "MV_ARGUMENT_INVALID",
+    message: "Index repair received a list with duplicate resource ids.",
+  },
+  InvalidTxHash: {
+    discriminant: 24,
+    name: "InvalidTxHash",
+    code: "MV_ARGUMENT_INVALID",
+    message: "Transaction hash is empty or exceeds the 128-byte limit.",
+  },
+  InvalidPaymentAmount: {
+    discriminant: 25,
+    name: "InvalidPaymentAmount",
+    code: "MV_ARGUMENT_INVALID",
+    message: "Payment or refund amount is zero or negative, or refund window is invalid.",
+  },
+  NotModerator: {
+    discriminant: 26,
+    name: "NotModerator",
+    code: "MV_AUTH_REJECTED",
+    message: "Caller does not hold the moderator role.",
+  },
+  AlreadyFlagged: {
+    discriminant: 27,
+    name: "AlreadyFlagged",
+    code: "MV_CONFLICT",
+    message: "Resource is already flagged as disputed.",
+  },
+  NotFlagged: {
+    discriminant: 28,
+    name: "NotFlagged",
+    code: "MV_CONFLICT",
+    message: "Resource is not currently flagged as disputed.",
+  },
+  InvalidLifecycleTransition: {
+    discriminant: 29,
+    name: "InvalidLifecycleTransition",
+    code: "MV_CONFLICT",
+    message: "The requested lifecycle state transition is not allowed from the current state.",
+  },
+  ResourceNotMutable: {
+    discriminant: 30,
+    name: "ResourceNotMutable",
+    code: "MV_CONFLICT",
+    message:
+      "Resource is frozen, disputed, or tombstoned and cannot be changed; or is not Listed and cannot accept a payment or lease.",
+  },
+  NetworkAlreadyInitialized: {
+    discriminant: 31,
+    name: "NetworkAlreadyInitialized",
+    code: "MV_CONFLICT",
+    message: "Network identifier has already been initialized for this contract instance.",
+  },
+  NetworkIdMismatch: {
+    discriminant: 32,
+    name: "NetworkIdMismatch",
+    code: "MV_CONTRACT_ERROR",
+    message:
+      "Invocation network identifier does not match the configured network. Check SOROBAN_RPC_URL and STELLAR_NETWORK.",
+  },
+  NetworkNotInitialized: {
+    discriminant: 33,
+    name: "NetworkNotInitialized",
+    code: "MV_CONTRACT_ERROR",
+    message: "Network identifier has not been initialized. The contract needs setup.",
+  },
+  FeeBpsTooHigh: {
+    discriminant: 34,
+    name: "FeeBpsTooHigh",
+    code: "MV_ARGUMENT_INVALID",
+    message: "A fee basis-point value exceeds the configured ceiling.",
+  },
+  TotalFeeTooHigh: {
+    discriminant: 35,
+    name: "TotalFeeTooHigh",
+    code: "MV_ARGUMENT_INVALID",
+    message: "The combined fee policy or fee-destination split is invalid.",
+  },
+  CountOverflow: {
+    discriminant: 36,
+    name: "CountOverflow",
+    code: "MV_CONTRACT_ERROR",
+    message: "The global resource count would overflow; the contract is at capacity.",
+  },
+  BatchTooLarge: {
+    discriminant: 37,
+    name: "BatchTooLarge",
+    code: "MV_ARGUMENT_INVALID",
+    message: "Batch exceeds the maximum supported number of items.",
+  },
+  DuplicateReceipt: {
+    discriminant: 38,
+    name: "DuplicateReceipt",
+    code: "MV_CONFLICT",
+    message: "A purchase receipt already exists for this resource and buyer.",
+  },
+  FlagReasonHashTooLong: {
+    discriminant: 39,
+    name: "FlagReasonHashTooLong",
+    code: "MV_ARGUMENT_INVALID",
+    message: "Flag reason hash exceeds the 64-byte limit.",
+  },
+  ContractPaused: {
+    discriminant: 40,
+    name: "ContractPaused",
+    code: "MV_CONTRACT_ERROR",
+    message: "The registry contract is paused. State-changing operations are temporarily blocked.",
+  },
+  NotSettler: {
+    discriminant: 41,
+    name: "NotSettler",
+    code: "MV_AUTH_REJECTED",
+    message: "Caller does not hold the settler role.",
+  },
+  ReceiptAlreadyExists: {
+    discriminant: 42,
+    name: "ReceiptAlreadyExists",
+    code: "MV_CONFLICT",
+    message: "A payment or refund receipt already exists for the supplied id.",
+  },
+  InvalidPaymentTransition: {
+    discriminant: 43,
+    name: "InvalidPaymentTransition",
+    code: "MV_CONFLICT",
+    message:
+      "Payment is not settled, its refund deadline has expired, or the state transition is not allowed.",
+  },
+  InvalidReceiptId: {
+    discriminant: 44,
+    name: "InvalidReceiptId",
+    code: "MV_ARGUMENT_INVALID",
+    message: "Receipt id is empty or exceeds the 64-byte limit.",
+  },
+  ContentHashTooLong: {
+    discriminant: 45,
+    name: "ContentHashTooLong",
+    code: "MV_ARGUMENT_INVALID",
+    message: "Content hash exceeds the 128-byte limit.",
+  },
+  AttestationHashTooLong: {
+    discriminant: 46,
+    name: "AttestationHashTooLong",
+    code: "MV_ARGUMENT_INVALID",
+    message: "Attestation hash exceeds the 64-byte limit.",
+  },
+  PaymentAmountMismatch: {
+    discriminant: 47,
+    name: "PaymentAmountMismatch",
+    code: "MV_ARGUMENT_INVALID",
+    message:
+      "Payment amount differs from the resource price, or cumulative refunds exceed the original payment.",
+  },
+  DuplicateTxHash: {
+    discriminant: 48,
+    name: "DuplicateTxHash",
+    code: "MV_CONFLICT",
+    message: "A receipt already uses this transaction hash.",
+  },
+  FeeConfigNotSet: {
+    discriminant: 49,
+    name: "FeeConfigNotSet",
+    code: "MV_CONTRACT_ERROR",
+    message: "Fee recipient or destination was set before any fee config was configured.",
+  },
+  AdminNominationExpired: {
+    discriminant: 50,
+    name: "AdminNominationExpired",
+    code: "MV_CONTRACT_ERROR",
+    message: "The pending admin nomination is missing or has expired.",
+  },
+  InvalidMetadataPointers: {
+    discriminant: 51,
+    name: "InvalidMetadataPointers",
+    code: "MV_ARGUMENT_INVALID",
+    message:
+      "set_metadata_pointers received zero, too many, or duplicate pointers, or an out-of-range primary index.",
+  },
+  AdminAlreadySet: {
+    discriminant: 52,
+    name: "AdminAlreadySet",
+    code: "MV_CONFLICT",
+    message: "bootstrap_dual_admin was called after an admin was already set.",
+  },
+  RecoveryAdminNotSet: {
+    discriminant: 53,
+    name: "RecoveryAdminNotSet",
+    code: "MV_CONTRACT_ERROR",
+    message: "recover_admin was called but no recovery admin is configured.",
+  },
+  UnsupportedResourceSchema: {
+    discriminant: 54,
+    name: "UnsupportedResourceSchema",
+    code: "MV_CONTRACT_ERROR",
+    message:
+      "Resource uses a schema version this contract deployment cannot read or migrate. Update the contract or the registry-client bindings.",
+  },
+  RevisionOverflow: {
+    discriminant: 55,
+    name: "RevisionOverflow",
+    code: "MV_CONTRACT_ERROR",
+    message: "Listing revision counter would overflow; the resource cannot be mutated further.",
+  },
+};
+
+/**
+ * Look up the MV_ code for a vault-registry contract error name.
+ *
+ * Returns `MV_CONTRACT_ERROR` for any name not in the map (e.g. a future
+ * discriminant from a newer contract version) so clients always get a valid
+ * code even when the map is stale.
+ */
+export function registryErrorCodeFor(name: RegistryErrorName): ErrorCode {
+  return REGISTRY_ERROR_MAP[name]?.code ?? "MV_CONTRACT_ERROR";
+}
+
+/**
+ * Look up the stable SDK message for a vault-registry contract error name.
+ *
+ * Returns `undefined` for unknown names; callers should fall back to the
+ * raw error message in that case.
+ */
+export function registryErrorMessageFor(name: RegistryErrorName): string | undefined {
+  return REGISTRY_ERROR_MAP[name]?.message;
+}
+
+/** All registry error names defined in the map, sorted. */
+export const ALL_REGISTRY_ERROR_NAMES: RegistryErrorName[] = Object.keys(
+  REGISTRY_ERROR_MAP,
+).sort() as RegistryErrorName[];
