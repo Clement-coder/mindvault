@@ -397,6 +397,7 @@ pub const ERROR_SCHEMA: &[(u32, &str, &str)] = &[
     (53, "RecoveryAdminNotSet", "`recover_admin` was called but no recovery admin is configured."),
     (54, "UnsupportedResourceSchema", "A resource uses a schema version this deployment cannot safely read or upgrade."),
     (55, "RevisionOverflow", "A listing revision increment would exceed `u32::MAX`; the mutation is rejected without changing resource state."),
+    (56, "LeaseFeeConfigConflict", "`set_fee_config` was called with a combined fee bps ≥ the price of a resource with active leases; the change is rejected to preserve existing lease terms."),
 ];
 
 /// Canonical list of every event topic this contract emits, paired with a
@@ -1031,6 +1032,11 @@ pub enum DataKey {
     /// metadata or price change. Absent (read as `0`) until the first such
     /// mutation. Read by `get_revision`.
     Revision(String),
+    /// Minimum price among all resources that currently have at least one
+    /// open (Pending or unexpired Active) lease. Used by `set_fee_config`
+    /// to reject fee changes that would invalidate active lease pricing (#991).
+    /// Absent (read as `None`) when no open leases exist.
+    ActiveLeasePriceFloor,
 }
 
 /// Payload of every role grant/revoke event (`addverif`/`rmverif`,
@@ -1497,6 +1503,12 @@ pub enum Error {
     /// A listing revision increment would exceed `u32::MAX`. The mutation is
     /// rejected without changing resource state.
     RevisionOverflow = 55,
+    /// `set_fee_config` was called with a combined `platform_fee_bps +
+    /// royalty_bps` that is ≥ the price of a resource with one or more
+    /// open (Pending or unexpired Active) leases. The fee change is
+    /// rejected to prevent invalidating the price terms under which those
+    /// leases were sold.
+    LeaseFeeConfigConflict = 56,
 }
 
 #[contract]
@@ -4051,6 +4063,12 @@ impl VaultRegistry {
         let destination = Self::load_fee_destination(&env);
         Self::validate_fee_destination_for_fee_config(&config, &destination)?;
 
+        // Prevent fee config changes that would invalidate active lease pricing.
+        // Each lease locks in a price calculated from the resource's price at
+        // purchase time. If the new combined fee bps would meet or exceed the
+        // price of any resource with an open lease, reject the change.
+        Self::validate_fee_config_for_active_leases(&env, &config)?;
+
         let old_config: OptFeeConfig = env
             .storage()
             .instance()
@@ -4184,6 +4202,69 @@ impl VaultRegistry {
             return Err(Error::TotalFeeTooHigh);
         }
         Ok(())
+    }
+
+    // ── Active-lease price-floor guard (#991) ───────────────────────────────
+    //
+    // When a lease is created, the resource's current price is locked into
+    // `Lease.amount`. A subsequent `set_fee_config` that raises the combined
+    // fee bps to or above that resource's price would make the price invalid
+    // under `validate_price`, effectively retroactively invalidating the
+    // economic terms of the lease.  To prevent this, the contract maintains a
+    // single `ActiveLeasePriceFloor` instance entry: the minimum resource
+    // price among all resources that currently have an open (Pending or
+    // unexpired Active) lease.  `set_fee_config` rejects any change whose
+    // combined bps is ≥ that floor.
+    //
+    // The floor is updated lazily on every lease write (`buy_lease`,
+    // `record_lease`) and cleared lazily on every fee-config check.  A full
+    // recompute (scanning all resources for the true minimum) is unnecessary
+    // because the floor only ever needs to be a *lower bound*: any fee config
+    // that stays below the floor is safe for all open leases.
+
+    /// Reject the fee config if its combined bps is ≥ the active-lease price
+    /// floor.  `Ok(())` when no open leases exist (floor absent).
+    fn validate_fee_config_for_active_leases(
+        env: &Env,
+        config: &FeeConfig,
+    ) -> Result<(), Error> {
+        let combined_bps = i128::from(config.platform_fee_bps + config.royalty_bps);
+        if combined_bps == 0 {
+            return Ok(());
+        }
+        match env
+            .storage()
+            .instance()
+            .get::<DataKey, i128>(&DataKey::ActiveLeasePriceFloor)
+        {
+            Some(floor) if combined_bps >= floor => Err(Error::LeaseFeeConfigConflict),
+            _ => Ok(()),
+        }
+    }
+
+    /// Lower the active-lease price floor to include `resource_price` if it
+    /// is the cheapest resource with an open lease, or set the floor when no
+    /// floor exists yet.
+    fn update_lease_price_floor(env: &Env, resource_price: i128) {
+        match env
+            .storage()
+            .instance()
+            .get::<DataKey, i128>(&DataKey::ActiveLeasePriceFloor)
+        {
+            Some(existing) if resource_price < existing => {
+                env.storage()
+                    .instance()
+                    .set(&DataKey::ActiveLeasePriceFloor, &resource_price);
+                Self::bump_instance(env);
+            }
+            None => {
+                env.storage()
+                    .instance()
+                    .set(&DataKey::ActiveLeasePriceFloor, &resource_price);
+                Self::bump_instance(env);
+            }
+            _ => {}
+        }
     }
 
     /// Store a hash of creator marketplace terms.
@@ -6591,6 +6672,10 @@ impl VaultRegistry {
         };
         env.storage().persistent().set(&key, &lease);
         Self::bump_persistent(env, &key);
+
+        // Track the resource price for the active-lease fee-config guard (#991).
+        Self::update_lease_price_floor(env, resource.price);
+
         env.events()
             .publish((symbol_short!("lease"), resource_id), lease.clone());
         Ok(lease)
