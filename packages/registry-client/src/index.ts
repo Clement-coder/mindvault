@@ -41,7 +41,10 @@ export {
 
 export {
   Errors,
+  ERROR_DESCRIPTIONS,
   registryErrorName,
+  registryErrorDescription,
+  registryErrorCodeForName,
   type RegistryErrorCode,
   type RegistryErrorName,
 } from "./errors.js";

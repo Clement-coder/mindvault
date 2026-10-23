@@ -123,11 +123,13 @@ import {
   requiredTagArray,
   TOOL_ARGUMENT_SPECS,
   TOOLS_WITHOUT_ARG_VALIDATION,
+  ToolValidationError,
   UnknownToolError,
   requiredStringArray,
   validateToolArgs,
   type ValidatedArgs,
 } from "./validation.js";
+import { explainRegistryError } from "./registryErrorGuidance.js";
 import {
   DEFAULT_PROFILE,
   isValidProfileName,
@@ -159,6 +161,7 @@ import {
 } from "./resourceSubscriptionTool.js";
 import { type ApiResponse } from "./apiResponse.js";
 import { readBoundedResponse, resolveMaxResponseBytes } from "./responseSize.js";
+import { parseUpstreamErrorBody, responseHeaderBag } from "./malformedResponse.js";
 import { safeErrorMessage, safeLog } from "./redaction.js";
 import {
   assertAutoPaymentWithinCeiling,
@@ -1126,6 +1129,17 @@ async function jsonFetch(url: string, init?: RequestInit): Promise<ApiResponse<a
     responseHeaders[key.toLowerCase()] = value;
   });
   const text = await readBoundedResponse(res, resolveMaxResponseBytes());
+  // A failure body that is not JSON becomes a typed marker instead of a wall
+  // of markup: the status and the upstream's request id survive, and the raw
+  // body does not travel any further (#1019).
+  if (!res.ok) {
+    return {
+      ok: res.ok,
+      status: res.status,
+      data: parseUpstreamErrorBody({ status: res.status, headers: responseHeaders, body: text }),
+      headers: responseHeaders,
+    };
+  }
   try {
     return { ok: res.ok, status: res.status, data: JSON.parse(text), headers: responseHeaders };
   } catch {
@@ -1278,7 +1292,11 @@ async function getBalanceDetails(publicKey: string): Promise<BalanceDetails> {
       operation: `Horizon error ${res.status}`,
       source: "horizon",
       status: res.status,
-      data: await res.text().catch(() => null),
+      data: parseUpstreamErrorBody({
+        status: res.status,
+        headers: responseHeaderBag(res),
+        body: await res.text().catch(() => ""),
+      }),
     });
   }
 
@@ -1480,7 +1498,11 @@ export async function txStatus(txHash: string): Promise<string> {
       operation: `Soroban RPC error: ${res.status}`,
       source: "soroban",
       status: res.status,
-      data: await res.text().catch(() => null),
+      data: parseUpstreamErrorBody({
+        status: res.status,
+        headers: responseHeaderBag(res),
+        body: await res.text().catch(() => ""),
+      }),
     });
   const data: any = await res.json();
   if (data.error)
@@ -1547,7 +1569,11 @@ async function fetchTransactionLookup(txHash: string): Promise<TransactionLookup
       operation: `Soroban RPC error: ${res.status}`,
       source: "soroban",
       status: res.status,
-      data: await res.text().catch(() => null),
+      data: parseUpstreamErrorBody({
+        status: res.status,
+        headers: responseHeaderBag(res),
+        body: await res.text().catch(() => ""),
+      }),
     });
   const data: any = await res.json();
   if (data.error)
@@ -2809,7 +2835,11 @@ export async function buy(
       operation: `Buy failed [${res.status}]`,
       source: "x402",
       status: res.status,
-      data: text,
+      data: parseUpstreamErrorBody({
+        status: res.status,
+        headers: responseHeaderBag(res),
+        body: text,
+      }),
     });
   }
   const afterData = await res.json();
@@ -4109,6 +4139,42 @@ function registryInfo(): string {
   return JSON.stringify(info, null, 2);
 }
 
+/**
+ * Explain a vault-registry contract error code (#1021).
+ *
+ * A failed Soroban invocation reports a number, and the number alone does not
+ * say whether to look the resource up, wait out a pause, or stop. This turns
+ * it into the contract's own description, the retry verdict, and the one
+ * step that recovers.
+ *
+ * Neither or both identifiers is an argument error, not an unknown code: the
+ * caller has not said which failure they mean.
+ */
+export function explainErrorCode(code?: number, name?: string): string {
+  if (code === undefined && name === undefined) {
+    throw new ToolValidationError("mindvault_explain_error_code", [
+      {
+        field: "code",
+        code: "missing_required",
+        message:
+          'exactly one of "code" or "name" is required — pass the on-chain error number or the contract error name.',
+      },
+    ]);
+  }
+  if (code !== undefined && name !== undefined) {
+    throw new ToolValidationError("mindvault_explain_error_code", [
+      {
+        field: "code",
+        code: "unknown_argument",
+        message:
+          'pass either "code" or "name", not both — a code and a name that disagree cannot both be right.',
+      },
+    ]);
+  }
+  const explanation = explainRegistryError({ code: code ?? null, name: name ?? null });
+  return JSON.stringify(explanation, null, 2);
+}
+
 export async function checkConsistency(
   resourceId: string,
   expectedMetadataHash?: string,
@@ -4743,6 +4809,11 @@ async function dispatchToolOutcome(
         );
       case "mindvault_registry_lookup":
         return registryLookup(requiredString(args, "resourceId"));
+      case "mindvault_explain_error_code":
+        return explainErrorCode(
+          args.code === undefined ? undefined : Number(args.code),
+          optionalString(args, "name"),
+        );
       case "mindvault_batch_catalog_lookup":
         return batchCatalogLookupOutcome(
           requiredStringArray(args, "resourceIds"),

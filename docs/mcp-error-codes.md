@@ -62,6 +62,7 @@ report, or a client's error handler.
 | `MV_CONTRACT_ERROR`           | `contract`   | ❌ unsafe      | The vault-registry contract rejected the call or is not the expected contract.                                        |
 | `MV_INSUFFICIENT_FUNDS`       | `payment`    | ✅ safe        | The wallet lacks the USDC or the native XLM reserve needed to pay.                                                    |
 | `MV_MAINNET_UNCONFIRMED`      | `validation` | ❌ unsafe      | A mainnet mutation or payment was attempted without explicit confirmation.                                            |
+| `MV_MALFORMED_RESPONSE`       | `server`     | ✅ safe        | The upstream answered with a body that was not JSON — a proxy, gateway or load balancer usually does this.            |
 | `MV_NETWORK_UNREACHABLE`      | `network`    | ✅ safe        | The service could not be reached — DNS failure, refused connection, or a dropped socket.                              |
 | `MV_NOT_FOUND`                | `not_found`  | ❌ unsafe      | The referenced resource does not exist.                                                                               |
 | `MV_PAYMENT_CEILING_EXCEEDED` | `payment`    | ✅ safe        | The price exceeds the configured auto-pay ceiling, so no payment was attempted.                                       |

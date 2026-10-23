@@ -996,6 +996,12 @@ pub enum DataKey {
     RefundedAmount(String),
     /// Configured creator-refund window length, in ledgers.
     RefundWindow,
+    /// Ordered history of verification status changes for a verifier address.
+    VerifierHistory(Address),
+    /// Aggregated settled-payment earnings for a creator wallet address.
+    CreatorEarnings(Address),
+    /// Moderator who last set a resource's dispute flag or reason hash.
+    FlagModerator(String),
     /// Active lease held by `holder` on a resource.
     Lease(String, Address),
     /// Anchor attempt counter for `(resource_id, buyer)`.
