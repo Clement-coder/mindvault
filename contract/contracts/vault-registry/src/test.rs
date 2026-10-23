@@ -11793,5 +11793,6 @@ include!("test/flag_details.rs");
 include!("test/payment_idempotency.rs");
 include!("test/stellar_wave_804_805_806_808.rs");
 include!("test/stellar_wave_970_971_975_976.rs");
+include!("test/stellar_wave_981_982_983_984.rs");
 include!("test/creator_page_filtered.rs");
 include!("test/tag_prefix_search.rs");
