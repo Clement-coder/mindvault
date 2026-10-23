@@ -212,6 +212,61 @@ can reconstruct the full audit trail from events alone.
 
 ---
 
+## Accrued-Fee Guard (#985)
+
+### Problem
+
+Because the registry is a metadata contract (it describes the fee split but
+does not custody USDC), the actual token movement happens off-chain via the
+x402 facilitator. When `settle_payment` transitions a receipt to `Settled`,
+the facilitator has already routed the platform-fee portion to the configured
+`fee_recipient`. If the admin then rotates the `fee_recipient` (or changes the
+`fee_destination`) _before_ the current recipient has confirmed receipt of
+those funds, the accrued fees become unreachable — the old recipient no longer
+has a claim, and the new recipient never received them.
+
+### Solution
+
+The contract now **tracks accrued platform fees** in instance storage
+(`DataKey::AccruedFees`, an `i128` USDC-stroops counter). Every
+`settle_payment` call adds `amount * platform_fee_bps / FEE_BPS_DENOM` to the
+counter (only when `platform_fee_bps > 0` and `fee_recipient` is set).
+
+**Guard**: `set_fee_config` (when `fee_recipient` changes), `set_fee_recipient`,
+and `set_fee_destination` all call `require_no_unclaimed_fees()` before
+mutating state. If `AccruedFees > 0`, the call reverts with `UnclaimedFees`
+(error 51).
+
+**Safe migration path**: The admin calls `claim_fees()` to acknowledge that
+the current fee recipient has received all outstanding amounts. This resets
+`AccruedFees` to 0 and emits a `claimfee` event. After claiming, the
+configuration change can proceed.
+
+The read-only `get_accrued_fees()` lets off-chain indexers and the MCP layer
+display the outstanding balance so operators know when a claim is needed
+before rotating.
+
+### New API
+
+| Function | Auth | Description |
+| --- | --- | --- |
+| `claim_fees()` | admin | Reset accrued fees to 0, emit `claimfee`, return claimed amount. |
+| `get_accrued_fees()` | — | Read the current accrued-fee balance. |
+
+### New error
+
+| Code | Name | Description |
+| --- | --- | --- |
+| 51 | `UnclaimedFees` | Fee-recipient/destination change blocked because accrued fees > 0. |
+
+### New event
+
+| Topic | Payload | When |
+| --- | --- | --- |
+| `claimfee` | `FeesClaimed { claimed_amount, remaining_amount }` | `claim_fees()` succeeds |
+
+---
+
 ## References
 
 - [Issue #386 — Add royalty or platform fee configuration design](https://github.com/mind-vault-1/mindvault/issues/386)

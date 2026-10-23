@@ -63,10 +63,20 @@ pub const MAX_CONTENT_HASH_LEN: u32 = 128;
 pub const DEFAULT_ATTESTATION_HASH_ALGORITHM: &str = "sha256";
 pub const MAX_ATTESTATION_HASH_ALGORITHM_LEN: u32 = 16;
 pub const MAX_ATTESTATION_HASH_LEN: u32 = 64;
+/// Supported attestation hash algorithms. Legacy untagged values are treated as
+/// `sha256:<digest>` to keep old records readable without requiring a protocol
+/// migration.
+pub const SUPPORTED_ATTESTATION_HASH_ALGORITHMS: [&str; 2] = ["sha256", "sha512"];
 /// Max length for a moderator's off-chain dispute reason hash, set via
 /// `set_flag_reason_hash`. Same bound as `MAX_TERMS_HASH_LEN` — both store a
 /// fixed-size digest of arbitrary off-chain content.
 pub const MAX_FLAG_REASON_HASH_LEN: u32 = 64;
+
+/// Max length for a verifier's off-chain attestation revocation reason hash.
+/// Bounded to the same length as other hash fields for consistency and to
+/// prevent unbounded storage growth. The hash should reference an immutable
+/// off-chain document explaining why an attestation was revoked.
+pub const MAX_REVOCATION_REASON_HASH_LEN: u32 = 64;
 const MAX_TAGS: u32 = 8;
 /// Decimal places in Stellar USDC, so 1 USDC is `10^7` base units. A USDC base
 /// unit is *not* a "stroop" (a stroop is `10^-5` XLM — a 100x difference).
@@ -269,8 +279,10 @@ pub const METHOD_SCHEMA: &[(&str, &str)] = &[
     ("set_paused_until", "admin"),
     ("is_paused", "—"),
     ("pause_until", "—"),
-    ("set_maintenance_status", "admin"),
-    ("maintenance_status", "—"),
+    ("set_payment_paused", "admin"),
+    ("set_payment_paused_until", "admin"),
+    ("is_payment_paused", "—"),
+    ("payment_pause_until", "—"),
     // ── Settler role ──────────────────────────────────────────────────────
     ("add_settler", "admin"),
     ("record_payment_with_memo", "settler + payer"),
@@ -302,10 +314,14 @@ pub const METHOD_SCHEMA: &[(&str, &str)] = &[
     ("set_fee_recipient", "admin"),
     ("set_fee_destination", "admin"),
     ("get_fee_destination", "—"),
+    ("claim_fees", "admin"),
+    ("get_accrued_fees", "—"),
     // ── Index repair ──────────────────────────────────────────────────────
     ("repair_index", "admin"),
     ("repair_tag_index", "admin"),
     ("check_tag_index", "—"),
+    // ── Simulation and validation ──────────────────────────────────────────
+    ("simulate_record_payment", "—"),
     // ── Payment receipts ──────────────────────────────────────────────────
     ("record_payment", "settler + payer"),
     ("record_payment_idempotent", "settler + payer"),
@@ -398,16 +414,16 @@ pub const ERROR_SCHEMA: &[(u32, &str, &str)] = &[
     (44, "InvalidReceiptId", "`receipt_id` is empty or exceeds `MAX_RECEIPT_ID_LEN` (64 bytes)."),
     (45, "ContentHashTooLong", "`content_hash` exceeds `MAX_CONTENT_HASH_LEN` (128 bytes)."),
     (46, "AttestationHashTooLong", "`attestation_hash` exceeds `MAX_ATTESTATION_HASH_LEN` (64 bytes)."),
-    (47, "PaymentAmountMismatch", "Payment amount differs from the resource price or cumulative refunds exceed the original payment."),
-    (48, "DuplicateTxHash", "A payment or refund receipt already uses the supplied transaction hash (`tx_hash`)."),
-    (49, "FeeConfigNotSet", "`set_fee_recipient` or `set_fee_destination` was called before any fee config was set via `set_fee_config`."),
-    (50, "AdminNominationExpired", "The pending admin nomination is missing or has expired."),
-    (51, "InvalidMetadataPointers", "`set_metadata_pointers` received zero, more than `MAX_METADATA_POINTERS`, or duplicate pointers, or an out-of-range `primary` index."),
-    (52, "AdminAlreadySet", "`bootstrap_dual_admin` was called after an admin was already set."),
-    (53, "RecoveryAdminNotSet", "`recover_admin` was called but no recovery admin is configured."),
-    (54, "UnsupportedResourceSchema", "A resource uses a schema version this deployment cannot safely read or upgrade."),
-    (55, "RevisionOverflow", "A listing revision increment would exceed `u32::MAX`; the mutation is rejected without changing resource state."),
-    (56, "InvalidMaintenanceReason", "`reason_code` in `set_maintenance_status` exceeds `MAX_MAINTENANCE_REASON_CODE` (255)."),
+    (47, "RevocationReasonHashTooLong", "`revocation_reason_hash` exceeds `MAX_REVOCATION_REASON_HASH_LEN` (64 bytes)."),
+    (48, "PaymentAmountMismatch", "Payment amount differs from the resource price or cumulative refunds exceed the original payment."),
+    (49, "DuplicateTxHash", "A payment or refund receipt already uses the supplied transaction hash (`tx_hash`)."),
+    (50, "FeeConfigNotSet", "`set_fee_recipient` or `set_fee_destination` was called before any fee config was set via `set_fee_config`."),
+    (51, "AdminNominationExpired", "The pending admin nomination is missing or has expired."),
+    (52, "InvalidMetadataPointers", "`set_metadata_pointers` received zero, more than `MAX_METADATA_POINTERS`, or duplicate pointers, or an out-of-range `primary` index."),
+    (53, "AdminAlreadySet", "`bootstrap_dual_admin` was called after an admin was already set."),
+    (54, "RecoveryAdminNotSet", "`recover_admin` was called but no recovery admin is configured."),
+    (55, "UnsupportedResourceSchema", "A resource uses a schema version this deployment cannot safely read or upgrade."),
+    (56, "RevisionOverflow", "A listing revision increment would exceed `u32::MAX`; the mutation is rejected without changing resource state."),
 ];
 
 /// Canonical list of every event topic this contract emits, paired with a
@@ -475,6 +491,8 @@ pub const EVENT_SCHEMA: &[(&str, &str)] = &[
     ("rmsettlr", "RoleChange { admin, target, granted: false }"),
     ("pause", "(paused: bool, admin: Address)"),
     ("pause_until", "(pause_until: u64, admin: Address)"),
+    ("payment_pause", "(paused: bool, admin: Address)"),
+    ("payment_pause_until", "(pause_until: u64, admin: Address)"),
     (
         "mntstat",
         "MaintenanceStatusEvent { kind, reason_code, admin }",
@@ -506,6 +524,7 @@ pub const EVENT_SCHEMA: &[(&str, &str)] = &[
         "setdest",
         "FeeDestinationUpdated { old_destination, new_destination, ledger }",
     ),
+    ("claimfee", "(claimed_amount: i128, remaining_amount: i128)"),
     ("ttlext", "()"),
     (
         "txfrterms",
@@ -513,6 +532,7 @@ pub const EVENT_SCHEMA: &[(&str, &str)] = &[
     ),
     ("lease", "(resource_id: String, lease: Lease)"),
     ("leasesetl", "(resource_id: String, lease: Lease)"),
+    ("simvalid", "(passed: bool, error_code: Option<u32>)"),
     ("leaserevk", "(resource_id: String, lease: Lease)"),
 ];
 
@@ -936,6 +956,11 @@ pub struct VerifierStatusEntry {
     pub new_status: VerificationStatus,
     /// Attestation hash supplied with this status change, if any.
     pub attestation_hash: Option<String>,
+    /// Optional revocation reason hash. When an attestation is revoked
+    /// (cleared), this field may contain a bounded hash pointing to an
+    /// off-chain immutable document explaining the revocation. This enables
+    /// auditable revocation without erasing history.
+    pub revocation_reason_hash: Option<String>,
     /// Ledger sequence at which this change was recorded.
     pub ledger: u32,
 }
@@ -996,6 +1021,9 @@ pub enum DataKey {
     PendingTransfer(String),
     Verifier(Address),
     NetworkId,
+    /// Paginated status-change history for a verifier address, appended to
+    /// on every `set_verification_status` call that involves this verifier.
+    VerifierHistory(Address),
     /// Canonical payment receipt, keyed by its caller-assigned `receipt_id`.
     PaymentReceipt(String),
     /// Secondary index mapping `(resource_id, payer)` to the `receipt_id` of
@@ -1019,6 +1047,12 @@ pub enum DataKey {
     RefundedAmount(String),
     /// Configured creator-refund window length, in ledgers.
     RefundWindow,
+    /// Ordered history of verification status changes for a verifier address.
+    VerifierHistory(Address),
+    /// Aggregated settled-payment earnings for a creator wallet address.
+    CreatorEarnings(Address),
+    /// Moderator who last set a resource's dispute flag or reason hash.
+    FlagModerator(String),
     /// Active lease held by `holder` on a resource.
     Lease(String, Address),
     /// Anchor attempt counter for `(resource_id, buyer)`.
@@ -1052,9 +1086,17 @@ pub enum DataKey {
     /// enum code): this carries a digest of free-form detail a moderator
     /// recorded off-chain, analogous to `CreatorTerms`.
     FlagReasonHash(String),
+    /// Last moderator address that acted on the moderation state of a resource,
+    /// stored by resource id. Read by `flag_details`.
+    FlagModerator(String),
     /// Hash of a verifier's off-chain attestation document, provided during a
     /// status change via `set_verification_status`.
     AttestationHash(String),
+    /// Hash of a verifier's off-chain revocation reason document. When an
+    /// attestation is revoked (cleared), the verifier may optionally store
+    /// a bounded hash referencing an immutable explanation. This preserves
+    /// auditability while allowing obsolete attestations to be revoked.
+    RevocationReasonHash(String),
     /// Ledger sequence at which the pending admin nomination expires.
     PendingAdminExpiry,
     /// Ledger sequence at which the pending admin nomination was created.
@@ -1074,6 +1116,11 @@ pub enum DataKey {
     /// mutated; `None` for resources registered through the other entry points.
     MemoHash(String),
     FeeDestination,
+    /// Accumulated platform-fee amounts (in USDC stroops) that have been
+    /// settled but not yet acknowledged via `claim_fees`. When non-zero,
+    /// fee-recipient and fee-destination changes are blocked until the
+    /// current recipient calls `claim_fees` to reset the counter.
+    AccruedFees,
     /// Redundant metadata pointers set via `set_metadata_pointers`. The
     /// entry at `primary` always mirrors `Resource.metadata`.
     MetadataPointers(String),
@@ -1084,6 +1131,11 @@ pub enum DataKey {
     /// metadata or price change. Absent (read as `0`) until the first such
     /// mutation. Read by `get_revision`.
     Revision(String),
+    /// Emergency pause flag for payment operations only (independent of general pause).
+    /// When `true`, payment and lease methods return `ContractPaused`.
+    PaymentPaused,
+    /// Unix timestamp at which a scheduled payment pause automatically expires.
+    PaymentPauseUntil,
 }
 
 /// Payload of every role grant/revoke event (`addverif`/`rmverif`,
@@ -1121,52 +1173,6 @@ pub struct MetadataUpdateEvent {
     pub new_metadata: String,
     /// Listing revision after this update (see `get_revision`).
     pub revision: u32,
-}
-
-/// One row of a bounded registry export (`export_page`).
-///
-/// A flattened projection of [`Resource`] for migration tooling: it carries
-/// only the fields an indexer needs to rebuild state elsewhere, and never
-/// the resource's metadata pointer.
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub struct ResourceExport {
-    /// Catalog index (`DataKey::Index`) the resource was registered under.
-    /// Strictly increasing within and across pages.
-    pub index: u32,
-    pub id: String,
-    pub creator: Address,
-    pub state: ResourceState,
-    pub listed: bool,
-    /// Listed price in USDC base units.
-    pub price: i128,
-    pub verified: VerificationStatus,
-    pub frozen: bool,
-    /// `true` while a moderator dispute flag is active. The flag reason is
-    /// not exported.
-    pub flagged: bool,
-    /// `Resource` storage schema the entry was last written with. Entries
-    /// below `RESOURCE_SCHEMA_VERSION` still need `migrate_resource`.
-    pub schema_version: u32,
-    /// Monotonic write counter (`Resource.version`).
-    pub version: u32,
-    pub created_at: u32,
-    pub updated_at: u32,
-}
-
-/// One bounded page of `export_page`.
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub struct ExportPage {
-    /// [`EXPORT_VIEW_VERSION`] of the `items` layout.
-    pub export_version: u32,
-    /// `RESOURCE_SCHEMA_VERSION` of the contract that produced the page.
-    pub resource_schema_version: u32,
-    /// Total catalog index slots (`count`) when the page was read.
-    pub total: u32,
-    pub items: Vec<ResourceExport>,
-    /// Catalog index to pass back as `cursor`; `None` once the end is reached.
-    pub next_cursor: Option<u32>,
 }
 
 /// Structured payload published with the `setprice` event.
@@ -1248,6 +1254,17 @@ pub struct FeeDestinationUpdated {
     pub old_destination: FeeDestinationConfig,
     pub new_destination: FeeDestinationConfig,
     pub ledger: u32,
+}
+
+/// Event payload for `claimfee`. Carries the amount acknowledged and the
+/// remaining accrued balance after the claim.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct FeesClaimed {
+    /// Amount acknowledged by the fee recipient in this claim (stroops).
+    pub claimed_amount: i128,
+    /// Accrued balance remaining after this claim (always 0 in v1).
+    pub remaining_amount: i128,
 }
 
 /// On-chain record of a single x402/Soroban payment settlement for a resource.
@@ -1550,9 +1567,10 @@ pub enum Error {
     /// A listing revision increment would exceed `u32::MAX`. The mutation is
     /// rejected without changing resource state.
     RevisionOverflow = 55,
-    /// `reason_code` supplied to `set_maintenance_status` exceeds
-    /// `MAX_MAINTENANCE_REASON_CODE`.
-    InvalidMaintenanceReason = 56,
+    /// A fee-recipient or fee-destination change was attempted while accrued
+    /// fees remain unclaimed. Call `claim_fees` first to acknowledge receipt
+    /// of outstanding fees, then retry the change.
+    UnclaimedFees = 56,
 }
 
 #[contract]
@@ -1889,7 +1907,6 @@ impl VaultRegistry {
         }
 
         for (id, mut resource, metadata) in pending {
-            let revision = Self::bump_listing_revision(&env, &id)?;
             let old_metadata = resource.metadata.clone();
             resource.metadata = metadata.clone();
             Self::save(&env, &mut resource);
@@ -2124,6 +2141,7 @@ impl VaultRegistry {
             old_status,
             new_status: status,
             attestation_hash: stored_attestation_hash.clone(),
+            revocation_reason_hash: None, // TODO: Will be populated when revocation is implemented
             ledger: env.ledger().sequence(),
         });
         env.storage().persistent().set(&hist_key, &history);
@@ -3983,53 +4001,76 @@ impl VaultRegistry {
         pause_until
     }
 
-    /// Record the registry-level maintenance status. Only the current admin
-    /// may call this. `kind` distinguishes a scheduled pause from an
-    /// emergency pause; `reason_code` is a bounded operator-defined code
-    /// (`0..=MAX_MAINTENANCE_REASON_CODE`) in a stable, append-only
-    /// namespace — a published code never changes meaning and consumers must
-    /// ignore unknown codes. Errors `AdminNotSet` / `Unauthorized` /
-    /// [`Error::InvalidMaintenanceReason`]. Emits `mntstat`.
-    pub fn set_maintenance_status(
-        env: Env,
-        admin: Address,
-        kind: MaintenanceKind,
-        reason_code: u32,
-    ) -> Result<(), Error> {
+    /// Set or clear the emergency pause on payment and lease operations only.
+    ///
+    /// When `paused` is `true`, payment, refund, anchor, and lease methods return
+    /// [`Error::ContractPaused`] without modifying any state. Catalog mutations
+    /// remain fully available. This allows governance to pause payment during
+    /// an incident without blocking catalog management.
+    ///
+    /// Requires the current admin's authorization. Errors `AdminNotSet` if no
+    /// admin has been set yet, and `Unauthorized` if `admin` is not the
+    /// current admin.
+    ///
+    /// Emits a `payment_pause` event with data `(paused: bool, admin: Address)` on
+    /// every call, including no-op transitions.
+    pub fn set_payment_paused(env: Env, admin: Address, paused: bool) -> Result<(), Error> {
         Self::require_current_admin(&env, &admin)?;
-        if reason_code > MAX_MAINTENANCE_REASON_CODE {
-            return Err(Error::InvalidMaintenanceReason);
+        env.storage().instance().set(&DataKey::PaymentPaused, &paused);
+        env.storage().instance().remove(&DataKey::PaymentPauseUntil);
+        Self::bump_instance(&env);
+        env.events()
+            .publish((symbol_short!("payment_pause"), admin.clone()), (paused, admin));
+        Ok(())
+    }
+
+    /// Schedule an emergency pause on payment operations that automatically expires at `pause_until`.
+    ///
+    /// The deadline is an absolute Unix timestamp in seconds from the ledger
+    /// clock. The existing `set_payment_paused(admin, true)` entry point remains the
+    /// way to create an indefinite pause. A deadline at or before the current
+    /// ledger timestamp takes effect as an immediate resume.
+    pub fn set_payment_paused_until(env: Env, admin: Address, pause_until: u64) -> Result<(), Error> {
+        Self::require_current_admin(&env, &admin)?;
+        let active = pause_until > env.ledger().timestamp();
+        env.storage().instance().set(&DataKey::PaymentPaused, &active);
+        if active {
+            env.storage()
+                .instance()
+                .set(&DataKey::PaymentPauseUntil, &pause_until);
+        } else {
+            env.storage().instance().remove(&DataKey::PaymentPauseUntil);
         }
-        let status = MaintenanceStatus { kind, reason_code };
-        env.storage()
-            .instance()
-            .set(&DataKey::MaintenanceStatus, &status);
         Self::bump_instance(&env);
         env.events().publish(
-            (symbol_short!("mntstat"),),
-            MaintenanceStatusEvent {
-                kind: status.kind,
-                reason_code: status.reason_code,
-                admin,
-            },
+            (symbol_short!("payment_pause"), admin.clone()),
+            (active, admin.clone()),
+        );
+        env.events().publish(
+            (Symbol::new(&env, "payment_pause_until"), admin.clone()),
+            (pause_until, admin),
         );
         Ok(())
     }
 
-    /// The recorded maintenance status. Never blocked by the pause itself, so
-    /// reads remain available while the registry is paused. Returns
-    /// `MaintenanceKind::None` / reason code `0` when nothing has been set.
-    pub fn maintenance_status(env: Env) -> MaintenanceStatus {
-        let status = env
+    /// Whether payment operations are currently paused. Returns `false` when the
+    /// payment pause flag has never been set. Never blocked by the pause itself.
+    pub fn is_payment_paused(env: Env) -> bool {
+        Self::payment_pause_is_active(&env)
+    }
+
+    /// The active scheduled payment pause deadline, if one exists.
+    /// Bumps the instance storage TTL to keep the entry alive for active monitors.
+    pub fn payment_pause_until(env: Env) -> Option<u64> {
+        let pause_until = env
             .storage()
             .instance()
-            .get(&DataKey::MaintenanceStatus)
-            .unwrap_or(MaintenanceStatus {
-                kind: MaintenanceKind::None,
-                reason_code: 0,
-            });
-        Self::bump_instance(&env);
-        status
+            .get::<DataKey, u64>(&DataKey::PaymentPauseUntil)
+            .filter(|pause_until| *pause_until > env.ledger().timestamp());
+        if pause_until.is_some() {
+            Self::bump_instance(&env);
+        }
+        pause_until
     }
 
     /// Grant the verifier role to `verifier`, authorizing `set_verification_status`.
@@ -4207,10 +4248,16 @@ impl VaultRegistry {
         let destination = Self::load_fee_destination(&env);
         Self::validate_fee_destination_for_fee_config(&config, &destination)?;
 
-        let old_config: OptFeeConfig = env
-            .storage()
-            .instance()
-            .get::<DataKey, FeeConfig>(&DataKey::FeeConfig)
+        // Reject fee-recipient rotation when accrued fees are unclaimed.
+        let existing: Option<FeeConfig> =
+            env.storage().instance().get(&DataKey::FeeConfig);
+        if let Some(ref old) = existing {
+            if old.fee_recipient != config.fee_recipient {
+                Self::require_no_unclaimed_fees(&env)?;
+            }
+        }
+
+        let old_config: OptFeeConfig = existing
             .map(OptFeeConfig::Some)
             .unwrap_or(OptFeeConfig::None);
         env.storage().instance().set(&DataKey::FeeConfig, &config);
@@ -4250,6 +4297,12 @@ impl VaultRegistry {
             .instance()
             .get::<DataKey, FeeConfig>(&DataKey::FeeConfig)
             .ok_or(Error::FeeConfigNotSet)?;
+
+        // Reject rotation when accrued fees are unclaimed.
+        if config.fee_recipient != recipient {
+            Self::require_no_unclaimed_fees(&env)?;
+        }
+
         let destination = Self::load_fee_destination(&env);
         let old_config = OptFeeConfig::Some(config.clone());
         config.fee_recipient = recipient;
@@ -4280,6 +4333,9 @@ impl VaultRegistry {
             .ok_or(Error::FeeConfigNotSet)?;
         Self::validate_fee_destination_for_fee_config(&fee_config, &config)?;
 
+        // Reject destination rotation when accrued fees are unclaimed.
+        Self::require_no_unclaimed_fees(&env)?;
+
         let old_destination = Self::load_fee_destination(&env);
         env.storage()
             .instance()
@@ -4300,6 +4356,46 @@ impl VaultRegistry {
         Self::load_fee_destination(&env)
     }
 
+    /// Acknowledge receipt of all accrued platform fees and reset the
+    /// accumulated counter to zero. Only the admin may call this.
+    ///
+    /// This is the **safe migration path** required before rotating the fee
+    /// recipient or fee destination: `set_fee_recipient`,
+    /// `set_fee_destination`, and `set_fee_config` reject changes while
+    /// accrued fees are non-zero (`UnclaimedFees`). The admin calls
+    /// `claim_fees` to confirm that the current fee recipient has received
+    /// all outstanding amounts, then retries the configuration change.
+    ///
+    /// Returns the amount that was claimed (and reset to zero).
+    ///
+    /// Emits a `claimfee` event with `(claimed_amount, remaining_amount)`.
+    pub fn claim_fees(env: Env) -> Result<i128, Error> {
+        let admin = Self::require_admin(&env)?;
+        admin.require_auth();
+        Self::require_not_paused(&env)?;
+
+        let claimed = Self::load_accrued_fees(&env);
+        if claimed > 0 {
+            env.storage().instance().set(&DataKey::AccruedFees, &0i128);
+            Self::bump_instance(&env);
+        }
+
+        env.events().publish(
+            (symbol_short!("claimfee"),),
+            FeesClaimed {
+                claimed_amount: claimed,
+                remaining_amount: 0,
+            },
+        );
+        Ok(claimed)
+    }
+
+    /// Read the total accrued platform-fee amount (in USDC stroops) that has
+    /// been settled but not yet acknowledged via `claim_fees`.
+    pub fn get_accrued_fees(env: Env) -> i128 {
+        Self::load_accrued_fees(&env)
+    }
+
     fn default_fee_destination() -> FeeDestinationConfig {
         FeeDestinationConfig {
             bps: 0,
@@ -4312,6 +4408,38 @@ impl VaultRegistry {
             .instance()
             .get(&DataKey::FeeDestination)
             .unwrap_or_else(Self::default_fee_destination)
+    }
+
+    /// Read the accumulated platform-fee balance. Defaults to 0 when no
+    /// fees have accrued.
+    fn load_accrued_fees(env: &Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::AccruedFees)
+            .unwrap_or(0i128)
+    }
+
+    /// Add `fee_amount` to the accrued platform-fee counter. Called when a
+    /// payment receipt transitions to `Settled`.
+    fn accrue_fees(env: &Env, fee_amount: i128) {
+        if fee_amount <= 0 {
+            return;
+        }
+        let current = Self::load_accrued_fees(env);
+        env.storage()
+            .instance()
+            .set(&DataKey::AccruedFees, &(current + fee_amount));
+    }
+
+    /// Reject the call with `UnclaimedFees` if accrued platform fees are
+    /// non-zero. This guard runs before any fee-recipient or fee-destination
+    /// mutation, ensuring the current recipient always has a chance to claim
+    /// before the destination is rotated.
+    fn require_no_unclaimed_fees(env: &Env) -> Result<(), Error> {
+        if Self::load_accrued_fees(env) > 0 {
+            return Err(Error::UnclaimedFees);
+        }
+        Ok(())
     }
 
     fn validate_fee_destination(destination: &FeeDestinationConfig) -> Result<(), Error> {
@@ -4482,6 +4610,68 @@ impl VaultRegistry {
     /// off-chain indexers can index the receipt without reading contract
     /// storage.
     ///
+    /// Simulate recording a payment without modifying state. Validates all
+    /// arguments and authorization as if executing `record_payment`, but returns
+    /// the validation result without writing storage or emitting events. Use to
+    /// pre-validate payment attempts and detect errors before executing.
+    ///
+    /// Returns `Ok(PaymentReceipt)` if the payment would be valid, or an error
+    /// if it would fail. No state change occurs. Emits a `simvalid` event
+    /// indicating pass/fail status.
+    pub fn simulate_record_payment(
+        env: Env,
+        settler: Address,
+        receipt_id: String,
+        resource_id: String,
+        payer: Address,
+        amount: i128,
+        tx_hash: String,
+    ) -> Result<PaymentReceipt, Error> {
+        let validation_result = Self::check_payment_args(
+            &env,
+            &settler,
+            &receipt_id,
+            &resource_id,
+            &payer,
+            amount,
+            &tx_hash,
+        );
+
+        match validation_result {
+            Ok(()) => {
+                env.events().publish(
+                    (symbol_short!("simvalid"),),
+                    (true, Option::<u32>::None),
+                );
+                Ok(PaymentReceipt {
+                    receipt_id: receipt_id.clone(),
+                    resource_id,
+                    payer,
+                    amount,
+                    state: PaymentState::Escrowed,
+                    tx_hash,
+                    recorded_at: env.ledger().sequence(),
+                })
+            }
+            Err(e) => {
+                let error_code = match e {
+                    Error::NotSettler => Some(41u32),
+                    Error::InvalidReceiptId => Some(44u32),
+                    Error::ContractPaused => Some(40u32),
+                    Error::InvalidResourceId => Some(11u32),
+                    Error::InvalidPaymentAmount => Some(25u32),
+                    Error::InvalidTxHash => Some(24u32),
+                    _ => None,
+                };
+                env.events().publish(
+                    (symbol_short!("simvalid"),),
+                    (false, error_code),
+                );
+                Err(e)
+            }
+        }
+    }
+
     /// Provenance: this entry point cannot prove which resource the settlement
     /// transaction paid for, so it also emits a `nomemo` warning event. Prefer
     /// `record_payment_with_memo`, which checks the canonical `mv:<resource_id>`
@@ -4580,6 +4770,7 @@ impl VaultRegistry {
         }
 
         Self::require_not_paused(&env)?;
+        Self::require_payment_not_paused(&env)?;
         Self::validate_receipt_id(&receipt_id)?;
 
         let receipt_key = DataKey::PaymentReceipt(receipt_id.clone());
@@ -4622,6 +4813,19 @@ impl VaultRegistry {
         let recipient_key = DataKey::PaymentRecipient(receipt_id.clone());
         if env.storage().persistent().has(&recipient_key) {
             Self::bump_persistent(&env, &recipient_key);
+        }
+
+        // Accrue platform fees for the current fee recipient. The fee
+        // amount is `amount * platform_fee_bps / FEE_BPS_DENOM`, computed
+        // in integer arithmetic (truncation is fine — leftover sub-stroop
+        // dust is not tracked). Only non-zero fees are accrued so the
+        // guard is inactive when no platform fee is configured.
+        if let Some(fee_config) = env.storage().instance().get::<DataKey, FeeConfig>(&DataKey::FeeConfig) {
+            if fee_config.platform_fee_bps > 0 && fee_config.fee_recipient.is_some() {
+                let fee_amount = receipt.amount * i128::from(fee_config.platform_fee_bps)
+                    / i128::from(FEE_BPS_DENOM);
+                Self::accrue_fees(&env, fee_amount);
+            }
         }
 
         env.events()
@@ -4769,6 +4973,7 @@ impl VaultRegistry {
     ) -> Result<(), Error> {
         Self::require_anchor_authority(&env, &service)?;
         Self::require_not_paused(&env)?;
+        Self::require_payment_not_paused(&env)?;
         Self::validate_resource_id(&resource_id)?;
         if let Some(reason) = Self::anchor_blocker(&env, &resource_id, &buyer, &receipt_hash) {
             return Err(reason.as_error());
@@ -4812,6 +5017,7 @@ impl VaultRegistry {
     ) -> Result<bool, Error> {
         Self::require_anchor_authority(&env, &service)?;
         Self::require_not_paused(&env)?;
+        Self::require_payment_not_paused(&env)?;
         Self::validate_resource_id(&resource_id)?;
 
         let attempts_key = DataKey::AnchorAttempts(resource_id.clone(), buyer.clone());
@@ -5423,6 +5629,7 @@ impl VaultRegistry {
             return Err(Error::NotSettler);
         }
         Self::require_not_paused(&env)?;
+        Self::require_payment_not_paused(&env)?;
         Self::validate_resource_id(&resource_id)?;
         let key = DataKey::Lease(resource_id.clone(), holder);
         let mut lease: Lease = env
@@ -5748,6 +5955,7 @@ impl VaultRegistry {
         admin_override: bool,
     ) -> Result<(), Error> {
         Self::require_not_paused(env)?;
+        Self::require_payment_not_paused(env)?;
         Self::validate_receipt_id(&refund_id)?;
         Self::validate_receipt_id(&payment_receipt_id)?;
         Self::validate_payment_amount(amount)?;
@@ -5912,6 +6120,7 @@ impl VaultRegistry {
         Self::validate_receipt_id(receipt_id)?;
         payer.require_auth();
         Self::require_not_paused(env)?;
+        Self::require_payment_not_paused(env)?;
         Self::validate_resource_id(resource_id)?;
         Self::validate_payment_amount(amount)?;
         Self::validate_tx_hash(tx_hash)
@@ -6712,6 +6921,7 @@ impl VaultRegistry {
         state: LeaseState,
     ) -> Result<Lease, Error> {
         Self::require_not_paused(env)?;
+        Self::require_payment_not_paused(env)?;
         Self::validate_resource_id(&resource_id)?;
         Self::validate_payment_amount(amount)?;
         Self::validate_tx_hash(&tx_hash)?;
@@ -6839,6 +7049,43 @@ impl VaultRegistry {
                     false
                 }
             })
+            .unwrap_or(true);
+
+        // Bump TTL on read to keep pause entries alive for active monitors
+        Self::bump_instance(env);
+        result
+    }
+
+    fn require_payment_not_paused(env: &Env) -> Result<(), Error> {
+        if Self::payment_pause_is_active(env) {
+            Err(Error::ContractPaused)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Return whether payment operations are paused after applying any scheduled
+    /// deadline. Expired deadlines are treated as resumed without requiring a
+    /// separate transaction to clear the stored state.
+    /// Bumps the instance storage TTL to keep pause entries alive for active monitors.
+    fn payment_pause_is_active(env: &Env) -> bool {
+        let paused = env
+            .storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::PaymentPaused)
+            .unwrap_or(false);
+
+        if !paused {
+            // Still bump TTL on read to keep the entry alive
+            Self::bump_instance(env);
+            return false;
+        }
+
+        let result = env
+            .storage()
+            .instance()
+            .get::<DataKey, u64>(&DataKey::PaymentPauseUntil)
+            .map(|pause_until| pause_until > env.ledger().timestamp())
             .unwrap_or(true);
 
         // Bump TTL on read to keep pause entries alive for active monitors

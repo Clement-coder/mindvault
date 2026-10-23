@@ -399,6 +399,19 @@ export const TOOL_ARGUMENT_SPECS: Record<string, ToolArgumentSpec> = {
     attestationHash: ATTESTATION_HASH,
   },
   mindvault_registry_lookup: { resourceId: RESOURCE_ID },
+  mindvault_explain_error_code: {
+    // Exactly one of the two identifies the error. The spec marks neither as
+    // required because the pair is an exclusive choice, and the validator's
+    // "required" flag cannot express "one of"; the handler rejects a call
+    // that gives neither or both.
+    code: { kind: "integer", min: 0, max: 65535 },
+    name: {
+      kind: "string",
+      maxLength: 64,
+      pattern: /^[A-Za-z][A-Za-z0-9]*$/,
+      patternHint: "an error name such as NotFound",
+    },
+  },
   mindvault_registry_list: {
     start: { kind: "integer", min: 0 },
     limit: { kind: "integer", min: 1, max: REGISTRY_LIST_MAX_LIMIT },

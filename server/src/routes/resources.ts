@@ -50,22 +50,6 @@ const router: RouterType = Router();
 const DEFAULT_PAGE_LIMIT = 20;
 const MAX_PAGE_LIMIT = 100;
 
-function decodeCursor(cursor?: string): number | null {
-  if (!cursor) return null;
-  try {
-    const raw = Buffer.from(cursor, "base64url").toString("utf8");
-    const parsed = Number(raw);
-    if (!Number.isFinite(parsed) || parsed < 0) throw new Error("bad");
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-function encodeCursor(offset: number): string {
-  return Buffer.from(String(offset), "utf8").toString("base64url");
-}
-
 // POST /resources — publish a resource (authenticated)
 router.post(
   "/resources",
@@ -206,23 +190,6 @@ router.get("/resources", async (req, res) => {
       accessUrl: `${config.BASE_URL}/resources/${r.id}`,
     })),
   );
-  const offset = decodeCursor(cursor);
-  if (cursor && offset === null) {
-    res.status(400).json({ error: "invalid_cursor" });
-    return;
-  }
-  const start = offset ?? 0;
-  const catalog = await listCatalog({ limit, offset: start });
-  const items = catalog.map((r) => ({
-    ...r,
-    accessUrl: `${config.BASE_URL}/resources/${r.id}`,
-  }));
-  const nextOffset = start + items.length;
-  res.json({
-    items,
-    nextCursor: items.length === limit ? encodeCursor(nextOffset) : null,
-    count: items.length,
-  });
 });
 
 // GET /resources/:id/meta — resource preview (public)
@@ -410,7 +377,13 @@ router.post(
     // "none" or "failed" → proceed (failed is retryable)
 
     // Build and submit the registration transaction
-    const unsignedXdr = await buildRegisterTx(resourceId, resource.price, resource.contentHash);
+    const metadata = `${config.BASE_URL}/resources/${resourceId}`;
+    const unsignedXdr = await buildRegisterTx(
+      resource.walletAddress,
+      resourceId,
+      resource.price,
+      metadata,
+    );
     const signedXdr = unsignedXdr; // We'll sign with the server's registry keypair
     // Actually sign it
     const { TransactionBuilder, Networks } = await import("@stellar/stellar-sdk");

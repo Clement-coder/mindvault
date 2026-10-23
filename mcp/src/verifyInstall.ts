@@ -17,6 +17,7 @@
 
 import { redactSecrets } from "./diagnostics.js";
 import { readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
 import { createRequire } from "node:module";
 
 // ── SDK version helpers ───────────────────────────────────────────────────────
@@ -51,25 +52,52 @@ export function compareSemver(a: string, b: string): number {
 export function readInstalledSdkVersion(
   resolver: (id: string) => string | null = defaultResolver,
 ): string | null {
-  const jsonPath = resolver("@modelcontextprotocol/sdk/package.json");
-  if (!jsonPath) return null;
-  try {
-    const raw = readFileSync(jsonPath, "utf-8");
-    const pkg = JSON.parse(raw) as { version?: unknown };
-    return typeof pkg.version === "string" ? pkg.version : null;
-  } catch {
-    return null;
+  // First try the root package.json directly via the package name.
+  // `require.resolve` may return a sub-path package.json (e.g. dist/cjs/package.json)
+  // that has no `version` field, so we also try the explicit main entry path
+  // and walk up to find the real root package.json.
+  const candidates = [
+    "@modelcontextprotocol/sdk/package.json",
+    // Explicit fallback: resolve the main entry, then find the root package.json
+  ];
+  for (const candidate of candidates) {
+    const jsonPath = resolver(candidate);
+    if (!jsonPath) continue;
+    try {
+      const raw = readFileSync(jsonPath, "utf-8");
+      const pkg = JSON.parse(raw) as { version?: unknown };
+      if (typeof pkg.version === "string") return pkg.version;
+      // Sub-path package.json without version — try the parent directory.
+      const parentPkg = join(dirname(jsonPath), "..", "package.json");
+      const parentRaw = readFileSync(parentPkg, "utf-8");
+      const parentParsed = JSON.parse(parentRaw) as { version?: unknown };
+      if (typeof parentParsed.version === "string") return parentParsed.version;
+    } catch {
+      continue;
+    }
   }
+  return null;
 }
 
 /** Use createRequire to resolve a package file path relative to this module. */
 const _require = createRequire(import.meta.url);
+/** Fallback resolver from cwd — handles pnpm workspace hoisting where the
+ * package lives in the root node_modules rather than the local one. */
+const _requireCwd = createRequire(
+  new URL(`file://${process.cwd().replace(/\\/g, "/")}/package.json`),
+);
 
 function defaultResolver(id: string): string | null {
   try {
     return _require.resolve(id);
   } catch {
-    return null;
+    // Fallback: try resolving from the current working directory (handles pnpm
+    // workspace hoisting where deps land in the workspace root node_modules).
+    try {
+      return _requireCwd.resolve(id);
+    } catch {
+      return null;
+    }
   }
 }
 

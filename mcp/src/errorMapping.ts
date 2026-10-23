@@ -15,6 +15,8 @@
  * `index.ts` owns the wiring; nothing here performs I/O.
  */
 
+import { describeMalformedResponse, isMalformedResponseBody } from "./malformedResponse.js";
+import type { MalformedResponseBody } from "./malformedResponse.js";
 import { CLOCK_SKEW_WINDOW_MS, isClockSkewRejection } from "./requestSignature.js";
 
 /** Which subsystem produced the failure. */
@@ -46,6 +48,14 @@ export interface MappedError {
   detail?: string;
   /** One-line, imperative next step for the agent. */
   action: string;
+  /**
+   * Set when the upstream answered with a body that was not JSON (#1019).
+   *
+   * The typed description carries the status, the upstream's request id and a
+   * redacted excerpt. It is kept alongside the mapping so the agent can quote
+   * the request id without the caller having to parse it back out of prose.
+   */
+  malformed?: MalformedResponseBody;
 }
 
 /**
@@ -62,6 +72,13 @@ export interface TroubleshootingHint {
   summary: string;
   detail: string | null;
   action: string;
+  /**
+   * The upstream's own request id, when the failure carries one (#1019).
+   *
+   * Optional: it is absent for every failure that never reached a server, and
+   * present for the ones an operator has to look up.
+   */
+  requestId?: string;
 }
 
 /** Convert a mapped failure into the stable, machine-readable MCP payload. */
@@ -74,6 +91,7 @@ export function troubleshootingHint(error: MappedError): TroubleshootingHint {
     summary: error.summary,
     detail: error.detail ?? null,
     action: error.action,
+    ...(error.malformed?.requestId ? { requestId: error.malformed.requestId } : {}),
   };
 }
 
@@ -122,8 +140,12 @@ export function categorizeStatus(status: number): ErrorCategory {
 /**
  * Pull the most useful message out of a JSON error body, falling back to a
  * compact JSON dump so no server detail is silently dropped.
+ *
+ * A body the upstream sent as something other than JSON arrives here as a
+ * typed marker rather than as text (#1019): it is described, not quoted.
  */
 export function extractDetail(data: unknown): string {
+  if (isMalformedResponseBody(data)) return describeMalformedResponse(data);
   if (data == null) return "no response body";
   if (typeof data === "string") return data.trim() || "empty response body";
   if (typeof data === "object") {
@@ -215,6 +237,23 @@ function forbiddenKeyAction(profile: string): string {
 }
 
 /**
+ * Recovery step for an upstream that answered with something other than JSON.
+ *
+ * A non-JSON error body means something between this client and the service
+ * answered instead — a proxy, a gateway, a WAF, a load balancer. Retrying
+ * unchanged is usually pointless, but the request may simply have hit a
+ * misconfigured hop, so the step is to retry once and then look up the
+ * request id.
+ */
+function malformedBodyAction(): string {
+  return (
+    "The upstream answered with a non-JSON body (a proxy, gateway or load balancer " +
+    "usually does this), so the request may not have reached the service at all. " +
+    "Retry once; if it persists, quote the request id above when reporting the failure."
+  );
+}
+
+/**
  * Map a non-ok HTTP response into a structured error.
  *
  * `operation` is the caller-facing verb ("Browse failed", "Publish failed") and
@@ -235,6 +274,23 @@ export function mapHttpError(input: {
   const category = categorizeStatus(input.status);
   const detail = extractDetail(input.data);
   const credential = input.credential;
+  const malformed = isMalformedResponseBody(input.data) ? input.data : undefined;
+
+  // A body that was not JSON means the request never reached the service, or
+  // reached something that is not the service. Every credential-specific
+  // reading below would be a guess about a request the service never saw, so
+  // this case is settled first: the failure is reported as what it is.
+  if (malformed) {
+    return {
+      source: input.source,
+      category,
+      status: input.status,
+      detail,
+      summary: `${input.operation}: ${detail}`,
+      action: malformedBodyAction(),
+      malformed,
+    };
+  }
 
   // A 401 naming the signature timestamp window is a system-clock problem, not
   // a credential problem. It nests inside the 401-with-credential case (a
