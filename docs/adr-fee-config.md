@@ -200,6 +200,14 @@ can reconstruct the full audit trail from events alone.
 - `fee_recipient` is optional; if `None`, the contract does not specify where
   the platform fee goes. Off-chain settlement should treat `None` as "no
   platform fee collected."
+- **Active-lease price-floor guard (#991).** `set_fee_config` is rejected with
+  `LeaseFeeConfigConflict` if the new combined `platform_fee_bps + royalty_bps`
+  is ≥ the `ActiveLeasePriceFloor` — the minimum resource price among all
+  resources with open (Pending or unexpired Active) leases. This prevents a fee
+  change from retroactively invalidating the price terms under which existing
+  leases were sold. The floor is lowered whenever a new lease is created on a
+  cheaper resource; it is conservative (never raised) and persists after leases
+  expire, so the admin may see a stale restriction in rare edge cases.
 
 ### Future extensions
 

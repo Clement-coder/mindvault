@@ -7002,6 +7002,10 @@ impl VaultRegistry {
         };
         env.storage().persistent().set(&key, &lease);
         Self::bump_persistent(env, &key);
+
+        // Track the resource price for the active-lease fee-config guard (#991).
+        Self::update_lease_price_floor(env, resource.price);
+
         env.events()
             .publish((symbol_short!("lease"), resource_id), lease.clone());
         Ok(lease)
