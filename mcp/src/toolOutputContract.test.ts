@@ -16,6 +16,7 @@
  * `isError` result that still validates.
  */
 import { mkdtempSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -23,6 +24,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 import { debugBundleTool } from "./debugBundle.js";
+import {
+  DEFAULT_DEPLOYMENT_MANIFESTS,
+  buildDeploymentVerificationReport,
+} from "./deploymentVerification.js";
 import { onchainPreflightTool } from "./onchainPreflight.js";
 import { migrationPreviewTool } from "./stateMigrationPreview.js";
 import { supportBundleTool } from "./supportBundle.js";
@@ -150,6 +155,31 @@ const SUCCESS_OUTCOMES: Record<string, () => ToolOutcome> = {
   mindvault_metrics: () => json(createMetricsRecorder(true, 1000).snapshot()),
   mindvault_debug_bundle: () => debugBundleTool({}, new Date(0)),
   mindvault_onchain_preflight: () => onchainPreflightTool({}),
+  mindvault_verify_deployment: () => {
+    const manifest = DEFAULT_DEPLOYMENT_MANIFESTS.testnet!;
+    const passphrase = "Test SDF Network ; September 2015";
+    return json(
+      buildDeploymentVerificationReport({
+        configured: {
+          network: manifest.network,
+          contractId: manifest.contractId,
+          rpcUrl: "https://soroban-testnet.stellar.org",
+          networkPassphrase: passphrase,
+        },
+        expected: manifest,
+        observed: {
+          contractId: manifest.contractId,
+          networkPassphrase: passphrase,
+          networkId: createHash("sha256").update(passphrase).digest("hex"),
+          registryName: "mindvault-vault-registry",
+          crateVersion: manifest.crateVersion,
+          resourceSchemaVersion: manifest.resourceSchemaVersion,
+          wasmHash: manifest.wasmHash,
+        },
+        mode: "mock",
+      }),
+    );
+  },
   mindvault_migration_preview: () => migrationPreviewTool({}),
   mindvault_support_bundle: () =>
     supportBundleTool({ incidentId: "mv-01hq7x9k2m4p6r8t0v2w4y6a8c", auditLines: 25 }),

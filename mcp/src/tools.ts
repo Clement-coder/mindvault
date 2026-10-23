@@ -16,6 +16,10 @@
 
 import { catalogFilterInputProperties } from "./catalogFilters.js";
 import { ONCHAIN_PREFLIGHT_OUTPUT_SCHEMA } from "./onchainPreflight.js";
+import {
+  DEPLOYMENT_MANIFEST_INPUT_SCHEMA,
+  DEPLOYMENT_VERIFICATION_OUTPUT_SCHEMA,
+} from "./deploymentVerification.js";
 import { MIGRATION_PREVIEW_OUTPUT_SCHEMA } from "./stateMigrationPreview.js";
 import {
   SUPPORT_BUNDLE_DEFAULT_AUDIT_LINES,
@@ -2042,6 +2046,25 @@ const DEFINED_TOOLS: ToolDefinition[] = [
     outputSchema: ONCHAIN_PREFLIGHT_OUTPUT_SCHEMA as unknown as Record<string, unknown>,
     annotations: {
       title: "On-chain Preflight",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+    },
+  },
+  {
+    name: "mindvault_verify_deployment",
+    description:
+      "Generate a read-only registry deployment verification report: compare the configured Stellar network, contract ID, on-chain contract version, resource schema version, and deployed WASM hash against an expected deployment manifest. Returns one machine-readable entry per mismatch with a remediation. Never signs or submits a transaction and requires no wallet.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        manifest: DEPLOYMENT_MANIFEST_INPUT_SCHEMA as unknown as Record<string, unknown>,
+      },
+      required: [],
+    },
+    outputSchema: DEPLOYMENT_VERIFICATION_OUTPUT_SCHEMA as unknown as Record<string, unknown>,
+    annotations: {
+      title: "Verify Registry Deployment",
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,

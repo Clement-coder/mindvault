@@ -108,6 +108,8 @@ export const TOOL_SIDE_EFFECTS: Readonly<Record<string, ToolSideEffects>> = {
   mindvault_registry_info: READ,
   mindvault_network_profile: READ,
   mindvault_check_bindings: READ,
+  mindvault_onchain_preflight: READ,
+  mindvault_verify_deployment: READ,
   mindvault_check_consistency: READ,
   mindvault_verify_attestation: READ,
   mindvault_registry_lookup: READ,
