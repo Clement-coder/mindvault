@@ -93,7 +93,12 @@ import {
   mockSetListed,
   mockSetTags,
 } from "./mock.js";
-import { purchaseHistoryTool, recordPurchase } from "./purchaseHistory.js";
+import {
+  listPurchases,
+  purchaseHistoryTool,
+  purchaseStatusOf,
+  recordPurchase,
+} from "./purchaseHistory.js";
 import { Mutex } from "./mutex.js";
 import { exportReceiptsTool } from "./receipts.js";
 import { debugBundleTool } from "./debugBundle.js";
@@ -169,14 +174,20 @@ import {
   assertTransactionFeeWithinCeiling,
   assertChallengePriceWithinCeiling,
   PriceChangedCeilingError,
+  readPaymentCeiling,
 } from "./paymentCeiling.js";
 import {
+  USDC_DECIMALS,
   compareUsdc,
   normalizeUsdcBalance,
   stroopsToUsdc,
   trimUsdc,
   usdcToStroops as toStroops,
 } from "./usdcAmount.js";
+import {
+  buildWalletAllowanceSummary,
+  formatWalletAllowanceSummary,
+} from "./walletAllowance.js";
 import { findCanonicalUsdc } from "./usdcIdentity.js";
 import { signMutatingHeaders } from "./requestSignature.js";
 import {
@@ -1774,6 +1785,51 @@ async function walletInfoOutcome(): Promise<ToolOutcome> {
 
 export async function walletInfo(): Promise<string> {
   return outcomeText(await walletInfoOutcome());
+}
+
+// ── Wallet allowance (#1052) ─────────────────────────────────────────────────
+
+/**
+ * Read the active wallet's USDC balance, the spend implied by pending local
+ * receipts, and the configured automatic payment ceiling on the active network.
+ *
+ * Reads only: Horizon `GET /accounts/:key`, the local purchase store, and the
+ * same environment value the payment guard uses. Nothing is signed or sent.
+ */
+async function walletAllowanceOutcome(): Promise<ToolOutcome> {
+  const wallet = requireWallet();
+  const details = await getBalanceDetails(wallet.publicKey);
+  const pendingReceipts = listPurchases({
+    profile: activeProfileName,
+    network: NETWORK,
+  }).filter((receipt) => purchaseStatusOf(receipt) === "pending");
+
+  const summary = buildWalletAllowanceSummary({
+    profile: activeProfileName,
+    address: wallet.publicKey,
+    network: NETWORK,
+    networkPassphrase: networkPreset.networkPassphrase,
+    asset: {
+      code: "USDC",
+      issuer: networkPreset.usdcClassicIssuer,
+      contractId: networkPreset.usdcSacContractId,
+      decimals: USDC_DECIMALS,
+    },
+    balance: {
+      amount: details.usdcBalance,
+      status: details.status,
+      source: "horizon",
+      note: details.message ?? null,
+    },
+    pendingReceipts,
+    ceiling: readPaymentCeiling(),
+  });
+
+  return { text: formatWalletAllowanceSummary(summary), structured: { ...summary } };
+}
+
+export async function walletAllowance(): Promise<string> {
+  return outcomeText(await walletAllowanceOutcome());
 }
 
 // ── Wallet balances (#889) ───────────────────────────────────────────────────
@@ -4680,6 +4736,8 @@ async function dispatchToolOutcome(
         );
       case "mindvault_wallet_info":
         return walletInfoOutcome();
+      case "mindvault_wallet_allowance":
+        return walletAllowanceOutcome();
       case "mindvault_use_profile":
         return useProfileOutcome(requiredString(args, "name"));
       case "mindvault_switch_network_profile":

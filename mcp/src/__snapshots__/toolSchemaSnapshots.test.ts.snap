@@ -2174,6 +2174,188 @@ exports[`tool schema snapshots > mindvault_debug_bundle > output schema 1`] = `
 }
 `;
 
+exports[`tool schema snapshots > mindvault_explain_error_code > annotations 1`] = `
+{
+  "destructiveHint": false,
+  "idempotentHint": true,
+  "readOnlyHint": true,
+  "title": "Explain Error Code",
+}
+`;
+
+exports[`tool schema snapshots > mindvault_explain_error_code > input schema 1`] = `
+{
+  "properties": {
+    "code": {
+      "description": "The on-chain error discriminant, e.g. 2 for NotFound or 40 for ContractPaused.",
+      "examples": [
+        2,
+        40,
+      ],
+      "type": "integer",
+    },
+    "name": {
+      "description": "The contract error name instead of its code, e.g. "NotFound" or "ContractPaused".",
+      "examples": [
+        "NotFound",
+        "ContractPaused",
+      ],
+      "type": "string",
+    },
+  },
+  "required": [],
+  "type": "object",
+}
+`;
+
+exports[`tool schema snapshots > mindvault_explain_error_code > output schema 1`] = `
+{
+  "anyOf": [
+    {
+      "properties": {
+        "category": {
+          "enum": [
+            "registration",
+            "validation",
+            "authorization",
+            "admin",
+            "payment",
+            "moderation",
+            "network",
+            null,
+          ],
+          "type": [
+            "string",
+            "null",
+          ],
+        },
+        "code": {
+          "type": [
+            "integer",
+            "null",
+          ],
+        },
+        "description": {
+          "type": [
+            "string",
+            "null",
+          ],
+        },
+        "known": {
+          "type": "boolean",
+        },
+        "knownCodes": {
+          "items": {
+            "properties": {
+              "code": {
+                "type": "integer",
+              },
+              "name": {
+                "type": "string",
+              },
+            },
+            "required": [
+              "code",
+              "name",
+            ],
+            "type": "object",
+          },
+          "type": "array",
+        },
+        "name": {
+          "type": [
+            "string",
+            "null",
+          ],
+        },
+        "nextSteps": {
+          "type": "string",
+        },
+        "retry": {
+          "enum": [
+            "safe",
+            "unsafe",
+            "conditional",
+            null,
+          ],
+          "type": [
+            "string",
+            "null",
+          ],
+        },
+      },
+      "required": [
+        "code",
+        "name",
+        "known",
+        "description",
+        "category",
+        "retry",
+        "nextSteps",
+      ],
+      "type": "object",
+    },
+    {
+      "properties": {
+        "troubleshooting": {
+          "properties": {
+            "action": {
+              "type": "string",
+            },
+            "category": {
+              "type": "string",
+            },
+            "detail": {
+              "type": [
+                "string",
+                "null",
+              ],
+            },
+            "requestId": {
+              "type": [
+                "string",
+                "null",
+              ],
+            },
+            "schema": {
+              "const": "mindvault.troubleshooting/v1",
+              "type": "string",
+            },
+            "source": {
+              "type": "string",
+            },
+            "status": {
+              "type": [
+                "integer",
+                "null",
+              ],
+            },
+            "summary": {
+              "type": "string",
+            },
+          },
+          "required": [
+            "schema",
+            "source",
+            "category",
+            "status",
+            "summary",
+            "detail",
+            "action",
+          ],
+          "type": "object",
+        },
+      },
+      "required": [
+        "troubleshooting",
+      ],
+      "type": "object",
+    },
+  ],
+  "type": "object",
+}
+`;
+
 exports[`tool schema snapshots > mindvault_export_profiles > annotations 1`] = `
 {
   "destructiveHint": false,
@@ -9792,6 +9974,385 @@ exports[`tool schema snapshots > mindvault_verify_attestation > output schema 1`
 }
 `;
 
+exports[`tool schema snapshots > mindvault_verify_deployment > annotations 1`] = `
+{
+  "destructiveHint": false,
+  "idempotentHint": true,
+  "readOnlyHint": true,
+  "title": "Verify Registry Deployment",
+}
+`;
+
+exports[`tool schema snapshots > mindvault_verify_deployment > input schema 1`] = `
+{
+  "properties": {
+    "manifest": {
+      "additionalProperties": false,
+      "description": "Expected deployment manifest to compare against. Omit to use the built-in manifest for the configured network (canonical testnet only).",
+      "properties": {
+        "contractId": {
+          "description": "Expected vault-registry contract ID (C followed by 55 base32 chars).",
+          "type": "string",
+        },
+        "crateVersion": {
+          "description": "Expected contract crate version (CARGO_PKG_VERSION at build time).",
+          "type": "string",
+        },
+        "network": {
+          "enum": [
+            "testnet",
+            "mainnet",
+            "pubnet",
+            "public",
+          ],
+          "type": "string",
+        },
+        "resourceSchemaVersion": {
+          "description": "Expected on-chain Resource schema version (RESOURCE_SCHEMA_VERSION).",
+          "minimum": 0,
+          "type": "integer",
+        },
+        "schema": {
+          "const": "mindvault.deployment-manifest/v1",
+          "type": "string",
+        },
+        "wasmHash": {
+          "description": "Expected deployed WASM hash: 64 lowercase hex characters.",
+          "type": "string",
+        },
+      },
+      "required": [
+        "network",
+        "contractId",
+        "wasmHash",
+        "crateVersion",
+        "resourceSchemaVersion",
+      ],
+      "type": "object",
+    },
+  },
+  "required": [],
+  "type": "object",
+}
+`;
+
+exports[`tool schema snapshots > mindvault_verify_deployment > output schema 1`] = `
+{
+  "anyOf": [
+    {
+      "properties": {
+        "checks": {
+          "items": {
+            "properties": {
+              "actual": {
+                "type": [
+                  "string",
+                  "number",
+                  "null",
+                ],
+              },
+              "detail": {
+                "type": "string",
+              },
+              "expected": {
+                "type": [
+                  "string",
+                  "number",
+                  "null",
+                ],
+              },
+              "field": {
+                "type": "string",
+              },
+              "remediation": {
+                "type": "string",
+              },
+              "status": {
+                "enum": [
+                  "pass",
+                  "mismatch",
+                  "unavailable",
+                  "skipped",
+                ],
+                "type": "string",
+              },
+            },
+            "required": [
+              "field",
+              "status",
+              "expected",
+              "actual",
+              "detail",
+              "remediation",
+            ],
+            "type": "object",
+          },
+          "type": "array",
+        },
+        "configured": {
+          "properties": {
+            "contractId": {
+              "type": "string",
+            },
+            "network": {
+              "type": "string",
+            },
+            "networkPassphrase": {
+              "type": "string",
+            },
+            "rpcUrl": {
+              "type": "string",
+            },
+          },
+          "required": [
+            "network",
+            "contractId",
+            "rpcUrl",
+            "networkPassphrase",
+          ],
+          "type": "object",
+        },
+        "errors": {
+          "items": {
+            "properties": {
+              "code": {
+                "type": "string",
+              },
+              "message": {
+                "type": "string",
+              },
+            },
+            "required": [
+              "code",
+              "message",
+            ],
+            "type": "object",
+          },
+          "type": "array",
+        },
+        "expected": {
+          "properties": {
+            "contractId": {
+              "type": "string",
+            },
+            "crateVersion": {
+              "type": "string",
+            },
+            "network": {
+              "type": "string",
+            },
+            "resourceSchemaVersion": {
+              "type": "integer",
+            },
+            "schema": {
+              "type": "string",
+            },
+            "wasmHash": {
+              "type": "string",
+            },
+          },
+          "required": [
+            "schema",
+            "network",
+            "contractId",
+            "wasmHash",
+            "crateVersion",
+            "resourceSchemaVersion",
+          ],
+          "type": [
+            "object",
+            "null",
+          ],
+        },
+        "mismatches": {
+          "items": {
+            "properties": {
+              "actual": {
+                "type": [
+                  "string",
+                  "number",
+                  "null",
+                ],
+              },
+              "detail": {
+                "type": "string",
+              },
+              "expected": {
+                "type": [
+                  "string",
+                  "number",
+                  "null",
+                ],
+              },
+              "field": {
+                "type": "string",
+              },
+              "remediation": {
+                "type": "string",
+              },
+            },
+            "required": [
+              "field",
+              "expected",
+              "actual",
+              "detail",
+              "remediation",
+            ],
+            "type": "object",
+          },
+          "type": "array",
+        },
+        "mode": {
+          "enum": [
+            "live",
+            "mock",
+          ],
+          "type": "string",
+        },
+        "observed": {
+          "properties": {
+            "contractId": {
+              "type": "string",
+            },
+            "crateVersion": {
+              "type": "string",
+            },
+            "networkId": {
+              "type": "string",
+            },
+            "networkPassphrase": {
+              "type": "string",
+            },
+            "registryName": {
+              "type": "string",
+            },
+            "resourceSchemaVersion": {
+              "type": "integer",
+            },
+            "wasmHash": {
+              "type": "string",
+            },
+          },
+          "required": [
+            "contractId",
+            "networkPassphrase",
+            "networkId",
+            "registryName",
+            "crateVersion",
+            "resourceSchemaVersion",
+            "wasmHash",
+          ],
+          "type": [
+            "object",
+            "null",
+          ],
+        },
+        "ok": {
+          "type": "boolean",
+        },
+        "readOnly": {
+          "const": true,
+          "type": "boolean",
+        },
+        "schema": {
+          "const": "mindvault.deployment-verification/v1",
+          "type": "string",
+        },
+        "signing": {
+          "const": "none",
+          "type": "string",
+        },
+        "status": {
+          "enum": [
+            "match",
+            "mismatch",
+            "unreachable",
+            "invalid_manifest",
+          ],
+          "type": "string",
+        },
+        "summary": {
+          "type": "string",
+        },
+      },
+      "required": [
+        "schema",
+        "ok",
+        "status",
+        "readOnly",
+        "signing",
+        "mode",
+        "configured",
+        "expected",
+        "observed",
+        "checks",
+        "mismatches",
+        "errors",
+        "summary",
+      ],
+      "type": "object",
+    },
+    {
+      "properties": {
+        "troubleshooting": {
+          "properties": {
+            "action": {
+              "type": "string",
+            },
+            "category": {
+              "type": "string",
+            },
+            "detail": {
+              "type": [
+                "string",
+                "null",
+              ],
+            },
+            "requestId": {
+              "type": [
+                "string",
+                "null",
+              ],
+            },
+            "schema": {
+              "const": "mindvault.troubleshooting/v1",
+              "type": "string",
+            },
+            "source": {
+              "type": "string",
+            },
+            "status": {
+              "type": [
+                "integer",
+                "null",
+              ],
+            },
+            "summary": {
+              "type": "string",
+            },
+          },
+          "required": [
+            "schema",
+            "source",
+            "category",
+            "status",
+            "summary",
+            "detail",
+            "action",
+          ],
+          "type": "object",
+        },
+      },
+      "required": [
+        "troubleshooting",
+      ],
+      "type": "object",
+    },
+  ],
+  "type": "object",
+}
+`;
+
 exports[`tool schema snapshots > mindvault_verify_install > annotations 1`] = `
 {
   "destructiveHint": false,
@@ -9810,6 +10371,441 @@ exports[`tool schema snapshots > mindvault_verify_install > input schema 1`] = `
 `;
 
 exports[`tool schema snapshots > mindvault_verify_install > output schema 1`] = `null`;
+
+exports[`tool schema snapshots > mindvault_wallet_allowance > annotations 1`] = `
+{
+  "destructiveHint": false,
+  "idempotentHint": true,
+  "readOnlyHint": true,
+  "title": "Wallet Allowance",
+}
+`;
+
+exports[`tool schema snapshots > mindvault_wallet_allowance > input schema 1`] = `
+{
+  "properties": {},
+  "required": [],
+  "type": "object",
+}
+`;
+
+exports[`tool schema snapshots > mindvault_wallet_allowance > output schema 1`] = `
+{
+  "anyOf": [
+    {
+      "properties": {
+        "address": {
+          "type": "string",
+        },
+        "asset": {
+          "properties": {
+            "code": {
+              "const": "USDC",
+              "type": "string",
+            },
+            "contractId": {
+              "type": "string",
+            },
+            "decimals": {
+              "type": "integer",
+            },
+            "issuer": {
+              "type": "string",
+            },
+          },
+          "required": [
+            "code",
+            "issuer",
+            "contractId",
+            "decimals",
+          ],
+          "type": "object",
+        },
+        "balance": {
+          "properties": {
+            "amount": {
+              "type": "string",
+            },
+            "asset": {
+              "properties": {
+                "code": {
+                  "const": "USDC",
+                  "type": "string",
+                },
+                "contractId": {
+                  "type": "string",
+                },
+                "decimals": {
+                  "type": "integer",
+                },
+                "issuer": {
+                  "type": "string",
+                },
+              },
+              "required": [
+                "code",
+                "issuer",
+                "contractId",
+                "decimals",
+              ],
+              "type": "object",
+            },
+            "estimate": {
+              "type": "boolean",
+            },
+            "label": {
+              "type": "string",
+            },
+            "network": {
+              "type": "string",
+            },
+            "source": {
+              "const": "horizon",
+              "type": "string",
+            },
+            "status": {
+              "type": "string",
+            },
+          },
+          "required": [
+            "amount",
+            "asset",
+            "network",
+            "estimate",
+            "label",
+            "status",
+            "source",
+          ],
+          "type": "object",
+        },
+        "estimatedPendingSpend": {
+          "properties": {
+            "amount": {
+              "type": "string",
+            },
+            "asset": {
+              "properties": {
+                "code": {
+                  "const": "USDC",
+                  "type": "string",
+                },
+                "contractId": {
+                  "type": "string",
+                },
+                "decimals": {
+                  "type": "integer",
+                },
+                "issuer": {
+                  "type": "string",
+                },
+              },
+              "required": [
+                "code",
+                "issuer",
+                "contractId",
+                "decimals",
+              ],
+              "type": "object",
+            },
+            "count": {
+              "type": "integer",
+            },
+            "estimate": {
+              "type": "boolean",
+            },
+            "label": {
+              "type": "string",
+            },
+            "network": {
+              "type": "string",
+            },
+            "purchases": {
+              "items": {
+                "properties": {
+                  "amount": {
+                    "type": "string",
+                  },
+                  "asset": {
+                    "properties": {
+                      "code": {
+                        "const": "USDC",
+                        "type": "string",
+                      },
+                      "contractId": {
+                        "type": "string",
+                      },
+                      "decimals": {
+                        "type": "integer",
+                      },
+                      "issuer": {
+                        "type": "string",
+                      },
+                    },
+                    "required": [
+                      "code",
+                      "issuer",
+                      "contractId",
+                      "decimals",
+                    ],
+                    "type": "object",
+                  },
+                  "estimate": {
+                    "const": true,
+                    "type": "boolean",
+                  },
+                  "network": {
+                    "type": "string",
+                  },
+                  "receiptRef": {
+                    "type": [
+                      "string",
+                      "null",
+                    ],
+                  },
+                  "resourceId": {
+                    "type": "string",
+                  },
+                  "status": {
+                    "const": "pending",
+                    "type": "string",
+                  },
+                  "timestamp": {
+                    "type": "string",
+                  },
+                },
+                "required": [
+                  "resourceId",
+                  "amount",
+                  "asset",
+                  "network",
+                  "timestamp",
+                  "receiptRef",
+                  "estimate",
+                  "status",
+                ],
+                "type": "object",
+              },
+              "type": "array",
+            },
+          },
+          "required": [
+            "amount",
+            "asset",
+            "network",
+            "estimate",
+            "label",
+            "count",
+            "purchases",
+          ],
+          "type": "object",
+        },
+        "estimatedRemainingAllowance": {
+          "properties": {
+            "amount": {
+              "type": "string",
+            },
+            "asset": {
+              "properties": {
+                "code": {
+                  "const": "USDC",
+                  "type": "string",
+                },
+                "contractId": {
+                  "type": "string",
+                },
+                "decimals": {
+                  "type": "integer",
+                },
+                "issuer": {
+                  "type": "string",
+                },
+              },
+              "required": [
+                "code",
+                "issuer",
+                "contractId",
+                "decimals",
+              ],
+              "type": "object",
+            },
+            "basis": {
+              "type": "string",
+            },
+            "estimate": {
+              "type": "boolean",
+            },
+            "label": {
+              "type": "string",
+            },
+            "network": {
+              "type": "string",
+            },
+          },
+          "required": [
+            "amount",
+            "asset",
+            "network",
+            "estimate",
+            "label",
+            "basis",
+          ],
+          "type": "object",
+        },
+        "message": {
+          "type": "string",
+        },
+        "network": {
+          "type": "string",
+        },
+        "networkPassphrase": {
+          "type": "string",
+        },
+        "notes": {
+          "items": {
+            "type": "string",
+          },
+          "type": "array",
+        },
+        "paymentCeiling": {
+          "properties": {
+            "amount": {
+              "type": "string",
+            },
+            "asset": {
+              "properties": {
+                "code": {
+                  "const": "USDC",
+                  "type": "string",
+                },
+                "contractId": {
+                  "type": "string",
+                },
+                "decimals": {
+                  "type": "integer",
+                },
+                "issuer": {
+                  "type": "string",
+                },
+              },
+              "required": [
+                "code",
+                "issuer",
+                "contractId",
+                "decimals",
+              ],
+              "type": "object",
+            },
+            "configured": {
+              "type": "boolean",
+            },
+            "estimate": {
+              "type": "boolean",
+            },
+            "label": {
+              "type": "string",
+            },
+            "network": {
+              "type": "string",
+            },
+            "source": {
+              "type": "string",
+            },
+          },
+          "required": [
+            "amount",
+            "asset",
+            "network",
+            "estimate",
+            "label",
+            "source",
+            "configured",
+          ],
+          "type": "object",
+        },
+        "profile": {
+          "type": "string",
+        },
+        "readOnly": {
+          "const": true,
+          "type": "boolean",
+        },
+      },
+      "required": [
+        "profile",
+        "address",
+        "network",
+        "networkPassphrase",
+        "asset",
+        "balance",
+        "estimatedPendingSpend",
+        "paymentCeiling",
+        "estimatedRemainingAllowance",
+        "notes",
+        "readOnly",
+        "message",
+      ],
+      "type": "object",
+    },
+    {
+      "properties": {
+        "troubleshooting": {
+          "properties": {
+            "action": {
+              "type": "string",
+            },
+            "category": {
+              "type": "string",
+            },
+            "detail": {
+              "type": [
+                "string",
+                "null",
+              ],
+            },
+            "requestId": {
+              "type": [
+                "string",
+                "null",
+              ],
+            },
+            "schema": {
+              "const": "mindvault.troubleshooting/v1",
+              "type": "string",
+            },
+            "source": {
+              "type": "string",
+            },
+            "status": {
+              "type": [
+                "integer",
+                "null",
+              ],
+            },
+            "summary": {
+              "type": "string",
+            },
+          },
+          "required": [
+            "schema",
+            "source",
+            "category",
+            "status",
+            "summary",
+            "detail",
+            "action",
+          ],
+          "type": "object",
+        },
+      },
+      "required": [
+        "troubleshooting",
+      ],
+      "type": "object",
+    },
+  ],
+  "type": "object",
+}
+`;
 
 exports[`tool schema snapshots > mindvault_wallet_balances > annotations 1`] = `
 {
@@ -10233,6 +11229,7 @@ exports[`tool schema snapshots > the covered tool names are pinned 1`] = `
   "mindvault_client_config",
   "mindvault_compare_state_backup",
   "mindvault_debug_bundle",
+  "mindvault_explain_error_code",
   "mindvault_export_profiles",
   "mindvault_export_receipts",
   "mindvault_fee_config",
@@ -10286,7 +11283,9 @@ exports[`tool schema snapshots > the covered tool names are pinned 1`] = `
   "mindvault_update_metadata",
   "mindvault_use_profile",
   "mindvault_verify_attestation",
+  "mindvault_verify_deployment",
   "mindvault_verify_install",
+  "mindvault_wallet_allowance",
   "mindvault_wallet_balances",
   "mindvault_wallet_info",
 ]

@@ -102,7 +102,13 @@ describe("parseDeploymentManifest", () => {
   });
 
   it("accepts a manifest without the schema field", () => {
-    const { schema: _schema, ...withoutSchema } = MANIFEST;
+    const withoutSchema = {
+      network: MANIFEST.network,
+      contractId: MANIFEST.contractId,
+      wasmHash: MANIFEST.wasmHash,
+      crateVersion: MANIFEST.crateVersion,
+      resourceSchemaVersion: MANIFEST.resourceSchemaVersion,
+    };
     const parsed = parseDeploymentManifest(withoutSchema);
     expect(parsed.errors).toEqual([]);
     expect(parsed.manifest?.schema).toBe(DEPLOYMENT_MANIFEST_SCHEMA);
@@ -192,6 +198,19 @@ describe("buildDeploymentVerificationReport", () => {
         field: "contract_id",
         expected: CONTRACT_ID,
         actual: otherContract,
+      }),
+    );
+  });
+
+  it("reports an unset configured contract ID as a mismatch, not a match", () => {
+    const result = report({ configured: { ...CONFIGURED, contractId: "" } });
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe("mismatch");
+    expect(result.mismatches).toContainEqual(
+      expect.objectContaining({
+        field: "contract_id",
+        expected: CONTRACT_ID,
+        actual: "",
       }),
     );
   });

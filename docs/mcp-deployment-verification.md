@@ -15,15 +15,15 @@ Source: [`mcp/src/deploymentVerification.ts`](../mcp/src/deploymentVerification.
 
 ## What is compared
 
-| Field                   | Expected from manifest  | Observed from                                     |
-| ----------------------- | ----------------------- | ------------------------------------------------- |
-| `network`               | `manifest.network`      | Resolved `STELLAR_NETWORK`                        |
-| `contract_id`           | `manifest.contractId`   | Resolved `VAULT_REGISTRY_CONTRACT_ID` / preset    |
-| `rpc_network`           | Manifest network preset | Soroban RPC `getNetwork().passphrase`             |
-| `network_id`            | SHA-256 of passphrase   | `registry_info().network_id`                      |
-| `contract_version`      | `manifest.crateVersion` | `contract_version().crate_version`                |
-| `resource_schema_version` | `manifest.resourceSchemaVersion` | `contract_version().resource_schema_version` |
-| `wasm_hash`             | `manifest.wasmHash`     | SHA-256 of the deployed WASM returned by RPC      |
+| Field                     | Expected from manifest           | Observed from                                  |
+| ------------------------- | -------------------------------- | ---------------------------------------------- |
+| `network`                 | `manifest.network`               | Resolved `STELLAR_NETWORK`                     |
+| `contract_id`             | `manifest.contractId`            | Resolved `VAULT_REGISTRY_CONTRACT_ID` / preset |
+| `rpc_network`             | Manifest network preset          | Soroban RPC `getNetwork().passphrase`          |
+| `network_id`              | SHA-256 of passphrase            | `registry_info().network_id`                   |
+| `contract_version`        | `manifest.crateVersion`          | `contract_version().crate_version`             |
+| `resource_schema_version` | `manifest.resourceSchemaVersion` | `contract_version().resource_schema_version`   |
+| `wasm_hash`               | `manifest.wasmHash`              | SHA-256 of the deployed WASM returned by RPC   |
 
 Every difference is reported as a machine-readable entry in `mismatches` with
 the field name, expected value, actual value, a detail string, and a
@@ -33,8 +33,8 @@ reported as a match.
 
 ## Arguments
 
-| Argument   | Type   | Required | Description                                                                                                                                        |
-| ---------- | ------ | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Argument   | Type   | Required | Description                                                                                                                                            |
+| ---------- | ------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `manifest` | object | no       | Expected deployment manifest. Omit to use the built-in canonical testnet manifest. Required for a custom testnet deployment or any mainnet deployment. |
 
 ### Manifest shape

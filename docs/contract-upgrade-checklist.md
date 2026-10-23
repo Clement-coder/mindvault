@@ -267,6 +267,20 @@ embedded contract ID in the generated client.
   # Check: bindingCheck.status === "match"
   ```
 
+- [ ] **MCP deployment verification reports a match**
+      Compare the live deployment with the expected manifest. The built-in
+      manifest covers the canonical testnet deployment; for a new contract,
+      pass a `manifest` with the new contract ID, WASM hash, crate version, and
+      resource schema version.
+
+  ```
+  mindvault_verify_deployment
+  # Check: status === "match", mismatches === [], errors === []
+  # Never signs or submits a transaction.
+  ```
+
+  See [MCP deployment verification](./mcp-deployment-verification.md).
+
 - [ ] **End-to-end smoke test passes** (testnet only)
 
   ```bash

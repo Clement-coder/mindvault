@@ -64,6 +64,7 @@ import {
   buy,
   registerOnchain,
   walletInfo,
+  walletAllowance,
   useProfile,
   switchNetworkProfile,
   listProfiles,
@@ -2244,8 +2245,113 @@ describe("wallet_info balance details", () => {
   });
 });
 
-// ── networkProfile (#412) ───────────────────────────────────────────────────
+// ── wallet_allowance (#1052) ────────────────────────────────────────────────
 
+describe("wallet_allowance", () => {
+  let purchaseDir: string;
+
+  beforeEach(async () => {
+    _resetProfiles();
+    _setAgentWallet(testWallet);
+    const { mkdtempSync } = await import("fs");
+    const { tmpdir } = await import("os");
+    const { join } = await import("path");
+    purchaseDir = mkdtempSync(join(tmpdir(), "mv-allowance-"));
+    const { _setPurchasesFilePath, _clearPurchases } = await import("./purchaseHistory.js");
+    _setPurchasesFilePath(join(purchaseDir, "purchases.json"));
+    _clearPurchases();
+  });
+
+  afterEach(async () => {
+    _setAgentWallet(null);
+    _resetProfiles();
+    const { rmSync } = await import("fs");
+    rmSync(purchaseDir, { recursive: true, force: true });
+    const { _setPurchasesFilePath } = await import("./purchaseHistory.js");
+    _setPurchasesFilePath(null);
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  function mockFundedAccount(usdc = "7.5000000") {
+    return vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      mockResponse({
+        subentry_count: 1,
+        balances: [
+          { asset_type: "native", balance: "20.0000000" },
+          {
+            asset_type: "credit_alphanum4",
+            asset_code: "USDC",
+            asset_issuer: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+            balance: usdc,
+          },
+        ],
+      }),
+    );
+  }
+
+  it("summarizes balance, pending spend, and ceiling with asset/network identity", async () => {
+    const { recordPurchase } = await import("./purchaseHistory.js");
+    recordPurchase({
+      resourceId: "res-pending",
+      amount: "2.5",
+      network: "stellar:testnet",
+      txHash: null,
+      receiptRef: "x402:pending",
+      profile: "default",
+    });
+    recordPurchase({
+      resourceId: "res-other-network",
+      amount: "1",
+      network: "stellar:pubnet",
+      txHash: null,
+      profile: "default",
+    });
+    recordPurchase({
+      resourceId: "res-settled",
+      amount: "4",
+      network: "stellar:testnet",
+      txHash: "a".repeat(64),
+      profile: "default",
+    });
+    vi.stubEnv("MINDVAULT_MAX_AUTO_PAY_USDC", "3");
+    mockFundedAccount();
+
+    const text = await walletAllowance();
+
+    expect(text).toContain("Wallet allowance (read-only)");
+    expect(text).toContain("Profile: default");
+    expect(text).toContain("Network: stellar:testnet");
+    expect(text).toContain("Asset: USDC (issuer GBBD47IF");
+    expect(text).toContain("USDC balance: 7.5 USDC · stellar:testnet");
+    expect(text).toContain(
+      "Estimated pending spend: 2.5 USDC · stellar:testnet (estimate; 1 receipt(s))",
+    );
+    expect(text).toContain("Configured payment ceiling: 3 USDC · stellar:testnet");
+    // min(ceiling 3, balance 7.5 - pending 2.5 = 5)
+    expect(text).toContain("Estimated remaining allowance: 3 USDC · stellar:testnet (estimate;");
+    expect(text).toContain("res-pending");
+    expect(text).not.toContain("res-other-network");
+    expect(text).not.toContain("res-settled");
+    expect(text).toContain("No signing, transfer, or payment was performed");
+  });
+
+  it("reports zero pending spend when no receipts exist", async () => {
+    mockFundedAccount();
+
+    const text = await walletAllowance();
+
+    expect(text).toContain("Estimated pending spend: 0 USDC · stellar:testnet");
+    expect(text).toContain("0 receipt(s)");
+  });
+
+  it("requires an active wallet", async () => {
+    _setAgentWallet(null);
+    await expect(walletAllowance()).rejects.toThrow(/mindvault_setup_wallet/);
+  });
+});
+
+// ── networkProfile (#412) ───────────────────────────────────────────────────
 describe("networkProfile", () => {
   it("returns all expected fields in deterministic JSON format", () => {
     const result = networkProfile();

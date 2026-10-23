@@ -1489,6 +1489,14 @@ Set `VAULT_REGISTRY_CONTRACT_ID` and `SOROBAN_RPC_URL` in the server `.env`
 (see [`server/.env.example`](../server/.env.example)) so the backend can
 record/read resources on this contract.
 
+Operators can confirm a deployment still matches this table with the
+read-only MCP tool `mindvault_verify_deployment`, which compares the
+configured network, contract ID, crate version, resource schema version, and
+the SHA-256 of the deployed WASM against a manifest. Its built-in testnet
+manifest records the Contract ID and Wasm Hash above, crate version `0.0.0`,
+and resource schema version `7`. See
+[MCP deployment verification](../docs/mcp-deployment-verification.md).
+
 > [!NOTE]
 > This deployment predates `registry_info()`, `creator_resource_count()`,
 > `list_by_creator()`, and the two-step admin model. Redeploy and update this

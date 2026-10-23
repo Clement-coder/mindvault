@@ -28,6 +28,38 @@ function configuredCeiling(env: NodeJS.ProcessEnv): { value: string; stroops: bi
   return { value, stroops };
 }
 
+/** Where the automatic payment ceiling came from. */
+export type PaymentCeilingSource = "MINDVAULT_MAX_AUTO_PAY_USDC" | "default";
+
+/** The configured automatic payment ceiling, for read-only summaries (#1052). */
+export interface PaymentCeilingReading {
+  /** The ceiling as configured, in decimal USDC. */
+  amount: string;
+  /** The same ceiling in stroops, for exact comparisons. */
+  stroops: bigint;
+  /** `MINDVAULT_MAX_AUTO_PAY_USDC` when set, otherwise the built-in default. */
+  source: PaymentCeilingSource;
+  /** True when the value came from the environment rather than the default. */
+  configured: boolean;
+}
+
+/**
+ * Read the same ceiling `assertAutoPaymentWithinCeiling` enforces, without
+ * changing any payment behaviour. A malformed value throws the same
+ * deterministic error the guard would raise, so a summary can never report a
+ * ceiling the guard would not use.
+ */
+export function readPaymentCeiling(env: NodeJS.ProcessEnv = process.env): PaymentCeilingReading {
+  const ceiling = configuredCeiling(env);
+  const configured = env.MINDVAULT_MAX_AUTO_PAY_USDC !== undefined;
+  return {
+    amount: ceiling.value,
+    stroops: ceiling.stroops,
+    source: configured ? "MINDVAULT_MAX_AUTO_PAY_USDC" : "default",
+    configured,
+  };
+}
+
 /**
  * Prevent an automatic x402 payment above the configured ceiling unless the
  * caller explicitly authorizes a limit that covers the advertised price.

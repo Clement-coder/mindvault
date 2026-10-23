@@ -66,6 +66,7 @@ import {
   SERVER_ENDPOINTS_OUTPUT_SCHEMA,
   TX_STATUS_OUTPUT_SCHEMA,
   USE_PROFILE_OUTPUT_SCHEMA,
+  WALLET_ALLOWANCE_OUTPUT_SCHEMA,
   WALLET_BALANCES_OUTPUT_SCHEMA,
   WALLET_INFO_OUTPUT_SCHEMA,
   WALLET_SETUP_OUTPUT_SCHEMA,
@@ -186,6 +187,23 @@ const DEFINED_TOOLS: ToolDefinition[] = [
     outputSchema: WALLET_BALANCES_OUTPUT_SCHEMA as unknown as Record<string, unknown>,
     annotations: {
       title: "Wallet Balances",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+    },
+  },
+  {
+    name: "mindvault_wallet_allowance",
+    description:
+      "Summarize the active wallet's USDC balance, estimated pending spend, and configured automatic payment ceiling on the active network. Read-only: it never signs, transfers, or pays. Every amount carries its asset (USDC, issuer, Soroban contract) and x402 network identity. Pending spend is an estimate derived from local purchase receipts without an on-chain transaction hash, and the remaining allowance is a derived estimate of the largest next automatic payment the ceiling and available balance would permit.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+    outputSchema: WALLET_ALLOWANCE_OUTPUT_SCHEMA as unknown as Record<string, unknown>,
+    annotations: {
+      title: "Wallet Allowance",
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,

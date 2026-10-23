@@ -39,6 +39,7 @@ export function groupOf(name: string): string {
     [
       "mindvault_setup_wallet",
       "mindvault_wallet_info",
+      "mindvault_wallet_allowance",
       "mindvault_import_wallet",
       "mindvault_repair_sponsored_account",
       "mindvault_wallet_balances",

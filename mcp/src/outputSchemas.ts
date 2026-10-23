@@ -144,6 +144,117 @@ export const WALLET_BALANCES_OUTPUT_SCHEMA = {
   required: ["source", "requestedAt", "platform", "agents", "count", "statistics", "message"],
 } as const;
 
+const USDC_ASSET_SCHEMA = {
+  type: "object",
+  properties: {
+    code: { type: "string", const: "USDC" },
+    issuer: { type: "string" },
+    contractId: { type: "string" },
+    decimals: { type: "integer" },
+  },
+  required: ["code", "issuer", "contractId", "decimals"],
+} as const;
+
+/** Every amount in the allowance summary carries its asset and network. */
+const TAGGED_USDC_AMOUNT_SCHEMA = {
+  type: "object",
+  properties: {
+    amount: { type: "string" },
+    asset: USDC_ASSET_SCHEMA,
+    network: { type: "string" },
+    estimate: { type: "boolean" },
+    label: { type: "string" },
+  },
+  required: ["amount", "asset", "network", "estimate", "label"],
+} as const;
+
+const PENDING_PURCHASE_SCHEMA = {
+  type: "object",
+  properties: {
+    resourceId: { type: "string" },
+    amount: { type: "string" },
+    asset: USDC_ASSET_SCHEMA,
+    network: { type: "string" },
+    timestamp: { type: "string" },
+    receiptRef: { type: ["string", "null"] },
+    estimate: { type: "boolean", const: true },
+    status: { type: "string", const: "pending" },
+  },
+  required: [
+    "resourceId",
+    "amount",
+    "asset",
+    "network",
+    "timestamp",
+    "receiptRef",
+    "estimate",
+    "status",
+  ],
+} as const;
+
+export const WALLET_ALLOWANCE_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    profile: { type: "string" },
+    address: { type: "string" },
+    network: { type: "string" },
+    networkPassphrase: { type: "string" },
+    asset: USDC_ASSET_SCHEMA,
+    balance: {
+      type: "object",
+      properties: {
+        ...TAGGED_USDC_AMOUNT_SCHEMA.properties,
+        status: { type: "string" },
+        source: { type: "string", const: "horizon" },
+      },
+      required: [...TAGGED_USDC_AMOUNT_SCHEMA.required, "status", "source"],
+    },
+    estimatedPendingSpend: {
+      type: "object",
+      properties: {
+        ...TAGGED_USDC_AMOUNT_SCHEMA.properties,
+        count: { type: "integer" },
+        purchases: { type: "array", items: PENDING_PURCHASE_SCHEMA },
+      },
+      required: [...TAGGED_USDC_AMOUNT_SCHEMA.required, "count", "purchases"],
+    },
+    paymentCeiling: {
+      type: "object",
+      properties: {
+        ...TAGGED_USDC_AMOUNT_SCHEMA.properties,
+        source: { type: "string" },
+        configured: { type: "boolean" },
+      },
+      required: [...TAGGED_USDC_AMOUNT_SCHEMA.required, "source", "configured"],
+    },
+    estimatedRemainingAllowance: {
+      type: "object",
+      properties: {
+        ...TAGGED_USDC_AMOUNT_SCHEMA.properties,
+        basis: { type: "string" },
+      },
+      required: [...TAGGED_USDC_AMOUNT_SCHEMA.required, "basis"],
+    },
+    notes: { type: "array", items: { type: "string" } },
+    readOnly: { type: "boolean", const: true },
+    message: { type: "string" },
+  },
+  required: [
+    "profile",
+    "address",
+    "network",
+    "networkPassphrase",
+    "asset",
+    "balance",
+    "estimatedPendingSpend",
+    "paymentCeiling",
+    "estimatedRemainingAllowance",
+    "notes",
+    "readOnly",
+    "message",
+  ],
+} as const;
+
 export const SERVER_ENDPOINTS_OUTPUT_SCHEMA = {
   type: "object",
   properties: {

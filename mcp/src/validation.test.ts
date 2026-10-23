@@ -73,6 +73,7 @@ const VALID_CALLS: Record<string, Record<string, unknown>> = {
     secretKey: VALID_SECRET_KEY,
   },
   mindvault_wallet_info: {},
+  mindvault_wallet_allowance: {},
   mindvault_use_profile: { name: "publisher" },
   mindvault_switch_network_profile: { name: "mainnet", network: "mainnet" },
   mindvault_list_profiles: {},

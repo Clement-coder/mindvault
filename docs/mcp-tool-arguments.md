@@ -137,14 +137,14 @@ that want to branch on the failure rather than parse prose.
 fields are rejected. Field-level problems are reported by the tool as a
 machine-readable `invalid_manifest` result, with one error per bad field.
 
-| Field                   | Required | Accepted value                                                                 |
-| ----------------------- | -------- | ------------------------------------------------------------------------------ |
-| `schema`                | no       | `mindvault.deployment-manifest/v1`                                             |
-| `network`               | yes      | `testnet` or `mainnet` (aliases such as `pubnet` are normalized)               |
-| `contractId`            | yes      | Stellar contract ID (`C` followed by 55 base32 characters)                    |
-| `wasmHash`              | yes      | 64 hex characters; case is normalized                                          |
-| `crateVersion`          | yes      | non-empty contract crate version                                               |
-| `resourceSchemaVersion` | yes      | integer ≥ 0                                                                    |
+| Field                   | Required | Accepted value                                                   |
+| ----------------------- | -------- | ---------------------------------------------------------------- |
+| `schema`                | no       | `mindvault.deployment-manifest/v1`                               |
+| `network`               | yes      | `testnet` or `mainnet` (aliases such as `pubnet` are normalized) |
+| `contractId`            | yes      | Stellar contract ID (`C` followed by 55 base32 characters)       |
+| `wasmHash`              | yes      | 64 hex characters; case is normalized                            |
+| `crateVersion`          | yes      | non-empty contract crate version                                 |
+| `resourceSchemaVersion` | yes      | integer ≥ 0                                                      |
 
 Omit `manifest` to compare against the built-in canonical testnet manifest.
 There is no built-in mainnet manifest.

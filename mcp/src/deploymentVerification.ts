@@ -105,7 +105,7 @@ export const DEPLOYMENT_MANIFEST_INPUT_SCHEMA = {
     "Expected deployment manifest to compare against. Omit to use the built-in manifest for the configured network (canonical testnet only).",
   properties: {
     schema: { type: "string", const: DEPLOYMENT_MANIFEST_SCHEMA },
-    network: { type: "string", enum: ["testnet", "mainnet"] },
+    network: { type: "string", enum: ["testnet", "mainnet", "pubnet", "public"] },
     contractId: {
       type: "string",
       description: "Expected vault-registry contract ID (C followed by 55 base32 chars).",
@@ -392,12 +392,11 @@ export function parseDeploymentManifest(value: unknown): ManifestParseResult {
     });
   }
 
-  const network =
-    typeof raw.network === "string" ? parseStellarNetwork(raw.network) : undefined;
+  const network = typeof raw.network === "string" ? parseStellarNetwork(raw.network) : undefined;
   if (!network) {
     errors.push({
       code: "manifest_invalid_network",
-      message: 'manifest.network must be "testnet" or "mainnet".',
+      message: 'manifest.network must be "testnet" or "mainnet" (aliases: "pubnet", "public").',
     });
   }
 
@@ -478,7 +477,10 @@ interface Comparison {
 const defaultNormalize = (value: string | number): string =>
   typeof value === "string" ? value.trim() : String(value);
 
-function comparisonCheck(field: string, input: Comparison): {
+function comparisonCheck(
+  field: string,
+  input: Comparison,
+): {
   check: DeploymentVerificationCheck;
   mismatch: DeploymentVerificationMismatch | null;
 } {
@@ -606,7 +608,7 @@ export function buildDeploymentVerificationReport(
   // ── Configured contract ID vs manifest ─────────────────────────────────
   const contractId = comparisonCheck("contract_id", {
     expected: expected.contractId,
-    actual: input.configured.contractId || null,
+    actual: input.configured.contractId,
     expectedDetail: `contract ${expected.contractId}`,
     actualDetail: `configured contract ${input.configured.contractId || "(unset)"}`,
     remediation:
@@ -711,11 +713,16 @@ export function buildDeploymentVerificationReport(
   }
 
   // ── Status + summary ───────────────────────────────────────────────────
+  // `unavailable` means a checked value could not be read, which is never a
+  // clean bill of health: treat it like an unreachable deployment.
+  const anyUnavailable = checks.some((check) => check.status === "unavailable");
   const status: DeploymentVerificationStatus = !input.observed
     ? "unreachable"
     : mismatches.length > 0
       ? "mismatch"
-      : "match";
+      : anyUnavailable
+        ? "unreachable"
+        : "match";
   const ok = status === "match" && errors.length === 0;
 
   const summaryLines: string[] = [];
@@ -916,9 +923,7 @@ export async function verifyDeployment(
  * In mock mode no RPC call is made; the report is built from the expected
  * manifest so offline clients still get a schema-valid answer.
  */
-export async function deploymentVerificationTool(
-  args: Record<string, unknown>,
-): Promise<string> {
+export async function deploymentVerificationTool(args: Record<string, unknown>): Promise<string> {
   const config = buildConfig(process.env);
   const report = await verifyDeployment({
     configured: {

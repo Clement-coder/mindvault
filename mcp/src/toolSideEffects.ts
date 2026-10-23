@@ -69,6 +69,7 @@ export const TOOL_SIDE_EFFECTS: Readonly<Record<string, ToolSideEffects>> = {
   // Replaces the target profile's wallet secret; the sponsor pays for the account.
   mindvault_setup_wallet: { local: "overwrite", remote: "api", payment: "none" },
   mindvault_wallet_info: READ,
+  mindvault_wallet_allowance: READ,
   // Replaces the target profile's wallet secret after a Horizon read.
   mindvault_repair_sponsored_account: { local: "overwrite", remote: "none", payment: "none" },
   mindvault_use_profile: { local: "write", remote: "none", payment: "none" },
