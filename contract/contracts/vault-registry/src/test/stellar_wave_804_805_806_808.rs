@@ -606,3 +606,36 @@ fn transfer_ownership_with_terms_clears_pending_transfer() {
     let res = client.try_cancel_transfer(&id);
     assert_eq!(res, Err(Ok(Error::NoPendingTransfer)));
 }
+
+// ── Revocation reason hash field (contribution towards attestation revocation) ─
+
+#[test]
+fn verifier_status_history_includes_revocation_reason_hash_field() {
+    let (env, creator, client) = setup();
+    let verifier = add_verifier_helper(&env, &client);
+
+    let id = String::from_str(&env, "revhist");
+    client.register(
+        &creator,
+        &id,
+        &100_000i128,
+        &String::from_str(&env, "ipfs://revhist"),
+        &empty_tags(&env),
+    );
+
+    // Set verification status (revocation_reason_hash not yet used in set_verification_status)
+    client.set_verification_status(
+        &id,
+        &verifier,
+        &VerificationStatus::Verified,
+        &Some(String::from_str(&env, "sha256:abc123")),
+    );
+
+    let page = client.get_verifier_status_history(&verifier, &0u32, &20u32);
+    assert_eq!(page.items.len(), 1u32);
+
+    let entry = page.items.get(0).unwrap();
+    // Field should be present and set to None (placeholder for future revocation implementation)
+    assert_eq!(entry.revocation_reason_hash, None);
+    assert_eq!(entry.attestation_hash, Some(String::from_str(&env, "sha256:abc123")));
+}
