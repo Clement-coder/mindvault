@@ -15,6 +15,7 @@ import {
   inferNetworkFromX402,
   validateNetworkConfig,
   X402_NETWORK_IDS,
+  type RegistryInfo,
 } from "./index.js";
 
 /**
@@ -148,6 +149,7 @@ describe("generated bindings (drift guard)", () => {
     53: "RecoveryAdminNotSet",
     54: "UnsupportedResourceSchema",
     55: "RevisionOverflow",
+    56: "RoleCapacityReached",
   };
   // The full set of contract methods consumers call, mirroring the contract's
   // METHOD_SCHEMA. Adding, removing or renaming a contract function changes
@@ -261,6 +263,7 @@ describe("generated bindings (drift guard)", () => {
     "resource_schema_version",
     "retry_anchor_purchase_receipt",
     "revoke_lease",
+    "role_inventory_page",
     "rotate_verifier",
     "search_by_tag_prefix",
     "set_fee_config",
@@ -323,6 +326,25 @@ describe("generated bindings (drift guard)", () => {
     }
 
     expect(typeof listResources).toBe("function");
+  });
+
+  it("exposes role_capability_version on RegistryInfo for capability detection", () => {
+    // Compile-time + runtime check that the bindings' RegistryInfo carries the
+    // role capability version clients use to detect optional role methods
+    // (e.g. role_inventory_page) before invoking them.
+    const info: RegistryInfo = {
+      name: "mindvault-vault-registry",
+      version: "0.1.0",
+      resource_schema_version: 7,
+      network_id: Buffer.alloc(32),
+      role_capability_version: 1,
+    };
+    expect(info.role_capability_version).toBe(1);
+    expect(typeof info.role_capability_version).toBe("number");
+  });
+
+  it("exposes role_inventory_page in the generated method set", () => {
+    expect(EXPECTED_METHODS).toContain("role_inventory_page");
   });
 });
 

@@ -74,7 +74,7 @@ export interface IdPage {
   next_cursor: IdCursor;
 }
 
-export type DataKey = {tag: "Resource", values: readonly [string]} | {tag: "Count", values: void} | {tag: "Index", values: readonly [u32]} | {tag: "Admin", values: void} | {tag: "PendingAdmin", values: void} | {tag: "CreatorTerms", values: readonly [string]} | {tag: "CreatorResources", values: readonly [string]} | {tag: "CreatorCount", values: readonly [string]} | {tag: "PendingTransfer", values: readonly [string]} | {tag: "Verifier", values: readonly [string]} | {tag: "NetworkId", values: void} | {tag: "PaymentReceipt", values: readonly [string]} | {tag: "PaymentIndex", values: readonly [string, string]} | {tag: "PaymentTxHash", values: readonly [string]} | {tag: "PaymentRecipient", values: readonly [string]} | {tag: "RefundReceipt", values: readonly [string]} | {tag: "RefundTxHash", values: readonly [string]} | {tag: "RefundDeadline", values: readonly [string]} | {tag: "RefundedAmount", values: readonly [string]} | {tag: "RefundWindow", values: void} | {tag: "Lease", values: readonly [string, string]} | {tag: "AnchorAttempts", values: readonly [string, string]} | {tag: "RegistryTerms", values: void} | {tag: "Paused", values: void} | {tag: "PauseUntil", values: void} | {tag: "Settler", values: readonly [string]} | {tag: "PurchaseReceipt", values: readonly [string, string]} | {tag: "AnchorFailure", values: readonly [string, string]} | {tag: "TagIndex", values: readonly [string]} | {tag: "FeeConfig", values: void} | {tag: "Moderator", values: readonly [string]} | {tag: "DisputeFlag", values: readonly [string]} | {tag: "ListedCount", values: void} | {tag: "FlagReasonHash", values: readonly [string]} | {tag: "AttestationHash", values: readonly [string]} | {tag: "PendingAdminExpiry", values: void} | {tag: "PendingAdminNominatedAt", values: void} | {tag: "TagCount", values: readonly [string]} | {tag: "TopTags", values: void} | {tag: "CreatorListedCount", values: readonly [string]} | {tag: "MemoHash", values: readonly [string]} | {tag: "FeeDestination", values: void} | {tag: "MetadataPointers", values: readonly [string]} | {tag: "FlagModerator", values: readonly [string]} | {tag: "CreatorEarnings", values: readonly [string]} | {tag: "VerifierHistory", values: readonly [string]} | {tag: "RecoveryAdmin", values: void} | {tag: "Revision", values: readonly [string]};
+export type DataKey = {tag: "Resource", values: readonly [string]} | {tag: "Count", values: void} | {tag: "Index", values: readonly [u32]} | {tag: "Admin", values: void} | {tag: "PendingAdmin", values: void} | {tag: "CreatorTerms", values: readonly [string]} | {tag: "CreatorResources", values: readonly [string]} | {tag: "CreatorCount", values: readonly [string]} | {tag: "PendingTransfer", values: readonly [string]} | {tag: "Verifier", values: readonly [string]} | {tag: "NetworkId", values: void} | {tag: "PaymentReceipt", values: readonly [string]} | {tag: "PaymentIndex", values: readonly [string, string]} | {tag: "PaymentTxHash", values: readonly [string]} | {tag: "PaymentRecipient", values: readonly [string]} | {tag: "RefundReceipt", values: readonly [string]} | {tag: "RefundTxHash", values: readonly [string]} | {tag: "RefundDeadline", values: readonly [string]} | {tag: "RefundedAmount", values: readonly [string]} | {tag: "RefundWindow", values: void} | {tag: "Lease", values: readonly [string, string]} | {tag: "AnchorAttempts", values: readonly [string, string]} | {tag: "RegistryTerms", values: void} | {tag: "Paused", values: void} | {tag: "PauseUntil", values: void} | {tag: "Settler", values: readonly [string]} | {tag: "PurchaseReceipt", values: readonly [string, string]} | {tag: "AnchorFailure", values: readonly [string, string]} | {tag: "TagIndex", values: readonly [string]} | {tag: "FeeConfig", values: void} | {tag: "Moderator", values: readonly [string]} | {tag: "DisputeFlag", values: readonly [string]} | {tag: "ListedCount", values: void} | {tag: "FlagReasonHash", values: readonly [string]} | {tag: "AttestationHash", values: readonly [string]} | {tag: "PendingAdminExpiry", values: void} | {tag: "PendingAdminNominatedAt", values: void} | {tag: "TagCount", values: readonly [string]} | {tag: "TopTags", values: void} | {tag: "CreatorListedCount", values: readonly [string]} | {tag: "MemoHash", values: readonly [string]} | {tag: "FeeDestination", values: void} | {tag: "MetadataPointers", values: readonly [string]} | {tag: "FlagModerator", values: readonly [string]} | {tag: "CreatorEarnings", values: readonly [string]} | {tag: "VerifierHistory", values: readonly [string]} | {tag: "RecoveryAdmin", values: void} | {tag: "Revision", values: readonly [string]} | {tag: "RoleHolders", values: readonly [RoleKind]};
 
 /**
  * Cursor passed to and returned by the id-indexed listings
@@ -241,6 +241,30 @@ export enum FlagReason {
 }
 
 /**
+ * Protocol role whose holders `role_inventory_page` enumerates.
+ *
+ * The discriminants are stable — do not renumber existing variants.
+ */
+export enum RoleKind {
+  /**
+ * Single-holder contract admin (`admin()`).
+ */
+  Admin = 0,
+  /**
+ * Multi-member verifier role (`is_verifier`).
+ */
+  Verifier = 1,
+  /**
+ * Multi-member moderator role (`is_moderator`).
+ */
+  Moderator = 2,
+  /**
+ * Multi-member settler role (`is_settler`).
+ */
+  Settler = 3,
+}
+
+/**
  * Lifecycle state of an access lease.
  * 
  * `Pending` is a holder-recorded lease awaiting settlement confirmation;
@@ -357,9 +381,16 @@ name: string;
  */
 network_id: Buffer;
   /**
- * Version of the on-chain `Resource` schema (`RESOURCE_SCHEMA_VERSION`).
+ * Version of the `Resource` schema (`RESOURCE_SCHEMA_VERSION`).
  */
 resource_schema_version: u32;
+  /**
+ * Version of the role-administration capability surface
+ * (`ROLE_CAPABILITY_VERSION`). Clients compare this against a known
+ * value to detect optional role methods and role features before
+ * invoking them.
+ */
+role_capability_version: u32;
   /**
  * Contract crate version (`CARGO_PKG_VERSION` at build time).
  */
@@ -650,6 +681,10 @@ export interface MetadataPointers {
 
 
 export interface VerifierRotation {
+  /**
+ * Admin that authorized the rotation (the acting account).
+ */
+admin: string;
   ledger: u32;
   new_verifier: string;
   old_verifier: string;
@@ -681,6 +716,24 @@ export type VerificationStatus = {tag: "Pending", values: void} | {tag: "Verifie
 export interface VerifierStatusPage {
   items: Array<VerifierStatusEntry>;
   next_cursor: Option<u32>;
+}
+
+/**
+ * One page of active holders of a protocol role, with a cursor for the next
+ * page. Returned by `role_inventory_page`. Mirrors `CatalogPage` semantics:
+ * `next_cursor` is `None` at end-of-list. The page is a read-only projection
+ * and never mutates role state.
+ */
+export interface RoleInventoryPage {
+  /**
+ * Active holders of the requested role, in grant order.
+ */
+holders: Array<string>;
+  /**
+ * Index into the role's holder list to pass as `cursor` on the next
+ * call, or `None` at end-of-list.
+ */
+next_cursor: Option<u32>;
 }
 
 /**
@@ -1176,6 +1229,12 @@ export interface Client {
    * Whether `address` currently holds the moderator role.
    */
   is_moderator: ({address}: {address: string}, options?: MethodOptions) => Promise<AssembledTransaction<boolean>>
+
+  /**
+   * Construct and simulate a role_inventory_page transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Bounded, read-only page of the active holders of a protocol role.
+   */
+  role_inventory_page: ({role, cursor, limit}: {role: RoleKind, cursor: u32, limit: u32}, options?: MethodOptions) => Promise<AssembledTransaction<RoleInventoryPage>>
 
   /**
    * Construct and simulate a listed_count transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
@@ -2577,6 +2636,7 @@ export class Client extends ContractClient {
         flag_details: this.txFromJSON<Result<FlagDetails>>,
         get_revision: this.txFromJSON<Result<u32>>,
         is_moderator: this.txFromJSON<boolean>,
+        role_inventory_page: this.txFromJSON<RoleInventoryPage>,
         listed_count: this.txFromJSON<u32>,
         open_dispute: this.txFromJSON<Result<void>>,
         record_lease: this.txFromJSON<Result<Lease>>,

@@ -9,6 +9,7 @@ fn registry_info_exposes_stable_fields() {
 
     assert_eq!(info.name, String::from_str(&env, REGISTRY_NAME));
     assert_eq!(info.resource_schema_version, RESOURCE_SCHEMA_VERSION);
+    assert_eq!(info.role_capability_version, ROLE_CAPABILITY_VERSION);
     assert!(!info.version.is_empty(), "version must not be empty");
     assert_eq!(info.network_id, env.ledger().network_id());
 }
