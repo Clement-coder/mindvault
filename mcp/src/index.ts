@@ -93,12 +93,7 @@ import {
   mockSetListed,
   mockSetTags,
 } from "./mock.js";
-import {
-  listPurchases,
-  purchaseHistoryTool,
-  purchaseStatusOf,
-  recordPurchase,
-} from "./purchaseHistory.js";
+import { purchaseHistoryTool, recordPurchase, loadPurchaseHistory } from "./purchaseHistory.js";
 import { Mutex } from "./mutex.js";
 import { exportReceiptsTool } from "./receipts.js";
 import { debugBundleTool } from "./debugBundle.js";
@@ -1991,6 +1986,83 @@ async function walletBalancesOutcome(): Promise<ToolOutcome> {
           : "No agent wallets configured.",
     },
   };
+}
+
+// ── Wallet allowance (#1052) ─────────────────────────────────────────────────
+
+/**
+ * Summarize USDC balance, estimated pending spend, and payment ceiling for
+ * the active wallet and network.
+ *
+ * Read-only: no signing, no transfer, no state mutation.
+ *
+ * Pending spend is the sum of local purchase receipts from the past 24 h
+ * scoped to the active profile and current network. It is labeled as an
+ * estimate because receipts are written on payment submission; on-chain
+ * settlement may differ if a transaction is retried or not yet confirmed.
+ */
+async function walletAllowanceOutcome(): Promise<ToolOutcome> {
+  const wallet = requireWallet();
+  const profile = activeProfileName;
+  const network = NETWORK; // e.g. "stellar:testnet"
+  const usdcContractId =
+    process.env.USDC_CONTRACT_ID ?? networkPreset.usdcSacContractId ?? "";
+  const ceiling = process.env.MINDVAULT_MAX_AUTO_PAY_USDC ?? DEFAULT_MAX_AUTO_PAY_USDC;
+
+  // Fetch live balance — same call as walletInfo.
+  const details = await getBalanceDetails(wallet.publicKey);
+
+  // Estimate pending spend: receipts from the last 24 h for this profile + network.
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  const store = loadPurchaseHistory();
+  const recentReceipts = store.purchases.filter((r) => {
+    if (r.network !== network) return false;
+    if (r.profile !== undefined && r.profile !== profile) return false;
+    return new Date(r.timestamp).getTime() >= cutoff;
+  });
+
+  const estimatedPendingSpend = recentReceipts
+    .reduce((acc, r) => {
+      const n = parseFloat(r.amount);
+      return acc + (Number.isFinite(n) ? n : 0);
+    }, 0)
+    .toFixed(7);
+
+  const snapshotAt = new Date().toISOString();
+
+  const lines = [
+    `Profile: ${profile}`,
+    `Address: ${wallet.publicKey}`,
+    `Network: ${network}`,
+    `Asset: USDC (${usdcContractId})`,
+    `USDC Balance: ${details.usdcBalance}`,
+    `Est. Pending Spend (24 h): ${estimatedPendingSpend} USDC (${recentReceipts.length} receipt${recentReceipts.length === 1 ? "" : "s"})`,
+    `Payment Ceiling: ${ceiling} USDC (MINDVAULT_MAX_AUTO_PAY_USDC)`,
+    `Snapshot: ${snapshotAt}`,
+  ];
+
+  if (details.message) lines.push(`Note: ${details.message}`);
+
+  return {
+    text: lines.join("\n"),
+    structured: {
+      profile,
+      address: wallet.publicKey,
+      network,
+      asset: "USDC" as const,
+      assetContractId: usdcContractId,
+      usdcBalance: details.usdcBalance,
+      estimatedPendingSpend,
+      receiptCount: recentReceipts.length,
+      paymentCeiling: ceiling,
+      snapshotAt,
+      note: details.message ?? null,
+    },
+  };
+}
+
+export async function walletAllowance(): Promise<string> {
+  return outcomeText(await walletAllowanceOutcome());
 }
 
 // ── Server endpoints (#890) ──────────────────────────────────────────────────

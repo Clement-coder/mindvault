@@ -130,6 +130,17 @@ pub const MAX_TAG_INDEX_REPAIR: u32 = 200;
 /// accepted by `set_maintenance_status`.
 pub const MAX_MAINTENANCE_REASON_CODE: u32 = 255;
 
+// ── Role inventory ───────────────────────────────────────────────────────────
+/// Maximum number of addresses that may hold a single multi-member role
+/// (verifier, moderator, or settler) at once. Enforced by `add_verifier`,
+/// `add_moderator`, and `add_settler`; a grant that would exceed the cap
+/// fails `RoleCapacityReached` without modifying state. The admin role is
+/// single-holder and is not subject to this limit.
+pub const MAX_ROLE_HOLDERS: u32 = 32;
+/// Maximum number of holders returned per `role_inventory_page` call.
+/// `limit` is clamped to `1..=ROLE_INVENTORY_PAGE_CAP`.
+pub const ROLE_INVENTORY_PAGE_CAP: u32 = 20;
+
 // ── Fee / royalty configuration ──────────────────────────────────────────────
 /// Fee basis-point ceiling: 50 % (5 000 bp). Neither platform_fee_bps nor
 /// royalty_bps may individually exceed this value, and their *sum* may not
@@ -156,6 +167,14 @@ pub const REGISTRY_NAME: &str = "mindvault-vault-registry";
 pub const RESOURCE_SCHEMA_VERSION: u32 = 7;
 /// The simulated prior schema that can be upgraded in place by this build.
 pub const PREVIOUS_RESOURCE_SCHEMA_VERSION: u32 = 6;
+
+/// Version of the role-administration capability surface exposed through
+/// [`VaultRegistry::registry_info`]. Bump whenever optional role-related
+/// methods or role features are added or change shape (for example
+/// `role_inventory_page`, or a new field on the role-rotation event), so
+/// clients can detect support before invoking them. Independent of
+/// `RESOURCE_SCHEMA_VERSION`, which tracks only the `Resource` struct.
+pub const ROLE_CAPABILITY_VERSION: u32 = 1;
 
 /// Maximum byte length of a settlement transaction hash stored in a
 /// [`PaymentReceipt`]. Stellar transaction hashes are 64 hex characters
@@ -293,6 +312,7 @@ pub const METHOD_SCHEMA: &[(&str, &str)] = &[
     ("add_moderator", "admin"),
     ("remove_moderator", "admin"),
     ("is_moderator", "—"),
+    ("role_inventory_page", "—"),
     ("flag_resource", "moderator"),
     ("unflag_resource", "moderator"),
     ("set_flag_reason_hash", "moderator"),
@@ -376,7 +396,7 @@ pub const ERROR_SCHEMA: &[(u32, &str, &str)] = &[
     (6, "Unauthorized", "Caller is unauthorized, including a refund recipient mismatch."),
     (7, "PendingAdminNotSet", "No pending admin is set, or caller does not match the pending admin."),
     (8, "PendingAdminAlreadySet", "A pending admin nomination is already active."),
-    (9, "SameAdmin", "Nominated new admin is already the current contract admin."),
+    (9, "SameAdmin", "Requested admin address is already an active governance address (current, pending, or recovery admin)."),
     (10, "TermsHashTooLong", "Terms hash exceeds `MAX_TERMS_HASH_LEN` (64 bytes)."),
     (11, "InvalidResourceId", "Resource id is empty, exceeds 24 bytes, or contains non-lowercase-alphanumeric characters."),
     (12, "InvalidMetadataPointer", "Metadata pointer does not start with a supported prefix."),
@@ -414,6 +434,16 @@ pub const ERROR_SCHEMA: &[(u32, &str, &str)] = &[
     (44, "InvalidReceiptId", "`receipt_id` is empty or exceeds `MAX_RECEIPT_ID_LEN` (64 bytes)."),
     (45, "ContentHashTooLong", "`content_hash` exceeds `MAX_CONTENT_HASH_LEN` (128 bytes)."),
     (46, "AttestationHashTooLong", "`attestation_hash` exceeds `MAX_ATTESTATION_HASH_LEN` (64 bytes)."),
+    (47, "PaymentAmountMismatch", "Payment amount differs from the resource price or cumulative refunds exceed the original payment."),
+    (48, "DuplicateTxHash", "A payment or refund receipt already uses the supplied transaction hash (`tx_hash`)."),
+    (49, "FeeConfigNotSet", "`set_fee_recipient` or `set_fee_destination` was called before any fee config was set via `set_fee_config`."),
+    (50, "AdminNominationExpired", "The pending admin nomination is missing or has expired."),
+    (51, "InvalidMetadataPointers", "`set_metadata_pointers` received zero, more than `MAX_METADATA_POINTERS`, or duplicate pointers, or an out-of-range `primary` index."),
+    (52, "AdminAlreadySet", "`bootstrap_dual_admin` was called after an admin was already set."),
+    (53, "RecoveryAdminNotSet", "`recover_admin` was called but no recovery admin is configured."),
+    (54, "UnsupportedResourceSchema", "A resource uses a schema version this deployment cannot safely read or upgrade."),
+    (55, "RevisionOverflow", "A listing revision increment would exceed `u32::MAX`; the mutation is rejected without changing resource state."),
+    (56, "RoleCapacityReached", "A role grant would exceed `MAX_ROLE_HOLDERS` (32) active holders for that role."),
     (47, "RevocationReasonHashTooLong", "`revocation_reason_hash` exceeds `MAX_REVOCATION_REASON_HASH_LEN` (64 bytes)."),
     (48, "PaymentAmountMismatch", "Payment amount differs from the resource price or cumulative refunds exceed the original payment."),
     (49, "DuplicateTxHash", "A payment or refund receipt already uses the supplied transaction hash (`tx_hash`)."),
@@ -477,7 +507,7 @@ pub const EVENT_SCHEMA: &[(&str, &str)] = &[
     ),
     ("addverif", "RoleChange { admin, target, granted: true }"),
     ("rmverif", "RoleChange { admin, target, granted: false }"),
-    ("verrot", "VerifierRotation { old_verifier, new_verifier, ledger }"),
+    ("verrot", "VerifierRotation { admin, old_verifier, new_verifier, ledger }"),
     ("reindex", "new_count: u32 (topic carries old_count: u32)"),
     (
         "payment",
@@ -552,6 +582,11 @@ pub struct RegistryInfo {
     /// (`env.ledger().network_id()`), so clients can confirm they are
     /// talking to the network they expect without a hardcoded config value.
     pub network_id: BytesN<32>,
+    /// Version of the role-administration capability surface
+    /// (`ROLE_CAPABILITY_VERSION`). Clients compare this against a known
+    /// value to detect optional role methods and role features before
+    /// invoking them.
+    pub role_capability_version: u32,
 }
 
 /// Compact version struct returned by [`VaultRegistry::contract_version`].
@@ -608,6 +643,20 @@ pub enum FlagReason {
     Other = 3,
 }
 
+/// Protocol role whose holders `role_inventory_page` enumerates.
+///
+/// The discriminants are stable — do not renumber existing variants.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum RoleKind {
+    /// Single-holder contract admin (`admin()`).
+    Admin = 0,
+    /// Multi-member verifier role (`is_verifier`).
+    Verifier = 1,
+    /// Multi-member moderator role (`is_moderator`).
+    Moderator = 2,
+    /// Multi-member settler role (`is_settler`).
+    Settler = 3,
 /// Registry-level maintenance posture: which kind of pause is in effect.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -701,9 +750,15 @@ pub struct FlagDetails {
     pub last_moderator: Option<Address>,
 }
 
+/// Payload of the `verrot` role-rotation event. Carries the admin that
+/// authorized the rotation (the actor), the account being replaced, the
+/// replacement account, and the ledger sequence, so an indexer can
+/// reconstruct the full audit trail from the event log alone.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct VerifierRotation {
+    /// Admin that authorized the rotation (the acting account).
+    pub admin: Address,
     pub old_verifier: Address,
     pub new_verifier: Address,
     pub ledger: u32,
@@ -974,6 +1029,20 @@ pub struct VerifierStatusPage {
     pub next_cursor: Option<u32>,
 }
 
+/// One page of active holders of a protocol role, with a cursor for the next
+/// page. Returned by `role_inventory_page`. Mirrors `CatalogPage` semantics:
+/// `next_cursor` is `None` at end-of-list. The page is a read-only projection
+/// and never mutates role state.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RoleInventoryPage {
+    /// Active holders of the requested role, in grant order.
+    pub holders: Vec<Address>,
+    /// Index into the role's holder list to pass as `cursor` on the next
+    /// call, or `None` at end-of-list.
+    pub next_cursor: Option<u32>,
+}
+
 /// Aggregated creator earnings returned by `creator_earnings_estimate`.
 /// Carries both the address and the total in one read so callers do not need
 /// to issue a separate `get_owner` query.
@@ -1131,6 +1200,10 @@ pub enum DataKey {
     /// metadata or price change. Absent (read as `0`) until the first such
     /// mutation. Read by `get_revision`.
     Revision(String),
+    /// Ordered index of active holders of a multi-member protocol role
+    /// (verifier, moderator, or settler), maintained by the corresponding
+    /// `add_*` / `remove_*` entry points and read by `role_inventory_page`.
+    RoleHolders(RoleKind),
     /// Emergency pause flag for payment operations only (independent of general pause).
     /// When `true`, payment and lease methods return `ContractPaused`.
     PaymentPaused,
@@ -1567,6 +1640,9 @@ pub enum Error {
     /// A listing revision increment would exceed `u32::MAX`. The mutation is
     /// rejected without changing resource state.
     RevisionOverflow = 55,
+    /// A role grant would exceed `MAX_ROLE_HOLDERS` (32) active holders for
+    /// that role. The grant is rejected without modifying state.
+    RoleCapacityReached = 56,
     /// A fee-recipient or fee-destination change was attempted while accrued
     /// fees remain unclaimed. Call `claim_fees` first to acknowledge receipt
     /// of outstanding fees, then retry the change.
@@ -3649,15 +3725,16 @@ impl VaultRegistry {
     }
 
     /// Discover this registry's stable identity and capabilities in one
-    /// read-only call: name, crate version, `Resource` schema version, and
-    /// the network this contract is deployed on. Always succeeds — there is
-    /// no failure mode a caller needs to handle.
+    /// read-only call: name, crate version, `Resource` schema version, the
+    /// network this contract is deployed on, and the role-capability version.
+    /// Always succeeds — there is no failure mode a caller needs to handle.
     pub fn registry_info(env: Env) -> RegistryInfo {
         RegistryInfo {
             name: String::from_str(&env, REGISTRY_NAME),
             version: String::from_str(&env, env!("CARGO_PKG_VERSION")),
             resource_schema_version: RESOURCE_SCHEMA_VERSION,
             network_id: env.ledger().network_id(),
+            role_capability_version: ROLE_CAPABILITY_VERSION,
         }
     }
 
@@ -3905,8 +3982,13 @@ impl VaultRegistry {
 
     /// Replace a lost admin key. Only the recovery admin may call this.
     /// Sets `new_admin` as admin immediately and clears any pending admin
-    /// nomination. The recovery admin itself is unchanged. Errors
-    /// `AdminNotSet`, `AdminNotSet`, or `SameAdmin`. Emits `recover`.
+    /// nomination. The recovery admin itself is unchanged.
+    ///
+    /// `new_admin` must not equal any active governance address — the current
+    /// admin, the pending admin nominee, or the recovery admin — otherwise the
+    /// call fails `SameAdmin` without touching state. Errors `AdminNotSet` if
+    /// no recovery admin is configured (or, via `require_admin`, if no admin
+    /// exists). Emits `recover`.
     pub fn recover_admin(env: Env, new_admin: Address) -> Result<(), Error> {
         let recovery: Address = env
             .storage()
@@ -3918,10 +4000,22 @@ impl VaultRegistry {
         if new_admin == old_admin || new_admin == recovery {
             return Err(Error::SameAdmin);
         }
+        if let Some(pending) = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::PendingAdmin)
+        {
+            if new_admin == pending {
+                return Err(Error::SameAdmin);
+            }
+        }
         env.storage().instance().remove(&DataKey::PendingAdmin);
         env.storage()
             .instance()
             .remove(&DataKey::PendingAdminExpiry);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingAdminNominatedAt);
         env.storage().instance().set(&DataKey::Admin, &new_admin);
         Self::bump_instance(&env);
         env.events()
@@ -4075,12 +4169,12 @@ impl VaultRegistry {
 
     /// Grant the verifier role to `verifier`, authorizing `set_verification_status`.
     /// Only the admin may call this. Errors `AdminNotSet` if no admin has
-    /// been set yet (see `nominate_new_admin`).
+    /// been set yet (see `nominate_new_admin`), or `RoleCapacityReached` if
+    /// the verifier role already holds `MAX_ROLE_HOLDERS` addresses.
     pub fn add_verifier(env: Env, verifier: Address) -> Result<(), Error> {
         let admin = Self::require_admin(&env)?;
         admin.require_auth();
-        Self::add_verifier_internal(&env, &admin, verifier);
-        Ok(())
+        Self::add_verifier_internal(&env, &admin, verifier)
     }
 
     /// Revoke the verifier role from `verifier`. Only the admin may call this.
@@ -4110,10 +4204,11 @@ impl VaultRegistry {
         }
 
         Self::remove_verifier_internal(&env, &admin, old_verifier.clone());
-        Self::add_verifier_internal(&env, &admin, new_verifier.clone());
+        Self::add_verifier_internal(&env, &admin, new_verifier.clone())?;
         env.events().publish(
             (symbol_short!("verrot"), old_verifier.clone()),
             VerifierRotation {
+                admin,
                 old_verifier,
                 new_verifier,
                 ledger: env.ledger().sequence(),
@@ -4560,10 +4655,12 @@ impl VaultRegistry {
 
     /// Grant the settler role to `settler`, authorizing `record_payment` and
     /// `settle_payment`. Only the admin may call this. Errors `AdminNotSet`
-    /// if no admin has been set yet.
+    /// if no admin has been set yet, or `RoleCapacityReached` if the settler
+    /// role already holds `MAX_ROLE_HOLDERS` addresses.
     pub fn add_settler(env: Env, settler: Address) -> Result<(), Error> {
         let admin = Self::require_admin(&env)?;
         admin.require_auth();
+        Self::role_index_add(&env, RoleKind::Settler, &settler)?;
         env.storage()
             .instance()
             .set(&DataKey::Settler(settler.clone()), &true);
@@ -4583,6 +4680,7 @@ impl VaultRegistry {
     pub fn remove_settler(env: Env, settler: Address) -> Result<(), Error> {
         let admin = Self::require_admin(&env)?;
         admin.require_auth();
+        Self::role_index_remove(&env, RoleKind::Settler, &settler);
         env.storage()
             .instance()
             .set(&DataKey::Settler(settler.clone()), &false);
@@ -5392,10 +5490,13 @@ impl VaultRegistry {
 
     /// Grant the moderator role to `moderator`, authorizing `flag_resource` and
     /// `unflag_resource`. Only the admin may call this. Errors `AdminNotSet` if
-    /// no admin has been set yet (see `nominate_new_admin`).
+    /// no admin has been set yet (see `nominate_new_admin`), or
+    /// `RoleCapacityReached` if the moderator role already holds
+    /// `MAX_ROLE_HOLDERS` addresses.
     pub fn add_moderator(env: Env, moderator: Address) -> Result<(), Error> {
         let admin = Self::require_admin(&env)?;
         admin.require_auth();
+        Self::role_index_add(&env, RoleKind::Moderator, &moderator)?;
         env.storage()
             .instance()
             .set(&DataKey::Moderator(moderator.clone()), &true);
@@ -5415,6 +5516,7 @@ impl VaultRegistry {
     pub fn remove_moderator(env: Env, moderator: Address) -> Result<(), Error> {
         let admin = Self::require_admin(&env)?;
         admin.require_auth();
+        Self::role_index_remove(&env, RoleKind::Moderator, &moderator);
         env.storage()
             .instance()
             .set(&DataKey::Moderator(moderator.clone()), &false);
@@ -5436,6 +5538,68 @@ impl VaultRegistry {
             .instance()
             .get(&DataKey::Moderator(address))
             .unwrap_or(false)
+    }
+
+    // ─── Role inventory (#982) ────────────────────────────────────────────────
+
+    /// Bounded, read-only page of the active holders of a protocol role.
+    ///
+    /// Supports deployment audits and operational tooling without any
+    /// mutation capability. Ordering is deterministic: holders appear in
+    /// grant order, and the same storage always yields the same pages.
+    ///
+    /// - `role` selects the inventory: [`RoleKind::Admin`] returns the
+    ///   current contract admin (0 or 1 holders); the multi-member roles
+    ///   return their indexed holders.
+    /// - `cursor` is a 0-based index into the role's holder list. Pass `0`
+    ///   for the first page, then the returned `next_cursor`.
+    /// - `limit` is clamped to `1..=`[`ROLE_INVENTORY_PAGE_CAP`] (20), so a
+    ///   `0` limit still makes progress.
+    /// - `next_cursor` is `Some(next_index)` when more holders may exist
+    ///   after this page, or `None` at end-of-list.
+    ///
+    /// Multi-member roles are bounded by [`MAX_ROLE_HOLDERS`] (32) active
+    /// holders each; the admin role is single-holder. This call never
+    /// mutates role state.
+    pub fn role_inventory_page(
+        env: Env,
+        role: RoleKind,
+        cursor: u32,
+        limit: u32,
+    ) -> RoleInventoryPage {
+        let page_size = limit.clamp(1, ROLE_INVENTORY_PAGE_CAP);
+        if role == RoleKind::Admin {
+            let mut holders = Vec::new(&env);
+            if let Some(admin) = env
+                .storage()
+                .instance()
+                .get::<DataKey, Address>(&DataKey::Admin)
+            {
+                holders.push_back(admin);
+            }
+            return RoleInventoryPage {
+                holders,
+                next_cursor: None,
+            };
+        }
+
+        let all: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::RoleHolders(role))
+            .unwrap_or_else(|| Vec::new(&env));
+        let total = all.len();
+        let mut holders = Vec::new(&env);
+        let mut i = cursor;
+        while i < total && holders.len() < page_size {
+            holders.push_back(all.get(i).unwrap());
+            i += 1;
+        }
+        let next_cursor = if i < total { Some(i) } else { None };
+        RoleInventoryPage {
+            holders,
+            next_cursor,
+        }
     }
 
     // ─── Dispute flagging (#389) ──────────────────────────────────────────────
@@ -6825,7 +6989,12 @@ impl VaultRegistry {
         Self::bump_instance(env);
     }
 
-    fn add_verifier_internal(env: &Env, admin: &Address, verifier: Address) {
+    fn add_verifier_internal(
+        env: &Env,
+        admin: &Address,
+        verifier: Address,
+    ) -> Result<(), Error> {
+        Self::role_index_add(env, RoleKind::Verifier, &verifier)?;
         env.storage()
             .instance()
             .set(&DataKey::Verifier(verifier.clone()), &true);
@@ -6838,9 +7007,11 @@ impl VaultRegistry {
                 granted: true,
             },
         );
+        Ok(())
     }
 
     fn remove_verifier_internal(env: &Env, admin: &Address, verifier: Address) {
+        Self::role_index_remove(env, RoleKind::Verifier, &verifier);
         env.storage()
             .instance()
             .set(&DataKey::Verifier(verifier.clone()), &false);
@@ -6853,6 +7024,54 @@ impl VaultRegistry {
                 granted: false,
             },
         );
+    }
+
+    /// Append `address` to the ordered holder index for `role` if it is not
+    /// already present. Fails `RoleCapacityReached` when the index is already
+    /// at [`MAX_ROLE_HOLDERS`], leaving state unchanged.
+    fn role_index_add(env: &Env, role: RoleKind, address: &Address) -> Result<(), Error> {
+        let key = DataKey::RoleHolders(role);
+        let existing: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(env));
+        for i in 0..existing.len() {
+            if existing.get(i).unwrap() == *address {
+                return Ok(());
+            }
+        }
+        if existing.len() >= MAX_ROLE_HOLDERS {
+            return Err(Error::RoleCapacityReached);
+        }
+        let mut holders = existing;
+        holders.push_back(address.clone());
+        env.storage().instance().set(&key, &holders);
+        Ok(())
+    }
+
+    /// Remove `address` from the ordered holder index for `role`, if present.
+    /// A no-op when the address is not currently indexed.
+    fn role_index_remove(env: &Env, role: RoleKind, address: &Address) {
+        let key = DataKey::RoleHolders(role);
+        let existing: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(env));
+        let mut holders = Vec::new(env);
+        let mut changed = false;
+        for i in 0..existing.len() {
+            let holder = existing.get(i).unwrap();
+            if holder == *address {
+                changed = true;
+            } else {
+                holders.push_back(holder);
+            }
+        }
+        if changed {
+            env.storage().instance().set(&key, &holders);
+        }
     }
 
     /// The current admin, or `AdminNotSet` if `nominate_new_admin` has never
