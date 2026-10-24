@@ -106,6 +106,7 @@ export function groupOf(name: string): string {
       "mindvault_check_bindings",
       "mindvault_tx_status",
       "mindvault_onchain_preflight",
+      "mindvault_verify_deployment",
       "mindvault_verify_attestation",
       "mindvault_resource_provenance",
       "mindvault_resource_change_log",

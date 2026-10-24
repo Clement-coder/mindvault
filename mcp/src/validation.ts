@@ -76,6 +76,11 @@ import { StrKey } from "@stellar/stellar-sdk";
  *                 bounded length. Unlike `tag_array` entries keep their case
  *                 and duplicates — they are data selectors, not on-chain tags.
  *                 Accepts a comma-separated string as well.
+ * - `object`    — a JSON object passed through unchanged. Used for structured
+ *                 payloads whose field-level validation belongs to the owning
+ *                 module (e.g. an expected deployment manifest), so the tool
+ *                 can report every problem in one deterministic result instead
+ *                 of a generic argument error.
  *
  * Normalization guidance for tag_array:
  *   - Tags are lowercased before the on-chain call so "Finance" and "finance"
@@ -94,7 +99,8 @@ export type ArgumentKind =
   | "tag_array"
   | "string_array"
   | "url"
-  | "integer";
+  | "integer"
+  | "object";
 
 export interface ArgumentSpec {
   kind: ArgumentKind;
@@ -463,6 +469,9 @@ export const TOOL_ARGUMENT_SPECS: Record<string, ToolArgumentSpec> = {
   mindvault_onchain_preflight: {
     requestedSchemaVersion: { kind: "integer", min: 0 },
   },
+  mindvault_verify_deployment: {
+    manifest: { kind: "object" },
+  },
   mindvault_migration_preview: {},
   mindvault_support_bundle: {
     incidentId: { kind: "string", required: true, minLength: 1, maxLength: 128 },
@@ -651,6 +660,8 @@ function expectation(spec: ArgumentSpec): string {
       if (spec.max !== undefined) parts.push(`≤ ${spec.max}`);
       return parts.join(" ");
     }
+    case "object":
+      return "a JSON object";
     case "string": {
       if (spec.patternHint) return spec.patternHint;
       if (spec.maxLength) return `a string of up to ${spec.maxLength} characters`;
@@ -1085,6 +1096,22 @@ function validateInteger(
   return n;
 }
 
+function validateObject(
+  field: string,
+  value: unknown,
+  issues: ValidationIssue[],
+): Record<string, unknown> | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    issues.push({
+      field,
+      code: "wrong_type",
+      message: `${field} must be a JSON object; received ${typeName(value)}.`,
+    });
+    return undefined;
+  }
+  return value as Record<string, unknown>;
+}
+
 function validateHash(
   field: string,
   value: unknown,
@@ -1212,7 +1239,10 @@ function hostSafetyIssue(host: string, field: string): ValidationIssue | null {
 }
 
 /** Validated, normalized arguments for a tool call. */
-export type ValidatedArgs = Record<string, string | boolean | string[] | number>;
+export type ValidatedArgs = Record<
+  string,
+  string | boolean | string[] | number | Record<string, unknown>
+>;
 
 /**
  * Validate and normalize a tool call's arguments.
@@ -1300,6 +1330,11 @@ export function validateToolArgs(tool: string, rawArgs: unknown): ValidatedArgs 
       case "integer": {
         const num = validateInteger(field, value, fieldSpec, issues);
         if (num !== undefined) out[field] = num;
+        break;
+      }
+      case "object": {
+        const obj = validateObject(field, value, issues);
+        if (obj !== undefined) out[field] = obj;
         break;
       }
       case "string": {

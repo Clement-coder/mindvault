@@ -98,6 +98,7 @@ import { Mutex } from "./mutex.js";
 import { exportReceiptsTool } from "./receipts.js";
 import { debugBundleTool } from "./debugBundle.js";
 import { onchainPreflightTool } from "./onchainPreflight.js";
+import { deploymentVerificationTool } from "./deploymentVerification.js";
 import { applyMigratedState, migrationPreviewTool } from "./stateMigrationPreview.js";
 import { supportBundleTool } from "./supportBundle.js";
 import { applyRetentionPolicies } from "./retention.js";
@@ -4983,6 +4984,8 @@ async function dispatchToolOutcome(
         return debugBundleTool(rawRecord);
       case "mindvault_onchain_preflight":
         return onchainPreflightTool(rawRecord);
+      case "mindvault_verify_deployment":
+        return deploymentVerificationTool(rawRecord);
       case "mindvault_migration_preview":
         return migrationPreviewTool(rawRecord);
       case "mindvault_support_bundle":

@@ -162,6 +162,8 @@ function sampleValue(spec: ArgumentSpec): unknown {
       return ["mock-1"];
     case "string":
       return "mock-1";
+    case "object":
+      return {};
   }
 }
 

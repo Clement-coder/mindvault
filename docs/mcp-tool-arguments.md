@@ -110,6 +110,7 @@ that want to branch on the failure rather than parse prose.
 | `mindvault_network_profile`       | —                      | —        | takes no arguments                                        |
 | `mindvault_check_bindings`        | —                      | —        | takes no arguments                                        |
 | `mindvault_verify_install`        | —                      | —        | takes no arguments                                        |
+| `mindvault_verify_deployment`     | `manifest`             | no       | expected deployment manifest object (see below)           |
 | `mindvault_check_consistency`     | `resourceId`           | yes      | resource id                                               |
 |                                   | `expectedMetadataHash` | no       | [metadata digest](mcp-metadata-hash.md)                   |
 | `mindvault_registry_lookup`       | `resourceId`           | yes      | resource id                                               |
@@ -129,6 +130,24 @@ that want to branch on the failure rather than parse prose.
 | `mindvault_restore_state`         | `blob`                 | yes      | backup blob (`v1:…`)                                      |
 |                                   | `passphrase`           | yes      | 8–512 characters                                          |
 | `mindvault_metrics`               | `reset`                | no       | flag — clears counters after reading                      |
+
+### Deployment manifest argument
+
+`mindvault_verify_deployment` accepts one optional object argument. Unknown
+fields are rejected. Field-level problems are reported by the tool as a
+machine-readable `invalid_manifest` result, with one error per bad field.
+
+| Field                   | Required | Accepted value                                                                 |
+| ----------------------- | -------- | ------------------------------------------------------------------------------ |
+| `schema`                | no       | `mindvault.deployment-manifest/v1`                                             |
+| `network`               | yes      | `testnet` or `mainnet` (aliases such as `pubnet` are normalized)               |
+| `contractId`            | yes      | Stellar contract ID (`C` followed by 55 base32 characters)                    |
+| `wasmHash`              | yes      | 64 hex characters; case is normalized                                          |
+| `crateVersion`          | yes      | non-empty contract crate version                                               |
+| `resourceSchemaVersion` | yes      | integer ≥ 0                                                                    |
+
+Omit `manifest` to compare against the built-in canonical testnet manifest.
+There is no built-in mainnet manifest.
 
 ### Why resource ids are restricted
 

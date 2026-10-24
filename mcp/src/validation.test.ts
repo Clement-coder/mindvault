@@ -152,6 +152,7 @@ const VALID_CALLS: Record<string, Record<string, unknown>> = {
   mindvault_verify_install: {},
   mindvault_debug_bundle: { auditLogLines: 50, includeEnvironment: true },
   mindvault_onchain_preflight: { requestedSchemaVersion: 7 },
+  mindvault_verify_deployment: {},
   mindvault_migration_preview: {},
   mindvault_support_bundle: { incidentId: "mv-01hq7x9k2m4p6r8t0v2w4y6a8c", auditLines: 100 },
   mindvault_recover_catalog_cache: {},

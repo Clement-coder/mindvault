@@ -148,6 +148,7 @@ pnpm --dir mcp vitest run src/onchainPreflight.test.ts
 
 ## Related
 
+- [Deployment verification](mcp-deployment-verification.md) — live deployment vs expected manifest (`mindvault_verify_deployment`)
 - [Install verification](mcp-verify-install.md) — local install/config checks (`mindvault_verify_install`)
 - [Client configs](mcp-client-configs.md) — copy-ready configs for every MCP client
 - [Environment variables](mcp-env-variables.md) — every variable the server reads
