@@ -4854,6 +4854,13 @@ fn full_workflow_emits_exactly_the_documented_events() {
     client.accept_admin(&admin2);
     record(&env, &client, &mut observed);
 
+    // Nominate then cancel a pending admin nomination (#980) -> "nomcncl".
+    let canceled = Address::generate(&env);
+    client.nominate_new_admin(&canceled);
+    record(&env, &client, &mut observed);
+    client.cancel_admin_nomination(&admin2);
+    record(&env, &client, &mut observed);
+
     client.set_registry_terms_hash(&String::from_str(&env, "regterms")); // -> "setregt"
     record(&env, &client, &mut observed);
 
@@ -4982,6 +4989,8 @@ fn full_workflow_emits_exactly_the_documented_events() {
     client.set_paused_until(&admin2, &200); // -> "pause", "pause_until"
     record(&env, &client, &mut observed);
     client.set_paused(&admin2, &false);
+    record(&env, &client, &mut observed);
+    client.set_maintenance_status(&admin2, &MaintenanceKind::Scheduled, &1u32); // -> "mntstat"
     record(&env, &client, &mut observed);
 
     // Network bootstrap and the creator reactivation path round out the
@@ -10063,13 +10072,14 @@ fn storage_key_variant(env: &Env, key: &DataKey) -> Symbol {
 /// Every `DataKey` variant, with the name and arity it must keep across
 /// upgrades. Adding a variant means adding a row here — the exhaustive match in
 /// `storage_key_migration_covers_every_variant` will not compile until you do.
-fn storage_key_wire_contract(env: &Env) -> [(DataKey, &'static str, u32); 48] {
+fn storage_key_wire_contract(env: &Env) -> [(DataKey, &'static str, u32); 49] {
     let id = String::from_str(env, "migkey");
     let who = Address::generate(env);
     [
         (DataKey::Resource(id.clone()), "Resource", 2),
         (DataKey::Count, "Count", 1),
         (DataKey::Index(0), "Index", 2),
+        (DataKey::IndexRepairProgress, "IndexRepairProgress", 1),
         (DataKey::Admin, "Admin", 1),
         (DataKey::PendingAdmin, "PendingAdmin", 1),
         (DataKey::CreatorTerms(who.clone()), "CreatorTerms", 2),
@@ -10182,7 +10192,7 @@ fn storage_key_migration_covers_every_variant() {
     let contract = storage_key_wire_contract(&env);
     assert_eq!(
         contract.len(),
-        48,
+        49,
         "storage_key_wire_contract must list every DataKey variant"
     );
 
@@ -10191,6 +10201,7 @@ fn storage_key_migration_covers_every_variant() {
             DataKey::Resource(_) => "Resource",
             DataKey::Count => "Count",
             DataKey::Index(_) => "Index",
+            DataKey::IndexRepairProgress => "IndexRepairProgress",
             DataKey::Admin => "Admin",
             DataKey::PendingAdmin => "PendingAdmin",
             DataKey::CreatorTerms(_) => "CreatorTerms",
@@ -11791,8 +11802,12 @@ include!("test/creator_listed_count.rs");
 include!("test/memo_hash.rs");
 include!("test/flag_details.rs");
 include!("test/payment_idempotency.rs");
+include!("test/payment_pause_scope.rs");
+include!("test/simulation_mutation_validation.rs");
 include!("test/stellar_wave_804_805_806_808.rs");
 include!("test/stellar_wave_970_971_975_976.rs");
 include!("test/stellar_wave_981_982_983_984.rs");
+include!("test/stellar_wave_977_978_979_980.rs");
 include!("test/creator_page_filtered.rs");
 include!("test/tag_prefix_search.rs");
+include!("test/pause_scope_matrix.rs");

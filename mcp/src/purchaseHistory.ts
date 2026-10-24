@@ -133,7 +133,9 @@ export function lookupPurchaseByIdempotencyKey(
     );
   }
   const receipts = (options.now ?? listPurchases)().filter((r) => r.clientIdempotencyKey === key);
-  const scoped = options.profile ? receipts.filter((r) => profileOf(r) === options.profile) : receipts;
+  const scoped = options.profile
+    ? receipts.filter((r) => profileOf(r) === options.profile)
+    : receipts;
   const match = scoped[0] ?? null;
 
   if (!match) {
@@ -350,9 +352,7 @@ export function normalizePurchaseHistoryFilter(
     }
     filter.idempotencyKey = args.idempotencyKey.trim();
     if (!filter.idempotencyKey) {
-      throw new PurchaseHistoryError(
-        "Invalid idempotencyKey filter: expected a non-empty string.",
-      );
+      throw new PurchaseHistoryError("Invalid idempotencyKey filter: expected a non-empty string.");
     }
   }
 

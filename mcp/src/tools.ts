@@ -53,6 +53,7 @@ import {
   REGISTRY_COUNT_OUTPUT_SCHEMA,
   REGISTRY_CREATOR_PAGE_OUTPUT_SCHEMA,
   REGISTRY_INFO_OUTPUT_SCHEMA,
+  REGISTRY_ERROR_EXPLANATION_OUTPUT_SCHEMA,
   REGISTRY_LIST_OUTPUT_SCHEMA,
   REGISTRY_TAG_SEARCH_OUTPUT_SCHEMA,
   REGISTRY_LOOKUP_OUTPUT_SCHEMA,
@@ -1660,6 +1661,36 @@ const DEFINED_TOOLS: ToolDefinition[] = [
     inputSchema: { type: "object", properties: {}, required: [] },
     annotations: {
       title: "Registry Health",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+    },
+  },
+  {
+    name: "mindvault_explain_error_code",
+    description:
+      'Explain a vault-registry contract error: what the code means, whether repeating the call can help, and the one step that recovers. A failed Soroban invocation reports only a number, and the number alone cannot say whether to look the resource up, wait for a pause to lift, or stop. Pass exactly one of `code` (the on-chain discriminant) or `name` (e.g. "NotFound"). An unknown code is reported as unknown — with the codes that do exist — instead of being guessed at. Read-only: it explains, it does not act.',
+    inputSchema: {
+      type: "object",
+      properties: {
+        code: {
+          type: "integer",
+          description:
+            "The on-chain error discriminant, e.g. 2 for NotFound or 40 for ContractPaused.",
+          examples: [2, 40],
+        },
+        name: {
+          type: "string",
+          description:
+            'The contract error name instead of its code, e.g. "NotFound" or "ContractPaused".',
+          examples: ["NotFound", "ContractPaused"],
+        },
+      },
+      required: [],
+    },
+    outputSchema: REGISTRY_ERROR_EXPLANATION_OUTPUT_SCHEMA as unknown as Record<string, unknown>,
+    annotations: {
+      title: "Explain Error Code",
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,

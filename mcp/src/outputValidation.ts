@@ -44,6 +44,8 @@ export const TOOL_ERROR_OUTPUT_SCHEMA = {
         summary: { type: "string" },
         detail: { type: ["string", "null"] },
         action: { type: "string" },
+        // The upstream's own request id, when the failure carries one (#1019).
+        requestId: { type: ["string", "null"] },
       },
       required: ["schema", "source", "category", "status", "summary", "detail", "action"],
     },

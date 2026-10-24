@@ -57,6 +57,7 @@ import { usdcToStroops as toStroops } from "../usdcAmount.js";
 import {
   SubmittedTransactionUnconfirmed,
   signAndSendTracked,
+  submittedUnconfirmedResult,
   txStatusLookup,
 } from "../submittedTransaction.js";
 import { txPhaseFields } from "../txPhases.js";
@@ -554,29 +555,52 @@ function makeClient(publicKey: string) {
 interface RegistryTx {
   signAndSend(input: {
     signTransaction: (xdr: string) => Promise<{ signedTxXdr: string }>;
+    watcher?: import("../submittedTransaction.js").SubmissionWatcher;
   }): Promise<{ sendTransactionResponse?: { hash?: string | null } | null } | undefined | null>;
 }
 
+/**
+ * Sign and submit a registry transaction, preserving the transaction hash if
+ * the RPC drops after submission (#1060).
+ *
+ * Returns `{ txHash, unconfirmed }`:
+ *   - `unconfirmed: false` — the transaction confirmed; `txHash` is its hash.
+ *   - `unconfirmed: true`  — the transaction was submitted but could not be
+ *     confirmed; `txHash` is the submitted hash. Callers must return a
+ *     `submittedUnconfirmedResult` instead of a success result so agents know
+ *     not to resubmit and can poll `mindvault_tx_status` instead.
+ *
+ * Both paths go through `signAndSendTracked` so the attempt cap and the
+ * submitted-hash invariant are enforced uniformly: manual and automatic anchor
+ * retry are both bounded by the SDK's own `maxAttempts`, and a resubmit after
+ * a confirmed-but-lost result never happens.
+ */
 async function signAndSendRegistryTx(
   resourceId: string,
   label: string,
   tx: RegistryTx,
   secretKey: string,
-): Promise<string | null> {
+): Promise<{ txHash: string | null; unconfirmed: SubmittedTransactionUnconfirmed | null }> {
   const { Keypair } = await import("@stellar/stellar-sdk");
   const keypair = Keypair.fromSecret(secretKey);
-  let sentTx;
   try {
-    sentTx = await tx.signAndSend({
-      signTransaction: async (xdr: string) => {
-        const { Transaction } = await import("@stellar/stellar-sdk");
-        const stellarTx = new Transaction(xdr, REGISTRY_NETWORK_PASSPHRASE);
-        assertTransactionFeeWithinCeiling({ feeStroops: stellarTx.fee });
-        stellarTx.sign(keypair);
-        return { signedTxXdr: stellarTx.toXDR() };
-      },
-    });
+    const { txHash } = await signAndSendTracked((watcher) =>
+      tx.signAndSend({
+        signTransaction: async (xdr: string) => {
+          const { Transaction } = await import("@stellar/stellar-sdk");
+          const stellarTx = new Transaction(xdr, REGISTRY_NETWORK_PASSPHRASE);
+          assertTransactionFeeWithinCeiling({ feeStroops: stellarTx.fee });
+          stellarTx.sign(keypair);
+          return { signedTxXdr: stellarTx.toXDR() };
+        },
+        watcher,
+      }),
+    );
+    return { txHash, unconfirmed: null };
   } catch (err: any) {
+    if (err instanceof SubmittedTransactionUnconfirmed) {
+      return { txHash: err.txHash, unconfirmed: err };
+    }
     throw mcpError(
       mapRegistryError({
         operation: `${label} submission failed for resource "${resourceId}"`,
@@ -584,8 +608,6 @@ async function signAndSendRegistryTx(
       }),
     );
   }
-  const txHash = sentTx?.sendTransactionResponse?.hash ?? null;
-  return txHash;
 }
 
 export async function updateMetadata(resourceId: string, metadata: string): Promise<string> {
@@ -628,7 +650,19 @@ export async function updateMetadata(resourceId: string, metadata: string): Prom
     );
   }
 
-  const txHash = await signAndSendRegistryTx(resourceId, "Update metadata", tx, wallet.secretKey);
+  const { txHash, unconfirmed } = await signAndSendRegistryTx(
+    resourceId,
+    "Update metadata",
+    tx,
+    wallet.secretKey,
+  );
+  if (unconfirmed) {
+    return JSON.stringify(
+      submittedUnconfirmedResult("Update metadata", resourceId, unconfirmed, { metadata }),
+      null,
+      2,
+    );
+  }
   return JSON.stringify(
     {
       status: "success",
@@ -683,7 +717,19 @@ export async function setPrice(resourceId: string, price: string): Promise<strin
     );
   }
 
-  const txHash = await signAndSendRegistryTx(resourceId, "Set price", tx, wallet.secretKey);
+  const { txHash, unconfirmed } = await signAndSendRegistryTx(
+    resourceId,
+    "Set price",
+    tx,
+    wallet.secretKey,
+  );
+  if (unconfirmed) {
+    return JSON.stringify(
+      submittedUnconfirmedResult("Set price", resourceId, unconfirmed, { price }),
+      null,
+      2,
+    );
+  }
   return JSON.stringify(
     {
       status: "success",
@@ -737,12 +783,19 @@ export async function transferOwnership(resourceId: string, newCreator: string):
     );
   }
 
-  const txHash = await signAndSendRegistryTx(
+  const { txHash, unconfirmed } = await signAndSendRegistryTx(
     resourceId,
     "Transfer ownership",
     tx,
     wallet.secretKey,
   );
+  if (unconfirmed) {
+    return JSON.stringify(
+      submittedUnconfirmedResult("Transfer ownership", resourceId, unconfirmed, { newCreator }),
+      null,
+      2,
+    );
+  }
   return JSON.stringify(
     {
       status: "success",
@@ -1141,7 +1194,19 @@ export async function setListed(resourceId: string, listed: boolean): Promise<st
     );
   }
 
-  const txHash = await signAndSendRegistryTx(resourceId, "Set listed", tx, wallet.secretKey);
+  const { txHash, unconfirmed } = await signAndSendRegistryTx(
+    resourceId,
+    "Set listed",
+    tx,
+    wallet.secretKey,
+  );
+  if (unconfirmed) {
+    return JSON.stringify(
+      submittedUnconfirmedResult("Set listed", resourceId, unconfirmed, { listed }),
+      null,
+      2,
+    );
+  }
   return JSON.stringify(
     {
       status: "success",
@@ -1195,7 +1260,19 @@ export async function acceptTransfer(resourceId: string): Promise<string> {
     );
   }
 
-  const txHash = await signAndSendRegistryTx(resourceId, "Accept transfer", tx, wallet.secretKey);
+  const { txHash, unconfirmed } = await signAndSendRegistryTx(
+    resourceId,
+    "Accept transfer",
+    tx,
+    wallet.secretKey,
+  );
+  if (unconfirmed) {
+    return JSON.stringify(
+      submittedUnconfirmedResult("Accept transfer", resourceId, unconfirmed),
+      null,
+      2,
+    );
+  }
   return JSON.stringify(
     {
       status: "success",
@@ -1248,7 +1325,19 @@ export async function cancelTransfer(resourceId: string): Promise<string> {
     );
   }
 
-  const txHash = await signAndSendRegistryTx(resourceId, "Cancel transfer", tx, wallet.secretKey);
+  const { txHash, unconfirmed } = await signAndSendRegistryTx(
+    resourceId,
+    "Cancel transfer",
+    tx,
+    wallet.secretKey,
+  );
+  if (unconfirmed) {
+    return JSON.stringify(
+      submittedUnconfirmedResult("Cancel transfer", resourceId, unconfirmed),
+      null,
+      2,
+    );
+  }
   return JSON.stringify(
     {
       status: "success",

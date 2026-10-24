@@ -322,6 +322,7 @@ See [`docs/adr-fee-config.md`](../docs/adr-fee-config.md) for the full design ra
 | `pending_admin_expiry()`                                                     | —                                                        | —                                                                                                                                                                                                                                                    | `Option<u32>`                          | Ledger sequence at which the pending admin nomination expires, if one is active.                                                                                                                                                                                                                           |
 | `nominate_new_admin(new_admin)`                                              | current `admin` (or `new_admin` for the first-ever call) | `new_admin: Address`                                                                                                                                                                                                                                 | `Result<(), Error>`                    | If no admin is set yet, bootstraps `new_admin` as admin directly. Otherwise nominates `new_admin` as pending admin; takes effect once they call `accept_admin`. Errors `SameAdmin` / `PendingAdminAlreadySet`.                                                                                           |
 | `accept_admin(new_admin)`                                                    | pending admin                                            | `new_admin: Address`                                                                                                                                                                                                                                 | `Result<(), Error>`                    | Accept a pending admin nomination. Errors `PendingAdminNotSet` if `new_admin` doesn't match the pending nomination.                                                                                                                                                                                      |
+| `cancel_admin_nomination(admin)`                                             | `admin`                                                  | `admin: Address`                                                                                                                                                                                                                                     | `Result<(), Error>`                    | Cancel a pending admin nomination before it is accepted. Only the current admin may call. Clears the nomination so the nominee can no longer `accept_admin`. Errors `PendingAdminNotSet` when no nomination is in flight. Emits `nomcncl`.                                                                 |
 | `bootstrap_dual_admin(admin, recovery_admin)` | `admin` + `recovery_admin` | `admin: Address`, `recovery_admin: Address` | `Result<(), Error>` | Optional dual-key bootstrap: sets the admin and a distinct recovery admin in one call. Only before any admin exists (`AdminAlreadySet`). Emits `setadmin` and `setrecov`. |
 | `recovery_admin()` | — | — | `Option<Address>` | The configured recovery admin, if any. |
 | `set_recovery_admin(recovery_admin)` | `admin` | `recovery_admin: Option<Address>` | `Result<(), Error>` | Set or clear the recovery admin (must differ from admin). Emits `setrecov`. |
@@ -359,8 +360,10 @@ See [`docs/adr-fee-config.md`](../docs/adr-fee-config.md) for the full design ra
 | `set_fee_recipient(recipient)`                                                | `admin`                                                  | `recipient: Option<Address>`                                                                                                                                                                                                                        | `Result<(), Error>`                    | Update only the configured fee recipient while preserving existing fee rates. Errors `FeeConfigNotSet` if no config exists. Emits `setfee`.                                                                                                                                                              |
 | `set_fee_destination(config)`                                                | `admin`                                                  | `config: FeeDestinationConfig` — `bps` share of the platform fee (0–10 000) and `destination` (`None`, `Burn`, or `Charity(address)`)                                                                                                                       | `Result<(), Error>`                    | Set or clear the burn/charity route without changing the base fee config. Emits `setdest`; the event records policy, not token movement.                                                                                                                                                         |
 | `get_fee_destination()`                                                      | —                                                        | —                                                                                                                                                                                                                                                    | `FeeDestinationConfig`                 | Fetch the current fee-destination policy, defaulting to `None` with zero bps.                                                                                                                                                                                                                              |
+| `claim_fees()`                                                               | `admin`                                                  | —                                                                                                                                                                                                                                                    | `Result<i128, Error>`                  | Acknowledge receipt of all accrued platform fees and reset the counter to zero. Required before rotating fee recipient/destination when fees are outstanding. Emits `claimfee`.                                                                                                                          |
+| `get_accrued_fees()`                                                         | —                                                        | —                                                                                                                                                                                                                                                    | `i128`                                 | Read the total accrued platform-fee amount (USDC stroops) settled but not yet claimed.                                                                                                                                                                                                                      |
 | `repair_index(ids)`                                                          | `admin`                                                  | `ids: Vec<String>` — authoritative ordered id list                                                                                                                                                                                                   | `Result<(), Error>`                    | Compatibility full-list repair of the pagination index and `Count`. Rejects duplicates with `DuplicateInRepair`. Emits `reindex`; use only when the complete list fits one transaction.                                                                                                                                                                          |
-| `repair_tag_index(ids)`                                                      | `admin`                                                  | `ids: Vec<String>` — authoritative ordered id list                                                                                                                                                                                                   | `Result<(), Error>`                    | Rebuild tag indexes from registered resources. Emits `retagidx`.                                                                                                                                                                                                                                         |
+| `repair_tag_index(ids)`                                                      | `admin`                                                  | `ids: Vec<String>` — authoritative id list, capped at `MAX_TAG_INDEX_REPAIR` (200)                                                                                                                                                                  | `Result<(), Error>`                    | Rebuild tag indexes from registered resources. Idempotent: input is de-duplicated and processed in canonical id order, so retries with repeated or reordered ids converge to the same index and `retagidx` reports the unique id count. Oversized input is rejected with `BatchTooLarge` before any write. Emits `retagidx`.                                                                 |
 | `check_tag_index(ids)` | — | `ids: Vec<String>` — capped at `MAX_TAG_INDEX_CHECK` (20) | `Result<TagIndexReport, Error>` | Read-only tag-index integrity check. Reports `missing` (resource carries the tag, index omits the id) and `stale` (index lists the id under a tag the resource lacks) separately. Never writes storage. |
 | `record_payment(settler, receipt_id, resource_id, payer, amount, tx_hash)`   | `settler` + `payer`                                      | `settler: Address` — holder of the settler role; `receipt_id: String` — unique, 1-64 bytes; `resource_id: String`; `payer: Address`; `amount: i128` — `> 0`; `tx_hash: String` — 1-128 bytes                                                         | `Result<(), Error>`                    | Record an x402/Soroban payment receipt in `Escrowed` state and index it under `(resource_id, payer)`. Emits `payment` and a `nomemo` provenance warning — prefer `record_payment_with_memo`.                                                                                                                                                                                   |
 | `record_payment_with_memo(settler, receipt_id, resource_id, payer, amount, tx_hash, memo)` | `settler` + `payer` | Same as `record_payment`, plus `memo: String` — the settlement tx `MEMO_TEXT`, must be `mv:<resource_id>` | `Result<(), Error>` | Record a payment receipt whose settlement memo proves which resource was paid for. Errors `InvalidPaymentMemo` on a non-canonical memo. Emits `payment`. |
@@ -395,6 +398,8 @@ See [`docs/adr-fee-config.md`](../docs/adr-fee-config.md) for the full design ra
 | `set_paused_until(admin, pause_until)`                                      | `admin`                                                  | `admin: Address`; `pause_until: u64` — absolute Unix ledger timestamp in seconds                                                                                                                                                                    | `Result<(), Error>`                    | Schedule a pause that automatically resumes at the deadline. Emits `pause` and `pause_until`.                                                                                                                                                                                                            |
 | `is_paused()`                                                                | —                                                        | —                                                                                                                                                                                                                                                    | `bool`                                 | Whether the registry is currently paused.                                                                                                                                                                                                                                                                |
 | `pause_until()`                                                               | —                                                        | —                                                                                                                                                                                                                                                    | `Option<u64>`                          | The active scheduled pause deadline, if one exists.                                                                                                                                                                                                                                                      |
+| `set_maintenance_status(admin, kind, reason_code)`                           | `admin`                                                  | `admin: Address`; `kind: MaintenanceKind` (`None`/`Emergency`/`Scheduled`); `reason_code: u32` — `0..=MAX_MAINTENANCE_REASON_CODE` (255)                                                                                                              | `Result<(), Error>`                    | Record the registry-level maintenance status distinguishing scheduled from emergency pause, with a bounded operator-defined reason code. Errors `InvalidMaintenanceReason` above 255. Emits `mntstat`. Reason codes are a stable, append-only namespace; consumers must ignore unknown codes.               |
+| `maintenance_status()`                                                        | —                                                        | —                                                                                                                                                                                                                                                    | `MaintenanceStatus`                    | The recorded maintenance status (`kind` + `reason_code`). Never blocked by the pause, so reads remain available while paused. Defaults to `None` / `0` when unset.                                                                                                                                        |
 | `initialize_network(network_id)`                                             | —                                                        | `network_id: BytesN<32>`                                                                                                                                                                                                                             | `Result<(), Error>`                    | Pin the contract to one network passphrase digest. One-shot.                                                                                                                                                                                                                                             |
 | `network_id()`                                                               | —                                                        | —                                                                                                                                                                                                                                                    | `Result<BytesN<32>, Error>`            | The configured network id. Errors `NetworkNotInitialized` if unset.                                                                                                                                                                                                                                      |
 
@@ -464,6 +469,13 @@ B      ──accept_admin(B)──────► Admin = B, PendingAdmin cleare
   `AdminNominationExpired` if the gap has not yet elapsed or the nomination has
   expired. Errors `PendingAdminNotSet` if the caller does not match the pending
   nomination.
+- **Cancel (optional)**: The current admin may withdraw an in-flight
+  nomination with `cancel_admin_nomination(admin)` before it is accepted.
+  Clears `pending_admin`, its expiry, and its nominated-at ledger so the
+  nominee can no longer `accept_admin` (which then fails with
+  `AdminNominationExpired`). Errors `PendingAdminNotSet` when no nomination is
+  in flight — "nothing to cancel" is a stable, distinguishable failure rather
+  than a silent no-op. Emits `nomcncl` with `(nominee, admin)` for indexers.
 
 #### Optional dual-key bootstrap
 
@@ -702,12 +714,13 @@ if (page.next_cursor !== null) {
 | `54` | `UnsupportedResourceSchema`      | A resource uses a schema version this deployment cannot safely read or upgrade.          |
 | `55` | `RevisionOverflow`               | A listing revision increment would exceed `u32::MAX`; the mutation is rejected without changing resource state. |
 | `56` | `RoleCapacityReached`           | A role grant would exceed `MAX_ROLE_HOLDERS` (32) active holders for that role. |
+| `56` | `UnclaimedFees`                 | A fee-recipient or fee-destination change was attempted while accrued fees remain unclaimed. Call `claim_fees` first, then retry. |
 
 #### Error budget
 
 This enum is declared with `#[contracterror(export = false)]`. The protocol
 caps a *spec-exported* contract error enum at 50 cases
-(`ScSpecUdtErrorEnumV0.cases` is `VecM<_, 50>`), and codes `1`–`55` are all
+(`ScSpecUdtErrorEnumV0.cases` is `VecM<_, 50>`), and codes `1`–`56` are all
 allocated, so a spec-exported `#[contracterror]` would fail to compile with
 `LengthExceedsMax` on a `51` variant. Disabling the spec export keeps the
 contract buildable; the discriminants and names below remain the on-wire
@@ -719,6 +732,10 @@ recovery features landed: `InvalidMetadataPointers` (51), `AdminAlreadySet`
 (52), `RecoveryAdminNotSet` (53), `UnsupportedResourceSchema` (54), and
 `RevisionOverflow` (55). They are distinct failure modes, so folding them
 into a broader existing code would hide the cause from callers.
+
+Code `56` (`UnclaimedFees`) was added for the accrued-fee guard (#985):
+it blocks fee-recipient/destination rotation while settled fees remain
+unclaimed, with `claim_fees` as the safe migration path.
 
 Plan new validation around an existing code where the semantics genuinely fit,
 or prefer a behavior that needs no new code (a documented no-op, or folding the
@@ -787,6 +804,7 @@ apart, so update all three together.
 | `setptrs` | `MetadataPointers { pointers, primary }` (topic carries resource id) | `set_metadata_pointers()` succeeds |
 | `nomadmin`  | `new_admin: Address`                                                                     | A subsequent `nominate_new_admin()` call succeeds          |
 | `accadmin`  | `new_admin: Address`                                                                     | `accept_admin()` succeeds                                  |
+| `nomcncl`   | `(nominee: Address, admin: Address)`                                                     | `cancel_admin_nomination()` succeeds                       |
 | `netinit`   | `network_id: BytesN<32>`                                                                 | `initialize_network()` succeeds                            |
 | `freeze`    | `()`                                                                                     | `freeze_metadata()` succeeds                               |
 | `verify`    | `(old_status: VerificationStatus, new_status: VerificationStatus, attestation_hash: Option<String>)` | `set_verification_status()` succeeds                       |
@@ -802,6 +820,7 @@ apart, so update all three together.
 | `rmsettlr` | `RoleChange { admin, target, granted: false }` (topic also carries target) | `remove_settler()` succeeds |
 | `pause`     | `(paused: bool, admin: Address)`                                                         | `set_paused()` succeeds (including no-op transitions)      |
 | `pause_until` | `(pause_until: u64, admin: Address)`                                                   | `set_paused_until()` succeeds                              |
+| `mntstat`   | `MaintenanceStatusEvent { kind, reason_code, admin }`                                    | `set_maintenance_status()` succeeds                        |
 | `anchor`    | `PurchaseReceiptAnchor { resource_id, buyer, receipt_hash, ledger }`                     | `anchor_purchase_receipt()` succeeds                       |
 | `anchrfail` | `AnchorFailure { resource_id, buyer, receipt_hash, reason, ledger }`                     | `attempt_anchor_purchase_receipt()` rejects an anchor      |
 | `addmod` | `RoleChange { admin, target, granted: true }` (topic also carries target) | `add_moderator()` succeeds |
@@ -809,10 +828,11 @@ apart, so update all three together.
 | `flag`      | `FlagEvent { id, moderator, reason }`                                                    | `flag_resource()` succeeds                                 |
 | `unflag`    | `resource id`                                                                            | `unflag_resource()` succeeds                               |
 | `flagrsn`   | `(moderator: Address, reason_hash: String)`                                              | `set_flag_reason_hash()` succeeds                          |
-| `retagidx`  | `new_count: u32`                                                                         | `repair_tag_index()` succeeds                              |
+| `retagidx`  | `new_count: u32` — unique id count, never the raw input length                            | `repair_tag_index()` succeeds                              |
 | `reactive`  | `resource id`                                                                             | `reactivate_resource()` succeeds                           |
 | `setfee`    | `FeeConfigUpdated { old_config, new_config }`                                            | `set_fee_config()` or `set_fee_recipient()` succeeds       |
 | `setdest`   | `FeeDestinationUpdated { old_destination, new_destination, ledger }`                    | `set_fee_destination()` succeeds                          |
+| `claimfee`  | `FeesClaimed { claimed_amount, remaining_amount }`                                      | `claim_fees()` succeeds                                   |
 | `ttlext`    | `()`                                                                                     | `extend_resource_ttl()` succeeds                           |
 | `txfrterms` | `TransferWithTermsEvent { id, previous_owner, new_owner, terms_hash, attestation_reset }` | `transfer_ownership_with_terms()` succeeds                |
 
@@ -1352,6 +1372,9 @@ When paused, every write method (`register`, `set_price`, `update_metadata`,
 `repair_index`, `set_terms_hash`, `record_payment`, `record_payment_idempotent`)
 returns `Error::ContractPaused` (code `40`) without modifying any state.
 
+The payment, refund, lease and anchor methods are covered too — see the
+**Pause scope matrix** below for the exact scope of the pause.
+
 Read-only methods (`get`, `exists`, `list*`, `count`, `get_owner`, `registry_info`,
 `contract_version`, `get_terms_hash`, `get_payment_receipt`, `is_flagged`,
 `flag_details`, `is_paused`, `is_verifier`, `admin`, `pending_admin`) remain
@@ -1363,8 +1386,59 @@ with data `(paused: bool, admin: Address)` on every call, including no-op
 transitions. `set_paused_until` additionally emits a `pause_until` event with
 data `(pause_until: u64, admin: Address)`.
 
+Once a scheduled deadline is observed expired, the pause is latched closed
+immediately: the stored `PauseUntil` entry is cleared and the effective pause
+state can never oscillate back to active after a ledger-timestamp rollback.
+Deadline equality (`pause_until == timestamp`) counts as expired, matching
+`set_paused_until`'s "at or before now resumes" rule.
+
+Separately, the admin can record an auditable registry-level maintenance
+status with `set_maintenance_status(admin, kind, reason_code)`. `kind`
+distinguishes a `Scheduled` pause from an `Emergency` pause (or `None` when
+cleared); `reason_code` is a bounded operator-defined code
+(`0..=255`) in a stable, append-only namespace — a published code never
+changes meaning, and consumers must ignore unknown codes rather than treating
+them as errors. Reads via `maintenance_status()` work while the registry is
+paused. Emits `mntstat`.
+
 Only the current admin can call `set_paused`. Errors `AdminNotSet` if no admin
 has been set, or `Unauthorized` if the caller does not match the stored admin.
+
+### Pause scope matrix
+
+The emergency pause is global and it is not advisory: while the registry is
+paused, every state-changing method in the payment, refund, lease and anchor
+families is refused with `Error::ContractPaused` (code `40`) and leaves the
+registry completely unchanged — no receipt, no secondary index, no refund
+record, no lease, no anchor, no counter. The matrix below is the published
+scope of the pause; the contract test `pause_scope_matrix_refuses_every_money_path_and_changes_nothing`
+runs every row twice, once on a live registry (the control) and once on a
+paused registry, and compares the registry state before and after the paused
+calls. `readme_pause_scope_matrix_matches_contract` fails when this table and
+that matrix drift apart.
+
+| Method | Family | Authority | Refused while paused |
+| --- | --- | --- | --- |
+| `record_payment` | payment | settler, payer | yes |
+| `record_payment_idempotent` | payment | settler, payer | yes |
+| `settle_payment` | payment | settler | yes |
+| `set_refund_window` | refund | admin | yes |
+| `record_creator_refund` | refund | creator | yes |
+| `record_admin_refund` | refund | admin | yes |
+| `buy_lease` | lease | holder | yes |
+| `record_lease` | lease | settler, holder | yes |
+| `settle_lease` | lease | settler | yes |
+| `revoke_lease` | lease | creator | yes |
+| `anchor_purchase_receipt` | anchor | verifier | yes |
+| `attempt_anchor_purchase_receipt` | anchor | verifier | yes |
+| `override_purchase_receipt_anchor` | anchor | admin | yes |
+| `record_anchor_failure` | anchor | settler | yes |
+| `retry_anchor_purchase_receipt` | anchor | settler | yes |
+
+Read-only methods are never refused by the pause: `get`, `exists`, `count`,
+`list*`, `get_payment`, `get_refund`, `get_lease`, `get_purchase_receipt`,
+`get_anchor_failure` and `is_paused` keep answering while the registry is
+paused, so a monitor can still see the state the pause is protecting.
 
 ### Generating bindings
 

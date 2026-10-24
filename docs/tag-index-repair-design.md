@@ -84,17 +84,24 @@ tags`); unlike the pagination index, the contract does not need to be told
   pagination index is positional (a duplicate id would silently overwrite
   one slot with another, corrupting order), while a tag index has set
   semantics per tag (re-indexing the same id twice is idempotent, not
-  corrupting) — so duplicate ids in the input are harmless and may be
-  allowed rather than rejected.
+  corrupting) — so duplicate ids in the input are harmless and are
+  de-duplicated rather than rejected. The input is also processed in
+  canonical (byte-sorted) id order, so a call whose id list is a permutation
+  of, or contains duplicates of, a previous call rebuilds exactly the same
+  `TagIndex` entries: repeated repair calls converge to the same index and
+  cannot inflate tag popularity. Input is bounded by `MAX_TAG_INDEX_REPAIR`
+  (200) ids and rejected with `BatchTooLarge` before any storage is written.
 - **Effect**: for each input id, remove it from the `TagIndex` entry of any
   tag it no longer carries, then ensure it is present in the `TagIndex`
   entry of every tag it currently carries. `Resource.tags` is read for its
   current value only — never written, never deleted — the same
   derived-vs-canonical boundary `repair_index` maintains for the pagination
   index.
-- **Events**: a structured event (e.g. `("retagidx", ids.len())`) so
+- **Events**: a structured event (e.g. `("retagidx", unique_count)`) so
   operators and off-chain audit tooling can see when and how broad a repair
-  ran, mirroring `repair_index`'s `reindex` event.
+  ran, mirroring `repair_index`'s `reindex` event. The payload is the unique
+  id count — never the raw input length — so repeated retries with duplicated
+  ids cannot inflate the reported breadth.
 
 ## Migration notes: tag rule changes across contract versions
 

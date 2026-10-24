@@ -287,11 +287,19 @@ status. Fields only the failed endpoint carries come back `null` — the
 ### A submitted transaction that cannot be confirmed
 
 Registry mutations (`mindvault_update_metadata`, `mindvault_set_price`,
-`mindvault_transfer_ownership`, `mindvault_set_listed`, `mindvault_set_tags`)
-and the `register_batch` step of `mindvault_publish_batch` sign a transaction,
-submit it with `sendTransaction`, then poll `getTransaction` until it lands.
-A submit is never retried. It is not idempotent, and a second submit would be
-a second transaction.
+`mindvault_transfer_ownership`, `mindvault_set_listed`, `mindvault_accept_transfer`,
+`mindvault_cancel_transfer`) and the `register_batch` step of `mindvault_publish_batch`
+sign a transaction, submit it with `sendTransaction`, then poll `getTransaction`
+until it lands. A submit is never retried. It is not idempotent, and a second
+submit would be a second transaction.
+
+All of these mutations go through `signAndSendTracked` (in
+[`mcp/src/submittedTransaction.ts`](../mcp/src/submittedTransaction.ts)), which
+captures the transaction hash the moment `sendTransaction` returns via the SDK's
+`onSubmitted` hook. This is the single entry point for all anchor retry paths:
+manual retries (an agent calling the tool again after a failure) and automatic
+retries (the SDK's own internal polling) are both bounded by the same submitted-hash
+invariant. Neither path can bypass it.
 
 If the poll times out, or the RPC goes away after the network accepted the
 transaction, the outcome is unknown but the transaction hash is known. The tool
@@ -363,6 +371,13 @@ MindVault MCP: retrying GET /resources — attempt 2/3 failed (HTTP 503); next a
   RPC loss and poll timeout after submit, run through the SDK's own
   `SentTransaction`, return the hash and a `mindvault_tx_status` lookup
   instead of an error
+- [`mcp/src/tools/anchorRetry.test.ts`](../mcp/src/tools/anchorRetry.test.ts) —
+  all six single-resource registry mutations (`update_metadata`, `set_price`,
+  `transfer_ownership`, `set_listed`, `accept_transfer`, `cancel_transfer`)
+  exhausted through both entry points (submitted-but-unconfirmed and confirmed):
+  every unconfirmed path returns `status: "submitted"` with the hash and
+  `statusLookup`, never resubmits, and the confirmed path returns
+  `status: "success"` with `txPhase: "settled"`
 - [`mcp/src/publishStatusRetry.test.ts`](../mcp/src/publishStatusRetry.test.ts) —
   `mindvault_publish_status` stopping at a terminal status while a companion
   request exhausts its retries

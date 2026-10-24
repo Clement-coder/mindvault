@@ -200,6 +200,14 @@ can reconstruct the full audit trail from events alone.
 - `fee_recipient` is optional; if `None`, the contract does not specify where
   the platform fee goes. Off-chain settlement should treat `None` as "no
   platform fee collected."
+- **Active-lease price-floor guard (#991).** `set_fee_config` is rejected with
+  `LeaseFeeConfigConflict` if the new combined `platform_fee_bps + royalty_bps`
+  is ≥ the `ActiveLeasePriceFloor` — the minimum resource price among all
+  resources with open (Pending or unexpired Active) leases. This prevents a fee
+  change from retroactively invalidating the price terms under which existing
+  leases were sold. The floor is lowered whenever a new lease is created on a
+  cheaper resource; it is conservative (never raised) and persists after leases
+  expire, so the admin may see a stale restriction in rare edge cases.
 
 ### Future extensions
 
@@ -209,6 +217,61 @@ can reconstruct the full audit trail from events alone.
   effective config at any given ledger sequence.
 - Integration with a settlement contract that reads `get_fee_config()` and
   applies the split atomically in a single Soroban transaction.
+
+---
+
+## Accrued-Fee Guard (#985)
+
+### Problem
+
+Because the registry is a metadata contract (it describes the fee split but
+does not custody USDC), the actual token movement happens off-chain via the
+x402 facilitator. When `settle_payment` transitions a receipt to `Settled`,
+the facilitator has already routed the platform-fee portion to the configured
+`fee_recipient`. If the admin then rotates the `fee_recipient` (or changes the
+`fee_destination`) _before_ the current recipient has confirmed receipt of
+those funds, the accrued fees become unreachable — the old recipient no longer
+has a claim, and the new recipient never received them.
+
+### Solution
+
+The contract now **tracks accrued platform fees** in instance storage
+(`DataKey::AccruedFees`, an `i128` USDC-stroops counter). Every
+`settle_payment` call adds `amount * platform_fee_bps / FEE_BPS_DENOM` to the
+counter (only when `platform_fee_bps > 0` and `fee_recipient` is set).
+
+**Guard**: `set_fee_config` (when `fee_recipient` changes), `set_fee_recipient`,
+and `set_fee_destination` all call `require_no_unclaimed_fees()` before
+mutating state. If `AccruedFees > 0`, the call reverts with `UnclaimedFees`
+(error 51).
+
+**Safe migration path**: The admin calls `claim_fees()` to acknowledge that
+the current fee recipient has received all outstanding amounts. This resets
+`AccruedFees` to 0 and emits a `claimfee` event. After claiming, the
+configuration change can proceed.
+
+The read-only `get_accrued_fees()` lets off-chain indexers and the MCP layer
+display the outstanding balance so operators know when a claim is needed
+before rotating.
+
+### New API
+
+| Function | Auth | Description |
+| --- | --- | --- |
+| `claim_fees()` | admin | Reset accrued fees to 0, emit `claimfee`, return claimed amount. |
+| `get_accrued_fees()` | — | Read the current accrued-fee balance. |
+
+### New error
+
+| Code | Name | Description |
+| --- | --- | --- |
+| 51 | `UnclaimedFees` | Fee-recipient/destination change blocked because accrued fees > 0. |
+
+### New event
+
+| Topic | Payload | When |
+| --- | --- | --- |
+| `claimfee` | `FeesClaimed { claimed_amount, remaining_amount }` | `claim_fees()` succeeds |
 
 ---
 
