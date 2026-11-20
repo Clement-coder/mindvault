@@ -156,6 +156,49 @@ Expected response (array):
 ]
 ```
 
+### Paginate through the catalog
+
+`GET /resources` returns a JSON array for the current page. Set `limit` (1–100,
+default 20) and `offset` (zero-based, default 0). Read the response headers to
+know whether to request another page:
+
+- `X-Total-Count`: number of listed resources matching the filters, before
+  pagination;
+- `X-Limit` and `X-Offset`: the page size and starting position used;
+- `X-Next-Offset`: starting position for the next page, present only when more
+  matching results remain.
+
+For example, fetch the first two results and inspect the pagination headers:
+
+```bash
+curl -sS -D /tmp/mindvault-headers \
+  "$BASE/resources?limit=2&offset=0" \
+  -o /tmp/mindvault-page.json
+cat /tmp/mindvault-headers | grep -iE '^x-(total-count|limit|offset|next-offset):'
+jq '[.[] | {id, title, price}]' /tmp/mindvault-page.json
+```
+
+Use the returned `X-Next-Offset` value as the next request's `offset`. Keep the
+same filters, sort order, and page size while walking the result set:
+
+```bash
+NEXT_OFFSET=$(awk 'tolower($1) == "x-next-offset:" { gsub("\\r", "", $2); print $2 }' /tmp/mindvault-headers)
+if [ -n "$NEXT_OFFSET" ]; then
+  curl -sS -D /tmp/mindvault-headers \
+    "$BASE/resources?limit=2&offset=$NEXT_OFFSET" \
+    -o /tmp/mindvault-page.json
+  jq '[.[] | {id, title, price}]' /tmp/mindvault-page.json
+fi
+```
+
+To resume after a client restart, persist the last `X-Next-Offset` together with
+the query filters and sort order, then send that offset on the next request. If
+`X-Next-Offset` is absent, there was no next page at the time of the request.
+This is offset pagination, not a snapshot cursor: resources can be listed or
+delisted between requests, which can shift offsets and cause duplicates or
+skips. Restart from `offset=0` when you need a fresh traversal after catalog
+changes. The API does not accept an opaque `cursor` query parameter.
+
 ### Searching and filtering
 
 `GET /resources` accepts optional query parameters that narrow the catalog. They can be combined; supported HTTP filters are applied **server-side** before the response is returned. The MCP `mindvault_browse` and `mindvault_search` tools apply `tags` and `listed` client-side after receiving the server results. (The web app's `CatalogSearch` UI and the MCP `mindvault_search` tool send these same server-supported parameters.)
@@ -178,7 +221,8 @@ Price bounds are compared numerically, so equivalent decimal strings such as `"0
 
 ```bash
 # Verified links priced between 0.10 and 1.00 USDC that mention "dataset"
-curl -s "$BASE/resources?search=dataset&verificationStatus=verified&resourceType=link&minPrice=0.10&maxPrice=1.00" \
+curl -sS -D /tmp/mindvault-headers \
+  "$BASE/resources?search=dataset&verificationStatus=verified&resourceType=link&minPrice=0.10&maxPrice=1.00&sort=newest&limit=20&offset=0" \
   | jq '[.[] | {id, title, price, resourceType, verificationStatus}]'
 ```
 
@@ -188,6 +232,12 @@ Notes and current limitations:
 - Unknown query parameters are rejected (the schema is strict).
 - Filtering runs **in memory over the listed set** on each request — there is no full-text/database search index yet, so this is appropriate at the current catalog scale rather than a scalable search backend.
 - The web search box is labelled "Search by title…", but the server also matches the description.
+
+The HTTP query contract is defined by
+[`catalogQuerySchema`](../server/src/schemas/requests.ts) and the route's
+response headers by [`GET /resources`](../server/src/routes/resources.ts).
+Pagination behavior is covered in
+[`resources.catalog.test.ts`](../server/src/routes/resources.catalog.test.ts).
 
 ---
 
