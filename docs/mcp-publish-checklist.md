@@ -158,14 +158,25 @@ Details in [docs/mcp-provenance.md](mcp-provenance.md).
 - [ ] The [tool argument contract](mcp-tool-arguments.md) matches the tool
       surface — `validation.test.ts` fails if the two drift
 - [ ] The README tool table lists any new tools
+- [ ] Client-visible MCP contract changes follow the
+      [MCP protocol change policy](mcp-protocol-change-policy.md), including
+      compatibility notes and client migration guidance where needed
 
 ## 9. Release
 
-- [ ] Version bumped, CHANGELOG/release notes written
+- [ ] Classify the client-visible change using the
+      [MCP protocol change policy](mcp-protocol-change-policy.md); document
+      compatibility and operational implications in release notes
 - [ ] `pnpm prepublish:check --smoke` passes end to end
-- [ ] Publish with `pnpm publish --access public` from `mcp/`
-- [ ] Install the published package in a scratch directory and run it once
-      before announcing it
+- [ ] Merge using the repository's Conventional Commit PR title policy.
+      The `release-please` workflow on `main` opens or updates the release PR
+      and version/changelog files; merge that PR to create the GitHub release
+- [ ] If publishing `@mindvault/mcp` to npm is intended, resolve the
+      [`workspace:*` dependency blocker](#known-blocker), publish only after
+      the dependency is externally resolvable, and install the resulting
+      tarball from a scratch directory before announcing it. The repository's
+      release workflow creates GitHub releases; it does not publish this npm
+      package automatically.
 
 ---
 

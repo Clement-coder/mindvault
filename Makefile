@@ -61,6 +61,8 @@ validate:
 	pnpm run lint
 	@echo "==> Checking doc links..."
 	pnpm run docs:links
+	@echo "==> Checking generated MCP tool docs..."
+	pnpm --filter @mindvault/mcp check-tool-docs
 	@echo ""
 	@echo "All checks passed."
 

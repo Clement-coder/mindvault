@@ -180,6 +180,12 @@ The release workflow:
 
 No manual release steps are required—just follow the Conventional Commits format for your PR titles and commit messages.
 
+For changes to the MCP tools, prompts, resources, schemas, annotations, or
+transport behavior, follow the [MCP protocol change policy](docs/mcp-protocol-change-policy.md)
+and [MCP package publish checklist](docs/mcp-publish-checklist.md). The latter
+distinguishes the repository's GitHub release workflow from optional npm
+publishing of `@mindvault/mcp`.
+
 ## Security
 
 - Never commit secrets. Only `*.env.example` files belong in git.
