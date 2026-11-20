@@ -7,15 +7,18 @@ on-chain Stellar registry.
 
 The reconciliation script walks every resource in the Postgres database that is
 marked as `onchain_status = "registered"`, fetches the matching entry from the
-`vault-registry` Soroban contract on Stellar testnet, and compares the two
-sources of truth. For each registered DB resource it detects one of three
-outcomes:
+`vault-registry` Soroban contract on the configured Stellar network, and
+compares the two sources of truth. For each registered DB resource it compares
+price and creator wallet and reports these outcomes:
 
-- **In sync** — the on-chain entry exists and its price matches the DB price
-  (after converting the DB string price to stroops).
+- **In sync** — the on-chain entry exists and its price and creator wallet
+  match the DB values (the DB string price is converted to stroops).
 - **Price mismatch** — the on-chain entry exists but its price differs from the
   DB price. This usually means a `set_price` transaction succeeded on-chain but
   the DB was not updated (or vice versa).
+- **Owner mismatch** — the on-chain creator differs from the DB
+  `walletAddress`, which can follow an ownership transfer that did not finish
+  updating both systems.
 - **Missing on-chain** — the DB row says `registered`, but the contract has no
   entry for that resource ID. This typically points to a confirmed-then-rolled-back
   registration, or a bug in the registration flow that flipped the DB status
@@ -28,6 +31,8 @@ entries than the DB, the script flags this as a "missing in DB" delta. The
 cannot list the specific IDs that exist on-chain but not in the DB — only the
 count gap is reported. Operators must investigate orphan on-chain entries
 manually (e.g. via the Stellar Explorer or by replaying registration events).
+It also reports **listing drift** when a DB row is marked `listed = true` but
+its `onchain_status` is not `registered`.
 
 **Reconciliation is read-only.** The script never writes to the database or
 submits a transaction. Any discrepancy must be resolved manually — see
@@ -101,8 +106,10 @@ Run at: 2026-05-28T10:32:00.000Z
 Resources checked:      42
 In sync:                39
 Price mismatches:       2
+Owner mismatches:       0
 Missing on-chain:       1
 Missing in DB:          0
+Listing drift:          0
 
 MISMATCHES (2)
 ----------------------------------------
@@ -132,20 +139,23 @@ What each line means:
   run.
 - **Resources checked** — total number of DB rows with
   `onchain_status = "registered"` that were inspected.
-- **In sync** — count of rows whose on-chain price matches the DB price after
-  the USDC→stroops conversion.
+- **In sync** — count of rows whose on-chain price and creator wallet match
+  the DB values after USDC→stroops conversion.
 - **Price mismatches** — count of rows where both the DB and the chain have an
   entry but the prices differ.
 - **Missing on-chain** — count of rows that claim `registered` in the DB but
   for which the contract returns no entry.
 - **Missing in DB** — count delta between `count()` on-chain and the DB's
   registered count, when the chain has more entries than the DB. The contract
-  has no enumeration method, so this section reports a single placeholder
-  entry stating how many orphans exist rather than listing their IDs.
-- **MISMATCHES / MISSING ON-CHAIN / MISSING IN DB** sections — only printed
-  when their respective count is greater than zero. Each entry lists the
-  resource ID, the relevant prices, and the publisher wallet so an operator
-  can identify the offending row quickly.
+  has no enumeration method, so this reports one placeholder with the delta,
+  not the resource IDs.
+- **Listing drift** — a listed DB row whose `onchain_status` is not
+  `registered`; this is a signal to investigate whether public visibility or
+  registration state is wrong.
+- **MISMATCHES / OWNER MISMATCHES / MISSING ON-CHAIN / MISSING IN DB / LISTING
+  DRIFT** sections — printed when their respective count is greater than zero.
+  They include relevant IDs and values, except that `MISSING IN DB` is a count
+  delta only.
 - **Result** — final verdict. `ALL CLEAR` when there are zero issues,
   `NEEDS ATTENTION (<n> issues found)` otherwise.
 
@@ -159,8 +169,10 @@ Run at: 2026-05-28T10:32:00.000Z
 Resources checked:      42
 In sync:                42
 Price mismatches:       0
+Owner mismatches:       0
 Missing on-chain:       0
 Missing in DB:          0
+Listing drift:          0
 ========================================
 Result: ALL CLEAR
 ```
@@ -178,26 +190,13 @@ or a scheduled health check — see [Running in CI](#running-in-ci).
 
 ## Fixing discrepancies
 
-The reconciliation script is reporting-only. It will never call `set_price`,
-flip an `onchain_status` field, or otherwise mutate state. Each finding must
-be resolved by hand:
-
-- **Price mismatch** — decide which side is canonical. If the chain price is
-  the intended one, update the DB row's `price` column to match. If the DB
-  price is the intended one, have the publisher submit a `set_price`
-  transaction via `POST /resources/:id/price/prepare` and
-  `POST /resources/:id/price` (see
-  [creator-signed-registration-flow.md](creator-signed-registration-flow.md)
-  for the prepare/submit pattern).
-- **Missing on-chain** — the DB believes the resource is registered but the
-  contract has no entry. Re-trigger registration by calling
-  `POST /resources/:id/register/prepare` and
-  `POST /resources/:id/register`. Confirm by re-running `pnpm reconcile`.
-- **Missing in DB** — an on-chain entry has no DB counterpart. Because the
-  contract does not expose enumeration, you will need to identify the orphan
-  ID(s) from another source — the Stellar Explorer, a saved transaction
-  receipt, or an audit log — then either insert the matching DB row manually
-  or, if the entry is truly garbage, leave it on-chain and document the gap.
+The reconciliation script is reporting-only: it never calls `set_price`, flips
+an `onchain_status` field, or otherwise mutates state. Do not change either
+system just to clear a finding; establish the intended value from authorized
+operations and transaction evidence first. Follow the
+[Registry/API Divergence Incident Runbook](registry-api-divergence-runbook.md)
+for evidence collection, finding classification, controlled recovery, and
+post-repair verification.
 
 ## Running in CI
 

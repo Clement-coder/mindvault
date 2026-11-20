@@ -196,6 +196,7 @@ Wallet helpers live in `server/scripts/generate-wallet.ts` (run via `make wallet
 ## Operations
 
 - **Reconciliation**: see [docs/reconciliation.md](docs/reconciliation.md) — detects and reports drift between the DB and the on-chain [vault registry](docs/GLOSSARY.md#vault-registry); run with `pnpm reconcile` from `server/`.
+- **Registry/API incidents**: see [docs/registry-api-divergence-runbook.md](docs/registry-api-divergence-runbook.md) — scope divergence, verify the deployment, collect evidence, and recover database/registry state safely.
 - **Deployment runbook**: see [docs/deployment-runbook.md](docs/deployment-runbook.md) — step-by-step guide to deploy the full stack (contract + server + frontend + MCP) to a new Stellar network.
 - **Contract upgrade checklist**: see [docs/contract-upgrade-checklist.md](docs/contract-upgrade-checklist.md) — preflight checks before deploying a new vault-registry WASM (build, optimize, test, network, contract ID, binding regeneration).
 - **Contract storage footprint**: see [docs/contract-storage-footprint.md](docs/contract-storage-footprint.md) — what each vault-registry ledger entry costs in XDR bytes, and the budgets that keep it from growing silently; regenerate with `make footprint`.
