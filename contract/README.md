@@ -429,10 +429,34 @@ transactions rather than contract-held escrow.
 
 ### Roles
 
-Three roles sit alongside the per-resource `creator` and the pre-existing admin:
+Authorization is enforced by the contract with Soroban address authorization
+and role/ownership checks. The per-method **Auth** column above is exhaustive
+and checked against `METHOD_SCHEMA` by the `readme_methods_table_matches_method_schema`
+contract test. For the grouped authorization matrix, special multi-signer
+operations, and governance implications, see
+[`docs/contract-roles-authorization.md`](../docs/contract-roles-authorization.md).
 
-- **admin** — set via `nominate_new_admin` (see above). Can grant/revoke or rotate the verifier role (`add_verifier`/`remove_verifier`/`rotate_verifier`), repair the pagination index (`repair_index`) or tag index (`repair_tag_index`), set the registry fee config (`set_fee_config`), configure refund windows, and record admin-override refunds. Cannot mutate any resource's price, metadata, listing, tags, or ownership.
-- **verifier** — zero or more addresses granted by the admin. Can call `set_verification_status` and `anchor_purchase_receipt`. Cannot touch price, metadata, listing, tags, ownership, or the admin/verifier role list itself.
+- **creator** — the per-resource owner, not a globally granted role. The
+  current creator authorizes resource registration and mutations, ownership
+  transfers, creator terms, and creator-authorized refund/lease operations.
+- **admin** — the governance address established by `nominate_new_admin` (or
+  optional dual-key bootstrap). It manages roles, configuration, pauses,
+  index repair, and explicitly scoped moderation/override operations. Admin
+  status does not grant creator rights over a resource.
+- **recovery admin** — optional distinct governance key used only by
+  `recover_admin`; it does not inherit normal admin permissions.
+- **verifier** — zero or more addresses granted by the admin. It sets
+  verification status and handles purchase-receipt anchoring; it cannot change
+  price, metadata, listing, tags, or ownership.
+- **moderator** — zero or more addresses granted by the admin. It manages
+  resource flags and flag-reason hashes; forced resolution is admin-only.
+- **settler** — zero or more addresses granted by the admin. It records and
+  settles payment/lease operations, with payer or holder authorization also
+  required for the corresponding combined-signer methods.
+
+The method-table auth marker `—` means no explicit address authorization is
+required; it does not guarantee a method is read-only. `initialize_network` is
+a one-time, ledger-network-checked write with no explicit signer requirement.
 
 ### Role management flows
 
